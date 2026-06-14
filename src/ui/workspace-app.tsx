@@ -266,7 +266,11 @@ function AppRoot() {
             </span>
           </span>
           <SummaryBadges card={card} />
-          <ChevronIcon expanded={expanded} visible={expandable} />
+          {loadState === "loading" ? (
+            <LoadingSpinner visible={expandable} />
+          ) : (
+            <ChevronIcon expanded={expanded} visible={expandable} />
+          )}
         </button>
 
         {expanded ? (
@@ -469,6 +473,16 @@ function IconSvg({
     >
       {children}
     </svg>
+  );
+}
+
+function LoadingSpinner({ visible }: { visible: boolean }) {
+  if (!visible) return <span className="chevron" aria-hidden="true" />;
+
+  return (
+    <span className="chevron spinner" aria-hidden="true">
+      <span className="spinner-ring" />
+    </span>
   );
 }
 
