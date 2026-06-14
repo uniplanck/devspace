@@ -29,6 +29,7 @@ import {
   createResultStore,
   type ToolResultStore,
 } from "./result-store.js";
+import { createWorkspaceStore } from "./workspace-store.js";
 import { formatAgentsNotice, WorkspaceRegistry } from "./workspaces.js";
 
 type Transport = StreamableHTTPServerTransport;
@@ -1118,7 +1119,8 @@ export function createServer(config = loadConfig()): RunningServer {
     allowedHosts: Array.from(new Set([config.host, ...config.allowedHosts])),
   });
   const transports = new Map<string, Transport>();
-  const workspaces = new WorkspaceRegistry(config);
+  const workspaceStore = createWorkspaceStore(config.stateDir);
+  const workspaces = new WorkspaceRegistry(config, workspaceStore);
   const results = createResultStore(config.stateDir);
 
   app.options("/mcp-app-assets/{*asset}", (_req, res) => {

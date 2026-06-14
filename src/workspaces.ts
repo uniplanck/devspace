@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { WorkspaceStore } from "./workspace-store.js";
 import { access, mkdir, readFile, stat } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import type { ServerConfig } from "./config.js";
@@ -24,7 +25,10 @@ export interface WorkspaceContext {
 export class WorkspaceRegistry {
   private readonly workspaces = new Map<string, Workspace>();
 
-  constructor(private readonly config: ServerConfig) {}
+  constructor(
+    private readonly config: ServerConfig,
+    private readonly store?: WorkspaceStore,
+  ) {}
 
   async openWorkspace(path: string): Promise<WorkspaceContext> {
     const root = assertAllowedPath(path, this.config.allowedRoots);
@@ -41,6 +45,7 @@ export class WorkspaceRegistry {
       loadedAgentsFiles: new Map(),
     };
 
+    this.store?.createSession({ id: workspace.id, root: workspace.root });
     this.workspaces.set(workspace.id, workspace);
     const agentsFiles = await this.loadAgentsForDirectory(workspace, root);
 
@@ -49,11 +54,30 @@ export class WorkspaceRegistry {
 
   getWorkspace(workspaceId: string): Workspace {
     const workspace = this.workspaces.get(workspaceId);
-    if (!workspace) {
+    if (workspace) {
+      this.store?.touchSession(workspaceId);
+      return workspace;
+    }
+
+    const session = this.store?.getSession(workspaceId);
+    if (!session) {
       throw new Error(`Unknown workspaceId: ${workspaceId}. Call open_workspace first.`);
     }
 
-    return workspace;
+    const root = assertAllowedPath(session.root, this.config.allowedRoots);
+    const restoredWorkspace: Workspace = {
+      id: session.id,
+      root,
+      loadedAgentsFiles: new Map(
+        this.store
+          ?.listLoadedAgentFiles(workspaceId)
+          .map((file) => [file.path, file.content]) ?? [],
+      ),
+    };
+    this.store?.touchSession(workspaceId);
+    this.workspaces.set(restoredWorkspace.id, restoredWorkspace);
+
+    return restoredWorkspace;
   }
 
   resolvePath(workspace: Workspace, inputPath: string): string {
@@ -89,6 +113,11 @@ export class WorkspaceRegistry {
       const alreadyLoaded = existingContent === content;
       if (!alreadyLoaded) {
         workspace.loadedAgentsFiles.set(agentsPath, content);
+        this.store?.putLoadedAgentFile({
+          workspaceSessionId: workspace.id,
+          path: agentsPath,
+          content,
+        });
       }
 
       loaded.push({ path: agentsPath, content, alreadyLoaded });
