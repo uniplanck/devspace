@@ -23,7 +23,11 @@ import {
   runShellTool,
   writeFileTool,
 } from "./pi-tools.js";
-import { countDiffStats, createResultStore, type ToolResultStore } from "./result-store.js";
+import {
+  countDiffStats,
+  createResultStore,
+  type ToolResultStore,
+} from "./result-store.js";
 import { formatAgentsNotice, WorkspaceRegistry } from "./workspaces.js";
 
 type Transport = StreamableHTTPServerTransport;
@@ -119,7 +123,9 @@ function sendJsonRpcError(
 
 function contentText(content: ToolContent[]): string {
   return content
-    .filter((item): item is { type: "text"; text: string } => item.type === "text")
+    .filter(
+      (item): item is { type: "text"; text: string } => item.type === "text",
+    )
     .map((item) => item.text)
     .join("\n");
 }
@@ -128,7 +134,10 @@ function textBlock(text: string): ToolContent {
   return { type: "text", text };
 }
 
-function textSummary(content: ToolContent[]): { lines: number; characters: number } {
+function textSummary(content: ToolContent[]): {
+  lines: number;
+  characters: number;
+} {
   const text = contentText(content);
   return {
     lines: text.length === 0 ? 0 : text.split("\n").length,
@@ -190,7 +199,10 @@ function workspaceAppHtml(config: ServerConfig): string {
 </html>`;
 }
 
-function appCsp(config: ServerConfig): { resourceDomains: string[]; connectDomains: string[] } {
+function appCsp(config: ServerConfig): {
+  resourceDomains: string[];
+  connectDomains: string[];
+} {
   const publicBaseUrl = config.publicBaseUrl.replace(/\/+$/, "");
   return {
     resourceDomains: [publicBaseUrl],
@@ -234,10 +246,9 @@ function createMcpServer(
         "Local development harness that exposes workspace-scoped file, search, edit, and shell tools.",
     },
     {
-      instructions:
-        config.minimalTools
-          ? "Use this server as a local coding workspace harness. First call open_workspace with a project directory inside an allowed root. Then use the returned workspaceId for all file, edit, write, and shell tools. Follow any AGENTS.md context returned by open_workspace or subsequent tool calls. In minimal tool mode, grep_files, find_files, and list_directory are disabled; use run_shell with command-line tools such as grep, rg, find, ls, and tree for search and directory inspection. Prefer read_file for direct file reads, edit_file for targeted modifications, write_file only for new files or complete rewrites, and run_shell for tests/builds/git/search/list commands. Do not create or modify files with run_shell; avoid shell redirection, heredocs, tee, sed -i, perl -i, node/python/ruby scripts, or any command whose purpose is to write project files."
-          : "Use this server as a local coding workspace harness. First call open_workspace with a project directory inside an allowed root. Then use the returned workspaceId for all file, search, edit, write, and shell tools. Follow any AGENTS.md context returned by open_workspace or subsequent tool calls. Prefer read_file and search tools for inspection, edit_file for targeted modifications, write_file only for new files or complete rewrites, and run_shell for tests/builds/git commands. Do not create or modify files with run_shell; avoid shell redirection, heredocs, tee, sed -i, perl -i, node/python/ruby scripts, or any command whose purpose is to write project files.",
+      instructions: config.minimalTools
+        ? "Use this server as a local coding workspace harness. Open a workspace once per project session by calling open_workspace with a project directory inside an allowed root. Reuse the returned workspaceId for all later file, edit, write, and shell tools in that project; only call open_workspace again for a different project/root or if the workspaceId is no longer valid. Follow any AGENTS.md context returned by open_workspace or subsequent tool calls. In minimal tool mode, grep_files, find_files, and list_directory are disabled; use run_shell with command-line tools such as grep, rg, find, ls, and tree for search and directory inspection. Prefer read_file for direct file reads, edit_file for targeted modifications, write_file only for new files or complete rewrites, and run_shell for tests/builds/git/search/list commands. Do not create or modify files with run_shell; avoid shell redirection, heredocs, tee, sed -i, perl -i, node/python/ruby scripts, or any command whose purpose is to write project files."
+        : "Use this server as a local coding workspace harness. Open a workspace once per project session by calling open_workspace with a project directory inside an allowed root. Reuse the returned workspaceId for all later file, search, edit, write, and shell tools in that project; only call open_workspace again for a different project/root or if the workspaceId is no longer valid. Follow any AGENTS.md context returned by open_workspace or subsequent tool calls. Prefer read_file and search tools for inspection, edit_file for targeted modifications, write_file only for new files or complete rewrites, and run_shell for tests/builds/git commands. Do not create or modify files with run_shell; avoid shell redirection, heredocs, tee, sed -i, perl -i, node/python/ruby scripts, or any command whose purpose is to write project files.",
     },
   );
 
@@ -334,7 +345,7 @@ function createMcpServer(
     {
       title: "Open workspace",
       description:
-        "Open a local project directory as a coding workspace. This must be the first tool call before reading, editing, searching, writing, or running commands in a project. Returns a workspaceId and any AGENTS.md instructions discovered at the workspace root.",
+        "Open a local project directory as a coding workspace. Call this once per project session before other project tools, then reuse the returned workspaceId for subsequent reads, edits, searches, writes, and shell commands in that workspace. Only call it again for a different project/root or if the workspaceId is no longer valid. Returns a workspaceId and any AGENTS.md instructions discovered at the workspace root.",
       inputSchema: {
         path: z
           .string()
@@ -384,32 +395,32 @@ function createMcpServer(
         },
       });
       const resultContent: ToolContent[] = [
-          {
-            type: "text" as const,
-            text: JSON.stringify(
+        {
+          type: "text" as const,
+          text: JSON.stringify(
+            {
+              workspaceId: workspace.id,
+              root: workspace.root,
+              loadedAgentsFiles: agentsFiles.map((file) => ({
+                path: file.path,
+                alreadyLoaded: file.alreadyLoaded,
+              })),
+              instruction:
+                "Use this workspaceId in all subsequent tool calls for this project. Follow the AGENTS.md context returned below.",
+            },
+            null,
+            2,
+          ),
+        },
+        ...(formatAgentsNotice(agentsFiles)
+          ? [
               {
-                workspaceId: workspace.id,
-                root: workspace.root,
-                loadedAgentsFiles: agentsFiles.map((file) => ({
-                  path: file.path,
-                  alreadyLoaded: file.alreadyLoaded,
-                })),
-                instruction:
-                  "Use this workspaceId in all subsequent tool calls for this project. Follow the AGENTS.md context returned below.",
+                type: "text" as const,
+                text: formatAgentsNotice(agentsFiles)!,
               },
-              null,
-              2,
-            ),
-          },
-          ...(formatAgentsNotice(agentsFiles)
-            ? [
-                {
-                  type: "text" as const,
-                  text: formatAgentsNotice(agentsFiles)!,
-                },
-              ]
-            : []),
-        ];
+            ]
+          : []),
+      ];
 
       return {
         content: resultContent,
@@ -436,7 +447,7 @@ function createMcpServer(
     {
       title: "Read file",
       description:
-        "Read a file inside an open workspace. Use this for file inspection instead of shell commands like cat or sed. Call open_workspace first and pass workspaceId. If the file path enters a directory with an AGENTS.md, that AGENTS.md context is returned as newly loaded or already loaded.",
+        "Read a file inside an open workspace. Use this for file inspection instead of shell commands like cat or sed. Pass an existing workspaceId returned by open_workspace; reuse the same workspaceId for follow-up calls in that project. If the file path enters a directory with an AGENTS.md, that AGENTS.md context is returned as newly loaded or already loaded.",
       inputSchema: {
         workspaceId: z
           .string()
@@ -528,7 +539,7 @@ function createMcpServer(
     {
       title: "Write file",
       description:
-        "Create or completely overwrite a file inside an open workspace. Prefer edit_file for targeted changes to existing files. Call open_workspace first and pass workspaceId.",
+        "Create or completely overwrite a file inside an open workspace. Prefer edit_file for targeted changes to existing files. Pass an existing workspaceId returned by open_workspace; reuse the same workspaceId for follow-up calls in that project.",
       inputSchema: {
         workspaceId: z
           .string()
@@ -609,7 +620,7 @@ function createMcpServer(
     {
       title: "Edit file",
       description:
-        "Edit one file inside an open workspace by replacing exact text blocks. Prefer this over write_file for targeted changes. Each oldText must match a unique, non-overlapping region of the original file; merge nearby changes into one edit and keep oldText as small as possible while still unique. Call open_workspace first and pass workspaceId.",
+        "Edit one file inside an open workspace by replacing exact text blocks. Prefer this over write_file for targeted changes. Each oldText must match a unique, non-overlapping region of the original file; merge nearby changes into one edit and keep oldText as small as possible while still unique. Pass an existing workspaceId returned by open_workspace; reuse the same workspaceId for follow-up calls in that project.",
       inputSchema: {
         workspaceId: z
           .string()
@@ -663,7 +674,9 @@ function createMcpServer(
 
       if (response.isError) return response;
 
-      const stats = countDiffStats(response.details?.patch ?? response.details?.diff);
+      const stats = countDiffStats(
+        response.details?.patch ?? response.details?.diff,
+      );
       const diffText = response.details?.patch ?? response.details?.diff ?? "";
       const storedResult = results.put({
         workspaceId,
@@ -711,250 +724,251 @@ function createMcpServer(
 
   if (!config.minimalTools) {
     registerAppTool(
-    server,
-    "grep_files",
-    {
-      title: "Grep files",
-      description:
-        "Search file contents inside an open workspace. Use this before broad reads when looking for symbols, text, or usage sites. Respects the underlying Pi grep behavior, including project ignore rules. Call open_workspace first and pass workspaceId.",
-      inputSchema: {
-        workspaceId: z
-          .string()
-          .describe("Workspace identifier returned by open_workspace."),
-        pattern: z.string().describe("Search pattern."),
-        path: z
-          .string()
-          .optional()
-          .describe(
-            "Optional path or glob scope relative to the workspace root.",
-          ),
-        include: z.string().optional().describe("Optional include glob."),
-      },
-      outputSchema: cardOutputSchema(
-        "grep_files",
-        z.object({
-          pattern: z.string(),
-          scope: z.string(),
-          lines: z.number().int().nonnegative(),
-          characters: z.number().int().nonnegative(),
-        }),
-      ),
-      _meta: {
-        ui: {
-          resourceUri: WORKSPACE_APP_URI,
-          visibility: ["model"],
+      server,
+      "grep_files",
+      {
+        title: "Grep files",
+        description:
+          "Search file contents inside an open workspace. Use this before broad reads when looking for symbols, text, or usage sites. Respects the underlying Pi grep behavior, including project ignore rules. Pass an existing workspaceId returned by open_workspace; reuse the same workspaceId for follow-up calls in that project.",
+        inputSchema: {
+          workspaceId: z
+            .string()
+            .describe("Workspace identifier returned by open_workspace."),
+          pattern: z.string().describe("Search pattern."),
+          path: z
+            .string()
+            .optional()
+            .describe(
+              "Optional path or glob scope relative to the workspace root.",
+            ),
+          include: z.string().optional().describe("Optional include glob."),
         },
+        outputSchema: cardOutputSchema(
+          "grep_files",
+          z.object({
+            pattern: z.string(),
+            scope: z.string(),
+            lines: z.number().int().nonnegative(),
+            characters: z.number().int().nonnegative(),
+          }),
+        ),
+        _meta: {
+          ui: {
+            resourceUri: WORKSPACE_APP_URI,
+            visibility: ["model"],
+          },
+        },
+        annotations: { readOnlyHint: true },
       },
-      annotations: { readOnlyHint: true },
-    },
-    async ({ workspaceId, ...input }) => {
-      const workspace = workspaces.getWorkspace(workspaceId);
-      const targetPath = input.path
-        ? workspaces.resolvePath(workspace, input.path)
-        : workspace.root;
-      const agentsNotice = formatAgentsNotice(
-        await workspaces.loadAgentsForPath(workspace, targetPath),
-      );
-      const response = await grepFilesTool(input, {
-        cwd: workspace.root,
-        root: workspace.root,
-        agentsNotice,
-      });
+      async ({ workspaceId, ...input }) => {
+        const workspace = workspaces.getWorkspace(workspaceId);
+        const targetPath = input.path
+          ? workspaces.resolvePath(workspace, input.path)
+          : workspace.root;
+        const agentsNotice = formatAgentsNotice(
+          await workspaces.loadAgentsForPath(workspace, targetPath),
+        );
+        const response = await grepFilesTool(input, {
+          cwd: workspace.root,
+          root: workspace.root,
+          agentsNotice,
+        });
 
-      if (response.isError) return response;
+        if (response.isError) return response;
 
-      const summary = {
-        pattern: input.pattern,
-        scope: input.path ?? ".",
-        ...textSummary(response.content),
-      };
-      const storedResult = results.put({
-        workspaceId,
-        workspaceRoot: workspace.root,
-        tool: "grep_files",
-        path: input.path,
-        label: input.pattern,
-        summary,
-        payload: { content: response.content },
-      });
-
-      return {
-        ...response,
-        structuredContent: {
+        const summary = {
+          pattern: input.pattern,
+          scope: input.path ?? ".",
+          ...textSummary(response.content),
+        };
+        const storedResult = results.put({
+          workspaceId,
+          workspaceRoot: workspace.root,
           tool: "grep_files",
-          resultId: storedResult.id,
-          workspaceId,
           path: input.path,
           label: input.pattern,
           summary,
-          modelText: contentText(response.content),
+          payload: { content: response.content },
+        });
+
+        return {
+          ...response,
+          structuredContent: {
+            tool: "grep_files",
+            resultId: storedResult.id,
+            workspaceId,
+            path: input.path,
+            label: input.pattern,
+            summary,
+            modelText: contentText(response.content),
+            ui: {
+              card: "search",
+              expandable: true,
+            },
+          },
+        };
+      },
+    );
+
+    registerAppTool(
+      server,
+      "find_files",
+      {
+        title: "Find files",
+        description:
+          "Find files by glob pattern inside an open workspace. Use this to discover filenames or narrow file sets before reading. Respects the underlying Pi find behavior, including project ignore rules. Pass an existing workspaceId returned by open_workspace; reuse the same workspaceId for follow-up calls in that project.",
+        inputSchema: {
+          workspaceId: z
+            .string()
+            .describe("Workspace identifier returned by open_workspace."),
+          pattern: z.string().describe("File glob pattern."),
+          path: z
+            .string()
+            .optional()
+            .describe("Optional path scope relative to the workspace root."),
+        },
+        outputSchema: cardOutputSchema(
+          "find_files",
+          z.object({
+            pattern: z.string(),
+            scope: z.string(),
+            lines: z.number().int().nonnegative(),
+            characters: z.number().int().nonnegative(),
+          }),
+        ),
+        _meta: {
           ui: {
-            card: "search",
-            expandable: true,
+            resourceUri: WORKSPACE_APP_URI,
+            visibility: ["model"],
           },
         },
-      };
-    },
-  );
-
-  registerAppTool(
-    server,
-    "find_files",
-    {
-      title: "Find files",
-      description:
-        "Find files by glob pattern inside an open workspace. Use this to discover filenames or narrow file sets before reading. Respects the underlying Pi find behavior, including project ignore rules. Call open_workspace first and pass workspaceId.",
-      inputSchema: {
-        workspaceId: z
-          .string()
-          .describe("Workspace identifier returned by open_workspace."),
-        pattern: z.string().describe("File glob pattern."),
-        path: z
-          .string()
-          .optional()
-          .describe("Optional path scope relative to the workspace root."),
+        annotations: { readOnlyHint: true },
       },
-      outputSchema: cardOutputSchema(
-        "find_files",
-        z.object({
-          pattern: z.string(),
-          scope: z.string(),
-          lines: z.number().int().nonnegative(),
-          characters: z.number().int().nonnegative(),
-        }),
-      ),
-      _meta: {
-        ui: {
-          resourceUri: WORKSPACE_APP_URI,
-          visibility: ["model"],
-        },
-      },
-      annotations: { readOnlyHint: true },
-    },
-    async ({ workspaceId, ...input }) => {
-      const workspace = workspaces.getWorkspace(workspaceId);
-      const targetPath = input.path
-        ? workspaces.resolvePath(workspace, input.path)
-        : workspace.root;
-      const agentsNotice = formatAgentsNotice(
-        await workspaces.loadAgentsForPath(workspace, targetPath),
-      );
-      const response = await findFilesTool(input, {
-        cwd: workspace.root,
-        root: workspace.root,
-        agentsNotice,
-      });
+      async ({ workspaceId, ...input }) => {
+        const workspace = workspaces.getWorkspace(workspaceId);
+        const targetPath = input.path
+          ? workspaces.resolvePath(workspace, input.path)
+          : workspace.root;
+        const agentsNotice = formatAgentsNotice(
+          await workspaces.loadAgentsForPath(workspace, targetPath),
+        );
+        const response = await findFilesTool(input, {
+          cwd: workspace.root,
+          root: workspace.root,
+          agentsNotice,
+        });
 
-      if (response.isError) return response;
+        if (response.isError) return response;
 
-      const summary = {
-        pattern: input.pattern,
-        scope: input.path ?? ".",
-        ...textSummary(response.content),
-      };
-      const storedResult = results.put({
-        workspaceId,
-        workspaceRoot: workspace.root,
-        tool: "find_files",
-        path: input.path,
-        label: input.pattern,
-        summary,
-        payload: { content: response.content },
-      });
-
-      return {
-        ...response,
-        structuredContent: {
+        const summary = {
+          pattern: input.pattern,
+          scope: input.path ?? ".",
+          ...textSummary(response.content),
+        };
+        const storedResult = results.put({
+          workspaceId,
+          workspaceRoot: workspace.root,
           tool: "find_files",
-          resultId: storedResult.id,
-          workspaceId,
           path: input.path,
           label: input.pattern,
           summary,
-          modelText: contentText(response.content),
+          payload: { content: response.content },
+        });
+
+        return {
+          ...response,
+          structuredContent: {
+            tool: "find_files",
+            resultId: storedResult.id,
+            workspaceId,
+            path: input.path,
+            label: input.pattern,
+            summary,
+            modelText: contentText(response.content),
+            ui: {
+              card: "search",
+              expandable: true,
+            },
+          },
+        };
+      },
+    );
+
+    registerAppTool(
+      server,
+      "list_directory",
+      {
+        title: "List directory",
+        description:
+          "List a directory inside an open workspace. Use this for directory inspection before reading files. Pass an existing workspaceId returned by open_workspace; reuse the same workspaceId for follow-up calls in that project.",
+        inputSchema: {
+          workspaceId: z
+            .string()
+            .describe("Workspace identifier returned by open_workspace."),
+          path: z
+            .string()
+            .describe(
+              "Directory path to list, relative to the workspace root.",
+            ),
+        },
+        outputSchema: cardOutputSchema(
+          "list_directory",
+          z.object({
+            lines: z.number().int().nonnegative(),
+            characters: z.number().int().nonnegative(),
+          }),
+        ),
+        _meta: {
           ui: {
-            card: "search",
-            expandable: true,
+            resourceUri: WORKSPACE_APP_URI,
+            visibility: ["model"],
           },
         },
-      };
-    },
-  );
-
-  registerAppTool(
-    server,
-    "list_directory",
-    {
-      title: "List directory",
-      description:
-        "List a directory inside an open workspace. Use this for directory inspection before reading files. Call open_workspace first and pass workspaceId.",
-      inputSchema: {
-        workspaceId: z
-          .string()
-          .describe("Workspace identifier returned by open_workspace."),
-        path: z
-          .string()
-          .describe("Directory path to list, relative to the workspace root."),
+        annotations: { readOnlyHint: true },
       },
-      outputSchema: cardOutputSchema(
-        "list_directory",
-        z.object({
-          lines: z.number().int().nonnegative(),
-          characters: z.number().int().nonnegative(),
-        }),
-      ),
-      _meta: {
-        ui: {
-          resourceUri: WORKSPACE_APP_URI,
-          visibility: ["model"],
-        },
-      },
-      annotations: { readOnlyHint: true },
-    },
-    async ({ workspaceId, ...input }) => {
-      const workspace = workspaces.getWorkspace(workspaceId);
-      const targetPath = workspaces.resolvePath(workspace, input.path);
-      const agentsNotice = formatAgentsNotice(
-        await workspaces.loadAgentsForPath(workspace, targetPath),
-      );
-      const response = await listDirectoryTool(input, {
-        cwd: workspace.root,
-        root: workspace.root,
-        agentsNotice,
-      });
+      async ({ workspaceId, ...input }) => {
+        const workspace = workspaces.getWorkspace(workspaceId);
+        const targetPath = workspaces.resolvePath(workspace, input.path);
+        const agentsNotice = formatAgentsNotice(
+          await workspaces.loadAgentsForPath(workspace, targetPath),
+        );
+        const response = await listDirectoryTool(input, {
+          cwd: workspace.root,
+          root: workspace.root,
+          agentsNotice,
+        });
 
-      if (response.isError) return response;
+        if (response.isError) return response;
 
-      const summary = textSummary(response.content);
-      const storedResult = results.put({
-        workspaceId,
-        workspaceRoot: workspace.root,
-        tool: "list_directory",
-        path: input.path,
-        label: input.path,
-        summary,
-        payload: { content: response.content },
-      });
-
-      return {
-        ...response,
-        structuredContent: {
-          tool: "list_directory",
-          resultId: storedResult.id,
+        const summary = textSummary(response.content);
+        const storedResult = results.put({
           workspaceId,
+          workspaceRoot: workspace.root,
+          tool: "list_directory",
           path: input.path,
           label: input.path,
           summary,
-          modelText: contentText(response.content),
-          ui: {
-            card: "directory",
-            expandable: true,
-          },
-        },
-      };
-    },
-  );
+          payload: { content: response.content },
+        });
 
+        return {
+          ...response,
+          structuredContent: {
+            tool: "list_directory",
+            resultId: storedResult.id,
+            workspaceId,
+            path: input.path,
+            label: input.path,
+            summary,
+            modelText: contentText(response.content),
+            ui: {
+              card: "directory",
+              expandable: true,
+            },
+          },
+        };
+      },
+    );
   }
 
   registerAppTool(
@@ -962,15 +976,18 @@ function createMcpServer(
     "run_shell",
     {
       title: "Run shell",
-      description:
-        config.minimalTools
-          ? "Run a shell command inside an open workspace. Use only for tests, builds, git inspection, package scripts, search, file discovery, and directory inspection. In minimal tool mode, grep_files, find_files, and list_directory are disabled; use command-line tools such as grep, rg, find, ls, and tree for those read-only inspection actions. Do not use run_shell to create or modify files. Do not use shell redirection, heredocs, tee, sed -i, perl -i, node/python/ruby scripts, or generated scripts to write project files; use edit_file for targeted changes and write_file for new files or full rewrites. Prefer read_file for direct file reads. Call open_workspace first and pass workspaceId. This is powerful local execution and should only be exposed behind strong authentication."
-          : "Run a shell command inside an open workspace. Use only for tests, builds, git inspection, package scripts, and commands that are better executed by the shell. Do not use run_shell to create or modify files. Do not use shell redirection, heredocs, tee, sed -i, perl -i, node/python/ruby scripts, or generated scripts to write project files; use edit_file for targeted changes and write_file for new files or full rewrites. Prefer read_file, grep_files, find_files, and list_directory for file inspection. Call open_workspace first and pass workspaceId. This is powerful local execution and should only be exposed behind strong authentication.",
+      description: config.minimalTools
+        ? "Run a shell command inside an open workspace. Use only for tests, builds, git inspection, package scripts, search, file discovery, and directory inspection. You can use command-line tools such as grep, rg, find, ls, and tree for those read-only inspection actions. Do not use run_shell to create or modify files. Do not use shell redirection, heredocs, tee, sed -i, perl -i, node/python/ruby scripts, or generated scripts to write project files; use edit_file for targeted changes and write_file for new files or full rewrites. Prefer read_file for direct file reads. Pass an existing workspaceId returned by open_workspace; reuse the same workspaceId for follow-up calls in that project."
+        : "Run a shell command inside an open workspace. Use only for tests, builds, git inspection, package scripts, and commands that are better executed by the shell. Do not use run_shell to create or modify files. Do not use shell redirection, heredocs, tee, sed -i, perl -i, node/python/ruby scripts, or generated scripts to write project files; use edit_file for targeted changes and write_file for new files or full rewrites. Prefer read_file, grep_files, find_files, and list_directory for file inspection. Pass an existing workspaceId returned by open_workspace; reuse the same workspaceId for follow-up calls in that project.",
       inputSchema: {
         workspaceId: z
           .string()
           .describe("Workspace identifier returned by open_workspace."),
-        command: z.string().describe("Shell command to run. Must not create or modify project files; use edit_file or write_file for file changes."),
+        command: z
+          .string()
+          .describe(
+            "Shell command to run. Must not create or modify project files; use edit_file or write_file for file changes.",
+          ),
         workingDirectory: z
           .string()
           .optional()
@@ -1010,7 +1027,11 @@ function createMcpServer(
       const agentsNotice = formatAgentsNotice(
         await workspaces.loadAgentsForDirectory(workspace, cwd),
       );
-      const response = await runShellTool(input, { cwd, root: workspace.root, agentsNotice });
+      const response = await runShellTool(input, {
+        cwd,
+        root: workspace.root,
+        agentsNotice,
+      });
 
       if (response.isError) return response;
 
