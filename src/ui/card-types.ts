@@ -1,6 +1,7 @@
 import type { App } from "@modelcontextprotocol/ext-apps";
 
 export type ToolName =
+  | "open_project"
   | "open_workspace"
   | "show_changes"
   | "apply_patch"
@@ -20,6 +21,7 @@ export type PatchOperation = "add" | "update" | "delete" | "move";
 
 export interface ToolResultCard {
   tool: ToolName;
+  projectId?: string;
   workspaceId?: string;
   path?: string;
   root?: string;
@@ -66,6 +68,7 @@ export interface ToolPayload {
 export function isToolName(value: unknown): value is ToolName {
   return (
     value === "open_workspace" ||
+    value === "open_project" ||
     value === "show_changes" ||
     value === "apply_patch" ||
     value === "exec_command" ||
@@ -82,6 +85,10 @@ export function isToolName(value: unknown): value is ToolName {
 
 export function isReadTool(tool: ToolName): boolean {
   return tool === "read";
+}
+
+export function isOpenProjectTool(tool: ToolName): boolean {
+  return tool === "open_project" || tool === "open_workspace";
 }
 
 export function isWriteTool(tool: ToolName): boolean {
@@ -133,7 +140,7 @@ export function summaryNumber(
 }
 
 export function isExpandableCard(card: ToolResultCard): boolean {
-  if (card.tool === "open_workspace") {
+  if (isOpenProjectTool(card.tool)) {
     return (
       Number(card.summary?.agentsFiles ?? 0) > 0 ||
       Number(card.summary?.skills ?? 0) > 0 ||
