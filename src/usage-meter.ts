@@ -7,10 +7,16 @@ import type { UsageContentMode } from "./config.js";
 type TextContent = { type: "text"; text: string };
 type ToolContent = TextContent | { type: "image"; data: string; mimeType: string };
 
-interface UsageBucket {
+export interface UsageBucket {
   observedTokens: number;
   savedTokens: number;
   calls: number;
+  inputChars: number;
+  outputChars: number;
+  payloadChars: number;
+  totalDurationMs: number;
+  errorCalls: number;
+  retries: number;
 }
 
 export interface UsageEntry {
@@ -25,8 +31,29 @@ export interface UsageEntry {
   observedTokens: number;
   savedChars: number;
   savedTokens: number;
+  inputChars: number;
+  outputChars: number;
+  payloadChars: number;
+  durationMs: number;
+  error: boolean;
+  retries: number;
   sessionObservedTokens: number;
   sessionSavedTokens: number;
+  sessionDurationMs: number;
+  sessionCalls: number;
+  sessionErrors: number;
+  sessionRetries: number;
+  byTool: Record<string, UsageBucket>;
+  note: string;
+}
+
+export interface ExecutionCostSnapshot {
+  observedTokens: number;
+  savedTokens: number;
+  totalDurationMs: number;
+  calls: number;
+  errors: number;
+  retries: number;
   byTool: Record<string, UsageBucket>;
   note: string;
 }
@@ -34,6 +61,10 @@ export interface UsageEntry {
 const session = {
   observedTokens: 0,
   savedTokens: 0,
+  totalDurationMs: 0,
+  calls: 0,
+  errors: 0,
+  retries: 0,
   byTool: new Map<string, UsageBucket>(),
 };
 let historyWrite = Promise.resolve();
@@ -43,8 +74,8 @@ function historyPath(): string {
     ?? join(homedir(), ".local", "share", "devspace", "usage-history.jsonl");
 }
 
-function clampNumber(value: number): number {
-  return Number.isFinite(value) && value > 0 ? Math.ceil(value) : 0;
+function clampNumber(value: number | undefined): number {
+  return Number.isFinite(value) && Number(value) > 0 ? Math.ceil(Number(value)) : 0;
 }
 
 export function estimateTokensFromChars(chars: number): number {
@@ -80,9 +111,17 @@ export function compactTokenCount(tokens: number): string {
   return `${tokens}`;
 }
 
+export function compactDuration(durationMs: number): string {
+  if (durationMs >= 60_000) return `${(durationMs / 60_000).toFixed(1)}m`;
+  if (durationMs >= 1_000) return `${(durationMs / 1_000).toFixed(1)}s`;
+  return `${durationMs}ms`;
+}
+
 function byToolSnapshot(): Record<string, UsageBucket> {
   return Object.fromEntries(
-    Array.from(session.byTool.entries()).sort(([a], [b]) => a.localeCompare(b)),
+    Array.from(session.byTool.entries())
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([tool, bucket]) => [tool, { ...bucket }]),
   );
 }
 
@@ -103,24 +142,52 @@ export function recordObservedToolUsage(input: {
   path?: string;
   observedChars: number;
   savedChars: number;
+  inputChars?: number;
+  outputChars?: number;
+  payloadChars?: number;
+  durationMs?: number;
+  error?: boolean;
+  retries?: number;
 }): UsageEntry {
   const tool = input.tool ?? "unknown";
   const observedChars = clampNumber(input.observedChars);
   const savedChars = clampNumber(input.savedChars);
   const observedTokens = estimateTokensFromChars(observedChars);
   const savedTokens = estimateTokensFromChars(savedChars);
+  const inputChars = clampNumber(input.inputChars);
+  const outputChars = clampNumber(input.outputChars);
+  const payloadChars = clampNumber(input.payloadChars ?? observedChars);
+  const durationMs = clampNumber(input.durationMs);
+  const retries = clampNumber(input.retries);
+  const error = input.error === true;
   const current = session.byTool.get(tool) ?? {
     observedTokens: 0,
     savedTokens: 0,
     calls: 0,
+    inputChars: 0,
+    outputChars: 0,
+    payloadChars: 0,
+    totalDurationMs: 0,
+    errorCalls: 0,
+    retries: 0,
   };
 
   current.observedTokens += observedTokens;
   current.savedTokens += savedTokens;
   current.calls += 1;
+  current.inputChars += inputChars;
+  current.outputChars += outputChars;
+  current.payloadChars += payloadChars;
+  current.totalDurationMs += durationMs;
+  current.errorCalls += error ? 1 : 0;
+  current.retries += retries;
   session.byTool.set(tool, current);
   session.observedTokens += observedTokens;
   session.savedTokens += savedTokens;
+  session.totalDurationMs += durationMs;
+  session.calls += 1;
+  session.errors += error ? 1 : 0;
+  session.retries += retries;
 
   const entry: UsageEntry = {
     ts: new Date().toISOString(),
@@ -136,31 +203,55 @@ export function recordObservedToolUsage(input: {
     observedTokens,
     savedChars,
     savedTokens,
+    inputChars,
+    outputChars,
+    payloadChars,
+    durationMs,
+    error,
+    retries,
     sessionObservedTokens: session.observedTokens,
     sessionSavedTokens: session.savedTokens,
+    sessionDurationMs: session.totalDurationMs,
+    sessionCalls: session.calls,
+    sessionErrors: session.errors,
+    sessionRetries: session.retries,
     byTool: byToolSnapshot(),
-    note: "DevSpace observed text estimate only. Not ChatGPT actual model usage.",
+    note: "DevSpace observed execution estimate only. Not host-model billing or actual model usage.",
   };
   appendHistory(entry);
   return entry;
 }
 
+export function getExecutionCostSnapshot(): ExecutionCostSnapshot {
+  return {
+    observedTokens: session.observedTokens,
+    savedTokens: session.savedTokens,
+    totalDurationMs: session.totalDurationMs,
+    calls: session.calls,
+    errors: session.errors,
+    retries: session.retries,
+    byTool: byToolSnapshot(),
+    note: "Text-token values are estimates; duration and call/error counts are observed by DevSpace.",
+  };
+}
+
 function fullUsageSummaryText(entry: UsageEntry): string {
   const byTool = Object.entries(entry.byTool)
-    .map(([tool, value]) => `${tool} ${compactTokenCount(value.observedTokens)}`)
+    .map(([tool, value]) => `${tool} ${value.calls} calls/${compactDuration(value.totalDurationMs)}`)
     .join(" / ");
 
   return [
-    "DevSpace token estimate:",
-    `Observed this call: ~${compactTokenCount(entry.observedTokens)} / session: ~${compactTokenCount(entry.sessionObservedTokens)}`,
-    `Session by tool: ${byTool || "none"}`,
-    `Estimated text avoided: ~${compactTokenCount(entry.sessionSavedTokens)} tokens`,
-    "Calculated only from text handled by DevSpace. This is not actual model usage or billing data.",
+    "Execution cost estimate:",
+    `Current: ~${compactTokenCount(entry.observedTokens)} tokens / ${compactDuration(entry.durationMs)} / ${entry.error ? "error" : "ok"}`,
+    `Session: ~${compactTokenCount(entry.sessionObservedTokens)} tokens / ${compactDuration(entry.sessionDurationMs)} / ${entry.sessionCalls} calls / ${entry.sessionErrors} errors / ${entry.sessionRetries} retries`,
+    `By tool: ${byTool || "none"}`,
+    `Estimated saved tokens: ~${compactTokenCount(entry.sessionSavedTokens)}`,
+    "Token values are estimated from text handled by DevSpace, not actual host-model usage.",
   ].join("\n");
 }
 
 function compactUsageSummaryText(entry: UsageEntry): string {
-  return `DevSpace token estimate: call ~${compactTokenCount(entry.observedTokens)} / session ~${compactTokenCount(entry.sessionObservedTokens)}`;
+  return `DevSpace cost: ~${compactTokenCount(entry.observedTokens)} tok · ${compactDuration(entry.durationMs)} | session ~${compactTokenCount(entry.sessionObservedTokens)} tok · ${entry.sessionCalls} calls · ${entry.sessionErrors} errors`;
 }
 
 export function appendUsageToContent<T extends ToolContent>(
