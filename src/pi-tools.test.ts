@@ -27,6 +27,39 @@ try {
   assert.equal(allowed.isError, undefined);
   assert.match(allowed.content[0]?.type === "text" ? allowed.content[0].text : "", /nested/);
 
+  const diagnosis = await runShellTool(
+    { command: "devspace-runtime diagnose node git" },
+    { cwd: root, root },
+  );
+  assert.equal(diagnosis.isError, undefined);
+  const diagnosisText = diagnosis.content[0]?.type === "text" ? diagnosis.content[0].text : "";
+  assert.match(diagnosisText, /"accessible": true/);
+  assert.match(diagnosisText, /"command": "node"/);
+
+  const smoke = await runShellTool(
+    { command: "devspace-runtime smoke" },
+    { cwd: root, root },
+  );
+  assert.equal(smoke.isError, undefined);
+  assert.match(smoke.content[0]?.type === "text" ? smoke.content[0].text : "", /"status": "passed"/);
+
+  const costs = await runShellTool(
+    { command: "devspace-runtime costs" },
+    { cwd: root, root },
+  );
+  assert.equal(costs.isError, undefined);
+  assert.match(costs.content[0]?.type === "text" ? costs.content[0].text : "", /"calls":/);
+
+  const finderEscape = await runShellTool(
+    { command: "devspace-runtime finder ../outside" },
+    { cwd: root, root },
+  );
+  assert.equal(finderEscape.isError, true);
+  assert.match(
+    finderEscape.content[0]?.type === "text" ? finderEscape.content[0].text : "",
+    /outside allowed roots/,
+  );
+
   await writeFile(commandsFile, JSON.stringify({
     commands: [{
       alias: "escape",

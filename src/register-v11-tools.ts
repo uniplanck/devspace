@@ -11,12 +11,7 @@ import {
 import { runDesignAudit } from "./design-audit.js";
 import type { LocalAgentProviderAvailability } from "./local-agent-availability.js";
 import { matchWorkspaceSkills } from "./skill-matcher.js";
-import {
-  diagnoseRuntime,
-  openPathInFinder,
-  runCompatibilitySmoke,
-} from "./runtime-operations.js";
-import { getExecutionCostSnapshot } from "./usage-meter.js";
+import { openPathInFinder } from "./runtime-operations.js";
 import type { Workspace, WorkspaceRegistry } from "./workspaces.js";
 
 const metricsSchema = z.object({
@@ -42,7 +37,7 @@ export function registerV11Tools(
     localAgentProviders: LocalAgentProviderAvailability[];
   },
 ): void {
-  registerRuntimeTools(server, input);
+  registerFinderAppTool(server, input);
   const enabledTools = new Set(enabledV11ToolNames(input.config));
   if (enabledTools.has("match_skills")) {
     registerAppTool(
@@ -145,7 +140,7 @@ export function registerV11Tools(
   }
 }
 
-function registerRuntimeTools(
+function registerFinderAppTool(
   server: McpServer,
   input: {
     config: ServerConfig;
@@ -155,139 +150,10 @@ function registerRuntimeTools(
 ): void {
   registerAppTool(
     server,
-    "diagnose_runtime",
-    {
-      title: "Diagnose runtime",
-      description: "Diagnose workspace access, safe shell PATH fallbacks, executable discovery, Git state, and optional GitHub CLI authentication without returning credentials or token contents.",
-      inputSchema: {
-        workspaceId: z.string(),
-        commands: z.array(z.string().regex(/^[A-Za-z0-9._+-]+$/u)).max(20).optional(),
-        checkGitHubAuth: z.boolean().optional(),
-      },
-      outputSchema: {
-        platform: z.string(),
-        nodeVersion: z.string(),
-        workspace: z.object({
-          root: z.string(),
-          name: z.string(),
-          accessible: z.boolean(),
-          gitRepository: z.boolean(),
-        }),
-        shellPath: z.object({
-          entryCount: z.number().int().nonnegative(),
-          addedEntries: z.array(z.string()),
-        }),
-        executables: z.array(z.object({
-          command: z.string(),
-          found: z.boolean(),
-          path: z.string().optional(),
-        })),
-        githubAuthentication: z.enum(["not_checked", "authenticated", "unauthenticated", "gh_unavailable"]),
-        diagnostics: z.array(z.string()),
-        metrics: metricsSchema,
-      },
-      _meta: {},
-      annotations: readOnlyAnnotations,
-    },
-    async ({ workspaceId, commands, checkGitHubAuth }) => {
-      const workspace = input.workspaces.getWorkspace(workspaceId);
-      const result = await diagnoseRuntime({
-        workspaceRoot: workspace.root,
-        commands,
-        checkGitHubAuth,
-      });
-      return toolResult(
-        result,
-        `Runtime diagnosis: ${result.executables.filter((entry) => entry.found).length}/${result.executables.length} executables available; GitHub auth ${result.githubAuthentication}.`,
-      );
-    },
-  );
-
-  registerAppTool(
-    server,
-    "compatibility_smoke_test",
-    {
-      title: "Compatibility smoke test",
-      description: "Run a bounded read-only compatibility smoke test for workspace access, listing, reading, text search, augmented shell PATH, Git, and MCP App resources.",
-      inputSchema: {
-        workspaceId: z.string(),
-      },
-      outputSchema: {
-        status: z.enum(["passed", "failed"]),
-        steps: z.array(z.object({
-          name: z.string(),
-          status: z.enum(["passed", "failed", "skipped"]),
-          detail: z.string(),
-          durationMs: z.number().int().nonnegative(),
-        })),
-        summary: z.object({
-          passed: z.number().int().nonnegative(),
-          failed: z.number().int().nonnegative(),
-          skipped: z.number().int().nonnegative(),
-        }),
-        metrics: metricsSchema,
-      },
-      _meta: {},
-      annotations: readOnlyAnnotations,
-    },
-    async ({ workspaceId }) => {
-      const workspace = input.workspaces.getWorkspace(workspaceId);
-      const result = await runCompatibilitySmoke(workspace.root);
-      return {
-        ...toolResult(
-          result,
-          `Compatibility smoke test ${result.status}: ${result.summary.passed} passed, ${result.summary.failed} failed, ${result.summary.skipped} skipped.`,
-        ),
-        isError: result.status === "failed",
-      };
-    },
-  );
-
-  registerAppTool(
-    server,
-    "execution_costs",
-    {
-      title: "Execution costs",
-      description: "Return observed DevSpace execution duration, tool calls, errors, retries, character volume, and estimated text tokens for the current server process.",
-      inputSchema: {},
-      outputSchema: {
-        observedTokens: z.number().int().nonnegative(),
-        savedTokens: z.number().int().nonnegative(),
-        totalDurationMs: z.number().int().nonnegative(),
-        calls: z.number().int().nonnegative(),
-        errors: z.number().int().nonnegative(),
-        retries: z.number().int().nonnegative(),
-        byTool: z.record(z.string(), z.object({
-          observedTokens: z.number().int().nonnegative(),
-          savedTokens: z.number().int().nonnegative(),
-          calls: z.number().int().nonnegative(),
-          inputChars: z.number().int().nonnegative(),
-          outputChars: z.number().int().nonnegative(),
-          payloadChars: z.number().int().nonnegative(),
-          totalDurationMs: z.number().int().nonnegative(),
-          errorCalls: z.number().int().nonnegative(),
-          retries: z.number().int().nonnegative(),
-        })),
-        note: z.string(),
-      },
-      _meta: {},
-      annotations: readOnlyAnnotations,
-    },
-    async () => {
-      const result = getExecutionCostSnapshot();
-      return toolResult(
-        result,
-        `Execution costs: ${result.calls} calls, ${result.totalDurationMs}ms, ${result.errors} errors, ~${result.observedTokens} observed tokens.`,
-      );
-    },
-  );
-
-  registerAppTool(
-    server,
     "open_in_finder",
     {
       title: "Open in Finder",
-      description: "Open a workspace-scoped local path in macOS Finder after validating that it remains inside the open workspace. Files are revealed; directories are opened. This is intended for an explicit user click or request.",
+      description: "Open a workspace-scoped local path in macOS Finder after validating that it remains inside the open workspace. Files are revealed; directories are opened. This Tool is callable only by the MCP App UI.",
       inputSchema: {
         workspaceId: z.string(),
         path: z.string().min(1).max(4_000),
@@ -297,7 +163,11 @@ function registerRuntimeTools(
         path: z.string(),
         kind: z.enum(["file", "directory"]),
       },
-      _meta: {},
+      _meta: {
+        ui: {
+          visibility: ["app"],
+        },
+      },
       annotations: {
         readOnlyHint: true,
         destructiveHint: false,
