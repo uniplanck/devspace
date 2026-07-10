@@ -7,11 +7,12 @@ import assert from "node:assert/strict";
 import { loadConfig } from "./config.js";
 import { GitWorktreeError } from "./git-worktrees.js";
 import { SqliteWorkspaceStore } from "./workspace-store.js";
-import { WorkspaceRegistry } from "./workspaces.js";
+import { ensureCheckoutWorkspaceRoot, WorkspaceRegistry } from "./workspaces.js";
 
 const execFileAsync = promisify(execFile);
 const root = await mkdtemp(join(tmpdir(), "devspace-workspace-test-"));
 const agentDir = await mkdtemp(join(tmpdir(), "devspace-agent-dir-test-"));
+const outsideRoot = await mkdtemp(join(tmpdir(), "devspace-workspace-outside-test-"));
 
 try {
   await writeFile(join(agentDir, "AGENTS.md"), "global instructions\n");
@@ -83,11 +84,64 @@ try {
     ],
   );
 
+  if (platform() !== "win32") {
+    const safeAgentDir = join(root, ".pi", "safe-agent");
+    await mkdir(join(safeAgentDir, "skills"), { recursive: true });
+    await writeFile(join(safeAgentDir, "skills", "AGENTS.md"), "safe global instructions\n");
+    await symlink("skills/AGENTS.md", join(safeAgentDir, "AGENTS.md"));
+    const safeConfig = loadConfig({
+      DEVSPACE_CONFIG_DIR: join(root, ".devspace-safe-home"),
+      DEVSPACE_ALLOWED_ROOTS: root,
+      DEVSPACE_WORKTREE_ROOT: join(root, ".devspace", "safe-worktrees"),
+      DEVSPACE_AGENT_DIR: safeAgentDir,
+      DEVSPACE_OAUTH_OWNER_TOKEN: "test-owner-token-that-is-long-enough",
+      PORT: "1",
+    });
+    const safeWorkspace = await new WorkspaceRegistry(safeConfig).openWorkspace(root);
+    assert.deepEqual(
+      safeWorkspace.agentsFiles.map((file) => file.content),
+      ["safe global instructions\n", "root instructions\n"],
+    );
+
+    const unsafeAgentDir = join(root, ".pi", "unsafe-agent");
+    await mkdir(unsafeAgentDir, { recursive: true });
+    await writeFile(join(outsideRoot, "secret.txt"), "outside secret\n");
+    await symlink(join(outsideRoot, "secret.txt"), join(unsafeAgentDir, "AGENTS.md"));
+    const unsafeConfig = loadConfig({
+      DEVSPACE_CONFIG_DIR: join(root, ".devspace-unsafe-home"),
+      DEVSPACE_ALLOWED_ROOTS: root,
+      DEVSPACE_WORKTREE_ROOT: join(root, ".devspace", "unsafe-worktrees"),
+      DEVSPACE_AGENT_DIR: unsafeAgentDir,
+      DEVSPACE_OAUTH_OWNER_TOKEN: "test-owner-token-that-is-long-enough",
+      PORT: "1",
+    });
+    const unsafeWorkspace = await new WorkspaceRegistry(unsafeConfig).openWorkspace(root);
+    assert.deepEqual(
+      unsafeWorkspace.agentsFiles.map((file) => file.content),
+      ["root instructions\n"],
+    );
+  }
+
   const missingWorkspaceRoot = join(root, "missing", "workspace");
   const missingWorkspace = await registry.openWorkspace(missingWorkspaceRoot);
   assert.equal(missingWorkspace.workspace.root, missingWorkspaceRoot);
   assert.equal(missingWorkspace.workspace.mode, "checkout");
   assert.equal((await stat(missingWorkspaceRoot)).isDirectory(), true);
+
+  {
+    let mkdirCalls = 0;
+    const existingStats = await ensureCheckoutWorkspaceRoot(root, {
+      stat: async (path) => {
+        assert.equal(path, root);
+        return await stat(path);
+      },
+      mkdir: async () => {
+        mkdirCalls += 1;
+      },
+    });
+    assert.equal(existingStats.isDirectory(), true);
+    assert.equal(mkdirCalls, 0);
+  }
 
   await assert.rejects(
     () => registry.openWorkspace({ path: root, mode: "worktree" }),
@@ -162,10 +216,17 @@ try {
       mode: "worktree",
     });
     assert.equal(aliasWorkspace.workspace.sourceRoot, join(aliasRoot, "git-project"));
+
+    const aliasCheckout = await new WorkspaceRegistry(aliasConfig).openWorkspace(aliasRoot);
+    assert.deepEqual(
+      aliasCheckout.agentsFiles.map((file) => file.content),
+      ["global instructions\n", "root instructions\n"],
+    );
   }
 } finally {
   await rm(root, { recursive: true, force: true });
   await rm(agentDir, { recursive: true, force: true });
+  await rm(outsideRoot, { recursive: true, force: true });
 }
 
 async function git(cwd: string, args: string[]): Promise<void> {
