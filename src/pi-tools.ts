@@ -20,6 +20,7 @@ import {
   type AgentToolResult,
 } from "@earendil-works/pi-coding-agent";
 import { expandHomePath, resolveAllowedPath } from "./roots.js";
+import { commandWithAugmentedPath } from "./shell-environment.js";
 
 type McpContent = { type: "text"; text: string } | { type: "image"; data: string; mimeType: string };
 export type ToolResponse<TDetails = unknown> = {
@@ -214,7 +215,7 @@ export async function runShellTool(input: BashToolInput, context: ToolContext): 
       : Math.min(approved.input.timeout, 300);
 
   return runTool((params) => tool.execute("run_shell", params), {
-    command: approved.input.command,
+    command: commandWithAugmentedPath(approved.input.command),
     timeout,
   }, context);
 }

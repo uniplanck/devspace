@@ -200,6 +200,8 @@ function render(): void {
     renderChevron(expanded, expandable),
   );
   section.append(button);
+  const pathAction = renderPathAction(card);
+  if (pathAction) section.append(pathAction);
 
   if (expanded) {
     const body = element("div", { className: "tool-body" });
@@ -210,6 +212,63 @@ function render(): void {
   main.append(section);
   appRoot.replaceChildren(main);
   renderPayloadIfNeeded();
+}
+
+function renderPathAction(card: ToolResultCard): HTMLElement | null {
+  const displayPath = card.path ?? card.root;
+  const toolPath = card.path ?? (card.root ? "." : undefined);
+  if (!app || !card.workspaceId || !displayPath || !toolPath) return null;
+
+  const row = element("div", { className: "path-action-row" });
+  const button = element("button", {
+    className: "path-link",
+    type: "button",
+    title: `Finderで表示: ${displayPath}`,
+  });
+  button.setAttribute("aria-label", `Finderで表示: ${displayPath}`);
+  const pathText = element("span", {
+    className: "path-link-text",
+    text: displayPath,
+  });
+  const actionText = element("span", {
+    className: "path-link-action",
+    text: "Finderで表示",
+  });
+  button.append(pathText, actionText);
+
+  button.addEventListener("click", async () => {
+    if (!app || button.disabled) return;
+    button.disabled = true;
+    actionText.textContent = "開いています…";
+    try {
+      const result = await app.callServerTool({
+        name: "open_in_finder",
+        arguments: {
+          workspaceId: card.workspaceId,
+          path: toolPath,
+        },
+      });
+      const structured = getStructuredContent<{ status?: string }>(result);
+      if (result.isError || structured?.status === "unsupported") {
+        actionText.textContent = structured?.status === "unsupported"
+          ? "macOSのみ対応"
+          : "開けませんでした";
+        button.disabled = false;
+        return;
+      }
+      actionText.textContent = "Finderで表示済み";
+      window.setTimeout(() => {
+        actionText.textContent = "Finderで表示";
+        button.disabled = false;
+      }, 1_800);
+    } catch (openError) {
+      actionText.textContent = openError instanceof Error ? "開けませんでした" : "エラー";
+      button.disabled = false;
+    }
+  });
+
+  row.append(button);
+  return row;
 }
 
 function renderEmpty(message: string, tone: "muted" | "error" = "muted"): void {

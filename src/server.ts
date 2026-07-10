@@ -336,10 +336,22 @@ function logFailedToolResponse(
   content: ToolContent[],
   startedAt: number,
 ): void {
+  const durationMs = Math.round(performance.now() - startedAt);
+  const outputChars = textContentChars(content);
+  recordObservedToolUsage({
+    tool: fields.tool,
+    workspaceId: fields.workspaceId,
+    path: fields.path,
+    observedChars: outputChars,
+    savedChars: 0,
+    outputChars,
+    durationMs,
+    error: true,
+  });
   logToolCall(config, {
     ...fields,
     success: false,
-    durationMs: Math.round(performance.now() - startedAt),
+    durationMs,
     error: toolErrorPreview(content),
   });
 }
@@ -1067,6 +1079,9 @@ function createMcpServer(
         path: input.path,
         observedChars,
         savedChars,
+        inputChars: String(input.path).length,
+        outputChars: observedChars,
+        durationMs: Math.round(performance.now() - startedAt),
       });
       const content = appendUsageToContent(response.content, usage, config.usageContent);
       logToolCall(config, {
@@ -1149,6 +1164,9 @@ function createMcpServer(
         path: input.path,
         observedChars: input.content.length + textContentChars(response.content),
         savedChars: 0,
+        inputChars: input.content.length,
+        outputChars: textContentChars(response.content),
+        durationMs: Math.round(performance.now() - startedAt),
       });
       const content = appendUsageToContent(response.content, usage, config.usageContent);
       logToolCall(config, {
@@ -1250,6 +1268,9 @@ function createMcpServer(
         path: input.path,
         observedChars,
         savedChars,
+        inputChars: editInputChars(input.edits),
+        outputChars: textContentChars(editContent),
+        durationMs: Math.round(performance.now() - startedAt),
       });
       const content = appendUsageToContent(editContent, usage, config.usageContent);
       logToolCall(config, {
@@ -1472,6 +1493,12 @@ function createMcpServer(
             + String(input.include ?? "").length
             + textContentChars(response.content),
           savedChars: 0,
+          inputChars:
+            String(input.pattern ?? "").length
+            + String(input.path ?? "").length
+            + String(input.include ?? "").length,
+          outputChars: textContentChars(response.content),
+          durationMs: Math.round(performance.now() - startedAt),
         });
         const content = appendUsageToContent(response.content, usage, config.usageContent);
         logToolCall(config, {
@@ -1555,6 +1582,9 @@ function createMcpServer(
             + String(input.path ?? "").length
             + textContentChars(response.content),
           savedChars: 0,
+          inputChars: String(input.pattern ?? "").length + String(input.path ?? "").length,
+          outputChars: textContentChars(response.content),
+          durationMs: Math.round(performance.now() - startedAt),
         });
         const content = appendUsageToContent(response.content, usage, config.usageContent);
         logToolCall(config, {
@@ -1631,6 +1661,9 @@ function createMcpServer(
           path: input.path,
           observedChars: String(input.path ?? "").length + textContentChars(response.content),
           savedChars: 0,
+          inputChars: String(input.path ?? "").length,
+          outputChars: textContentChars(response.content),
+          durationMs: Math.round(performance.now() - startedAt),
         });
         const content = appendUsageToContent(response.content, usage, config.usageContent);
         logToolCall(config, {
@@ -1731,6 +1764,9 @@ function createMcpServer(
         path: workingDirectory ?? ".",
         observedChars: input.command.length + textContentChars(response.content),
         savedChars: 0,
+        inputChars: input.command.length,
+        outputChars: textContentChars(response.content),
+        durationMs: Math.round(performance.now() - startedAt),
       });
       const content = appendUsageToContent(response.content, usage, config.usageContent);
       logToolCall(config, {

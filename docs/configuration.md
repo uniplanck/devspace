@@ -87,16 +87,19 @@ sessions.
 | `changes` | Enables the aggregate `show_changes` tool and attaches widget UI to `open_workspace` and `show_changes`. |
 | `off` | Disables widget UI. This is the default in compact mode. |
 
-## Compact payloads and usage estimates
+## Compact payloads and execution-cost estimates
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `DEVSPACE_OPEN_WORKSPACE_PAYLOAD` | `compact` | Use `compact` for bounded instruction excerpts and smaller skill metadata, or `full` for the v1.0 payload. |
 | `DEVSPACE_OPEN_WORKSPACE_INSTRUCTION_CHARS` | `6000` | Maximum characters returned per instruction excerpt; minimum `256`. |
-| `DEVSPACE_USAGE_CONTENT` | `compact` | Append `compact` or `full` observed-token estimates to tool output, or use `off` to hide them. |
-| `DEVSPACE_USAGE_HISTORY` | `~/.local/share/devspace/usage-history.jsonl` | Local JSONL destination for non-blocking usage diagnostics. |
+| `DEVSPACE_USAGE_CONTENT` | `compact` | Append `compact` or `full` execution-cost summaries to tool output, or use `off` to hide them. |
+| `DEVSPACE_USAGE_HISTORY` | `~/.local/share/devspace/usage-history.jsonl` | Local JSONL destination for non-blocking execution diagnostics. |
 
-Token counts are estimates from text handled by GPT-Agent, not ChatGPT model billing or actual model usage.
+Execution diagnostics record observed server duration, Tool call count, error count, retry count,
+input/output character volume, and text-token estimates. Token counts are estimates from text handled
+by GPT-Agent, not ChatGPT model billing or actual model usage. Use the `execution_costs` Tool for the
+current server-process aggregate.
 
 ## GPT-Agent v1.1 feature flags
 
@@ -112,6 +115,31 @@ All v1.1 feature flags default to `0`, so the existing compact Tool catalog and 
 
 Feature flag values are strict: `1/0`, `true/false`, `yes/no`, and `on/off` are accepted.
 New Tool results include `serverDurationMs`, `payloadCharacters`, `returnedItems`, and `truncated`.
+
+## Runtime reliability Tools
+
+The following guarded Tools are always available after `open_workspace`:
+
+| Tool | Purpose |
+| --- | --- |
+| `diagnose_runtime` | Classifies workspace access, Git detection, executable discovery, safe PATH fallbacks, and optional GitHub CLI authentication without returning credentials. |
+| `compatibility_smoke_test` | Runs bounded read-only checks for list/read/search, shell PATH resolution, Git, and MCP App resources. |
+| `execution_costs` | Returns observed duration, calls, errors, retries, character volume, and estimated text tokens. |
+| `open_in_finder` | On macOS, opens a validated workspace directory or reveals a validated file in Finder. |
+
+Shell execution augments the inherited PATH with existing standard locations such as
+`/opt/homebrew/bin`, `/usr/local/bin`, `~/.local/bin`, and system binary directories. It does not
+source `.zshrc`, `.zprofile`, or another login-shell configuration, avoiding startup side effects.
+
+When Widgets are enabled, Tool cards with a workspace path display a link-style **Finderで表示**
+action. The App calls `open_in_finder`; the server validates the path against the workspace before
+invoking macOS Finder. Paths outside the approved workspace are rejected by the normal root guard.
+
+For a quick regression check after a host-model rollout, call `compatibility_smoke_test` or run:
+
+```bash
+npm run test:runtime
+```
 
 The v1.1 package intentionally ships Design Audit as an adapter only: no Playwright/CDP/axe
 runtime is currently bundled, no browser binary is downloaded, and an enabled Tool returns an
