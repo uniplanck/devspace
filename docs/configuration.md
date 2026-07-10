@@ -83,9 +83,66 @@ sessions.
 
 | Value | Behavior |
 | --- | --- |
-| `full` | Default. Widget UI is attached to exposed workspace, file, edit, and shell tools. |
+| `full` | Widget UI is attached to exposed workspace, file, edit, and shell tools. This is the default when full workspace payloads are selected. |
 | `changes` | Enables the aggregate `show_changes` tool and attaches widget UI to `open_workspace` and `show_changes`. |
-| `off` | Disables widget UI. |
+| `off` | Disables widget UI. This is the default in compact mode. |
+
+## Compact payloads and usage estimates
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `DEVSPACE_OPEN_WORKSPACE_PAYLOAD` | `compact` | Use `compact` for bounded instruction excerpts and smaller skill metadata, or `full` for the v1.0 payload. |
+| `DEVSPACE_OPEN_WORKSPACE_INSTRUCTION_CHARS` | `6000` | Maximum characters returned per instruction excerpt; minimum `256`. |
+| `DEVSPACE_USAGE_CONTENT` | `compact` | Append `compact` or `full` observed-token estimates to tool output, or use `off` to hide them. |
+| `DEVSPACE_USAGE_HISTORY` | `~/.local/share/devspace/usage-history.jsonl` | Local JSONL destination for non-blocking usage diagnostics. |
+
+Token counts are estimates from text handled by GPT-Agent, not ChatGPT model billing or actual model usage.
+
+## GPT-Agent v1.1 feature flags
+
+All v1.1 feature flags default to `0`, so the existing compact Tool catalog and Fast Path remain unchanged.
+
+| Variable | Enables |
+| --- | --- |
+| `DEVSPACE_SKILL_MATCHER` | `match_skills`, which ranks bounded Skill metadata without loading bodies. |
+| `DEVSPACE_COMPOUND_TOOLS` | `project_snapshot`, `focused_context`, and read-only `review_changes`. |
+| `DEVSPACE_BUILTIN_PROFILES` | Built-in `explore`, `implement`, `review`, and `design` profiles when Subagents are enabled. |
+| `DEVSPACE_DESIGN_AUDIT` | The guarded `design_audit` adapter and three bundled Design Skills. |
+| `DEVSPACE_DESIGN_AUDIT_ALLOWED_HOSTS` | Comma-separated exact hosts/origins; defaults to loopback hosts only. |
+
+Feature flag values are strict: `1/0`, `true/false`, `yes/no`, and `on/off` are accepted.
+New Tool results include `serverDurationMs`, `payloadCharacters`, `returnedItems`, and `truncated`.
+
+The v1.1 package intentionally ships Design Audit as an adapter only: no Playwright/CDP/axe
+runtime is currently bundled, no browser binary is downloaded, and an enabled Tool returns an
+unavailable error until a real adapter is connected. A future adapter must use an ephemeral
+browser, validate redirects and subresources against the same URL policy, avoid cookies, write
+artifacts only inside the requested workspace directory, and terminate the browser in `finally`.
+
+Skills may optionally declare bounded `short-description`, `triggers`, and `required-tools`
+frontmatter for matching. Existing `name` and `description` metadata remains fully compatible;
+only a selected Skill is activated by reading its `SKILL.md`.
+
+## Approved shell aliases
+
+`DEVSPACE_APPROVED_SHELL_COMMANDS_FILE` may point to a local JSON file. The
+default is `~/.devspace/approved-shell-commands.json`. An alias is invoked as
+`devspace-approved <alias>` and is accepted only when its configured
+`workspaceRoot` exactly matches the open workspace. Its optional
+`workingDirectory` must remain inside that root.
+
+```json
+{
+  "commands": [
+    {
+      "alias": "verify",
+      "workspaceRoot": "/absolute/project/path",
+      "workingDirectory": ".",
+      "command": "npm test"
+    }
+  ]
+}
+```
 
 ## Skills
 

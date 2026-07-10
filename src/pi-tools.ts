@@ -1,3 +1,6 @@
+import { readFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
 import {
   createBashTool,
   createEditTool,
@@ -16,7 +19,7 @@ import {
   type WriteToolInput,
   type AgentToolResult,
 } from "@earendil-works/pi-coding-agent";
-import { resolveAllowedPath } from "./roots.js";
+import { expandHomePath, resolveAllowedPath } from "./roots.js";
 
 type McpContent = { type: "text"; text: string } | { type: "image"; data: string; mimeType: string };
 export type ToolResponse<TDetails = unknown> = {
@@ -48,6 +51,84 @@ function toMcpContent(result: AgentToolResult<unknown>): McpContent[] {
 function formatToolError(error: unknown): McpContent[] {
   const message = error instanceof Error ? error.message : String(error);
   return [{ type: "text", text: message }];
+}
+
+interface ApprovedShellCommand {
+  alias: string;
+  enabled?: boolean;
+  workspaceRoot: string;
+  workingDirectory?: string;
+  command: string;
+}
+
+const approvedCommandPrefix = "devspace-approved ";
+function approvedCommandsPath(): string {
+  return resolve(expandHomePath(
+    process.env.DEVSPACE_APPROVED_SHELL_COMMANDS_FILE
+      ?? join(homedir(), ".devspace", "approved-shell-commands.json"),
+  ));
+}
+
+async function loadApprovedShellCommands(): Promise<ApprovedShellCommand[]> {
+  try {
+    const raw = await readFile(approvedCommandsPath(), "utf8");
+    const parsed = JSON.parse(raw) as { commands?: ApprovedShellCommand[] };
+    return Array.isArray(parsed.commands) ? parsed.commands : [];
+  } catch {
+    return [];
+  }
+}
+
+async function resolveApprovedShellAlias(
+  input: BashToolInput,
+  context: ToolContext,
+): Promise<{ input: BashToolInput; cwd: string }> {
+  const rawCommand = String(input.command ?? "").trim();
+  if (!rawCommand.startsWith(approvedCommandPrefix)) {
+    return { input, cwd: context.cwd };
+  }
+
+  const alias = rawCommand.slice(approvedCommandPrefix.length).trim();
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(alias)) {
+    throw new Error("Invalid approved shell command alias.");
+  }
+
+  const commands = await loadApprovedShellCommands();
+  const command = commands.find(
+    (entry) => entry?.enabled !== false && entry?.alias === alias,
+  );
+  if (!command) {
+    throw new Error(`Approved shell command alias is not configured: ${alias}`);
+  }
+
+  const configuredRoot = String(command.workspaceRoot ?? "").trim();
+  if (!configuredRoot) {
+    throw new Error(`Approved shell command has no workspace root: ${alias}`);
+  }
+
+  const expectedRoot = resolve(expandHomePath(configuredRoot));
+  const actualRoot = resolve(context.root);
+  if (expectedRoot !== actualRoot) {
+    throw new Error(`Approved shell command alias is not allowed for this workspace: ${alias}`);
+  }
+
+  const approvedCwd = resolveAllowedPath(
+    String(command.workingDirectory ?? "."),
+    actualRoot,
+    [actualRoot],
+  );
+  const approvedCommand = String(command.command ?? "").trim();
+  if (!approvedCommand) {
+    throw new Error(`Approved shell command is empty: ${alias}`);
+  }
+
+  return {
+    input: {
+      ...input,
+      command: approvedCommand,
+    },
+    cwd: approvedCwd,
+  };
 }
 
 async function runTool<TInput, TDetails = unknown>(
@@ -119,11 +200,21 @@ export async function listDirectoryTool(input: LsToolInput, context: ToolContext
 }
 
 export async function runShellTool(input: BashToolInput, context: ToolContext): Promise<ToolResponse> {
-  const tool = createBashTool(context.cwd);
-  const timeout = input.timeout === undefined ? 30 : Math.min(input.timeout, 300);
+  let approved: { input: BashToolInput; cwd: string };
+  try {
+    approved = await resolveApprovedShellAlias(input, context);
+  } catch (error) {
+    return { content: formatToolError(error), isError: true };
+  }
+
+  const tool = createBashTool(approved.cwd);
+  const timeout =
+    approved.input.timeout === undefined
+      ? 30
+      : Math.min(approved.input.timeout, 300);
 
   return runTool((params) => tool.execute("run_shell", params), {
-    command: input.command,
+    command: approved.input.command,
     timeout,
   }, context);
 }

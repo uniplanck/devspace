@@ -11,10 +11,9 @@ import { WorkspaceRegistry } from "./workspaces.js";
 
 const execFileAsync = promisify(execFile);
 const root = await mkdtemp(join(tmpdir(), "devspace-workspace-test-"));
+const agentDir = await mkdtemp(join(tmpdir(), "devspace-agent-dir-test-"));
 
 try {
-  const agentDir = join(root, ".pi", "agent");
-  await mkdir(agentDir, { recursive: true });
   await writeFile(join(agentDir, "AGENTS.md"), "global instructions\n");
   await writeFile(join(root, "AGENTS.md"), "root instructions\n");
   await mkdir(join(root, ".devspace", "agents"), { recursive: true });
@@ -56,12 +55,22 @@ try {
     availableAgentsFiles.map((file) => file.path),
     [join(root, "nested", "AGENTS.md")],
   );
+  const advertisedGlobalInstruction = registry.resolveReadPath(
+    workspace,
+    join(agentDir, "AGENTS.md"),
+  );
+  assert.equal(advertisedGlobalInstruction.absolutePath, join(agentDir, "AGENTS.md"));
+  assert.throws(
+    () => registry.resolveReadPath(workspace, join(agentDir, "not-advertised.txt")),
+    /outside allowed roots/,
+  );
   assert.deepEqual(
     workspace.agentProfiles.map((profile) => ({
       name: profile.name,
       description: profile.description,
       provider: profile.provider,
       body: profile.body,
+      writeMode: profile.writeMode,
     })),
     [
       {
@@ -69,6 +78,7 @@ try {
         description: "Read-only project reviewer.",
         provider: "codex",
         body: "Review only.",
+        writeMode: "allowed",
       },
     ],
   );
@@ -155,6 +165,7 @@ try {
   }
 } finally {
   await rm(root, { recursive: true, force: true });
+  await rm(agentDir, { recursive: true, force: true });
 }
 
 async function git(cwd: string, args: string[]): Promise<void> {
