@@ -98,8 +98,8 @@ sessions.
 
 Execution diagnostics record observed server duration, Tool call count, error count, retry count,
 input/output character volume, and text-token estimates. Token counts are estimates from text handled
-by DevSpace, not host-model billing or actual model usage. Use the `execution_costs` Tool for the
-current server-process aggregate.
+by DevSpace, not host-model billing or actual model usage. Run `devspace-runtime costs` through
+the existing Bash Tool for the current server-process aggregate.
 
 ## DevSpace v1.1 feature flags
 
@@ -116,26 +116,28 @@ All v1.1 feature flags default to `0`, so the existing compact Tool catalog and 
 Feature flag values are strict: `1/0`, `true/false`, `yes/no`, and `on/off` are accepted.
 New Tool results include `serverDurationMs`, `payloadCharacters`, `returnedItems`, and `truncated`.
 
-## Runtime reliability Tools
+## Runtime reliability commands
 
-The following guarded Tools are always available after `open_workspace`:
+Runtime diagnostics are integrated into the existing Bash Tool instead of increasing the model-facing
+MCP Tool catalog. These exact commands are intercepted by DevSpace and do not start a login shell:
 
-| Tool | Purpose |
+| Bash command | Purpose |
 | --- | --- |
-| `diagnose_runtime` | Classifies workspace access, Git detection, executable discovery, safe PATH fallbacks, and optional GitHub CLI authentication without returning credentials. |
-| `compatibility_smoke_test` | Runs bounded read-only checks for list/read/search, shell PATH resolution, Git, and MCP App resources. |
-| `execution_costs` | Returns observed duration, calls, errors, retries, character volume, and estimated text tokens. |
-| `open_in_finder` | On macOS, opens a validated workspace directory or reveals a validated file in Finder. |
+| `devspace-runtime diagnose [--github] [command ...]` | Classifies workspace access, Git detection, executable discovery, safe PATH fallbacks, and optional GitHub CLI authentication without returning credentials. |
+| `devspace-runtime smoke` | Runs bounded read-only checks for list/read/search, shell PATH resolution, Git, and MCP App resources. |
+| `devspace-runtime costs` | Returns observed duration, calls, errors, retries, character volume, and estimated text tokens from the current server process. |
+| `devspace-runtime finder <path>` | On macOS, opens a validated workspace directory or reveals a validated file in Finder after an explicit request. |
 
 Shell execution augments the inherited PATH with existing standard locations such as
 `/opt/homebrew/bin`, `/usr/local/bin`, `~/.local/bin`, and system binary directories. It does not
 source `.zshrc`, `.zprofile`, or another login-shell configuration, avoiding startup side effects.
 
 When Widgets are enabled, Tool cards with a workspace path display a link-style **Open in Finder**
-action. The App calls `open_in_finder`; the server validates the path against the workspace before
-invoking macOS Finder. Paths outside the approved workspace are rejected by the normal root guard.
+action. The App calls the app-only `open_in_finder` Tool; it is hidden from the model-facing catalog.
+The server validates the path against the workspace before invoking macOS Finder. Paths outside the
+approved workspace are rejected by the normal root guard.
 
-For a quick regression check after a host-model rollout, call `compatibility_smoke_test` or run:
+For a quick regression check after a host-model rollout, run `devspace-runtime smoke` through Bash or:
 
 ```bash
 npm run test:runtime

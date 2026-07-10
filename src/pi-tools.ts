@@ -20,7 +20,13 @@ import {
   type AgentToolResult,
 } from "@earendil-works/pi-coding-agent";
 import { expandHomePath, resolveAllowedPath } from "./roots.js";
+import {
+  diagnoseRuntime,
+  openPathInFinder,
+  runCompatibilitySmoke,
+} from "./runtime-operations.js";
 import { commandWithAugmentedPath } from "./shell-environment.js";
+import { getExecutionCostSnapshot } from "./usage-meter.js";
 
 type McpContent = { type: "text"; text: string } | { type: "image"; data: string; mimeType: string };
 export type ToolResponse<TDetails = unknown> = {
@@ -63,6 +69,100 @@ interface ApprovedShellCommand {
 }
 
 const approvedCommandPrefix = "devspace-approved ";
+const runtimeCommandPrefix = "devspace-runtime";
+
+function textResponse(text: string, isError = false): ToolResponse {
+  return {
+    content: [{ type: "text", text }],
+    ...(isError ? { isError: true } : {}),
+  };
+}
+
+function jsonResponse(value: unknown): ToolResponse {
+  return textResponse(JSON.stringify(value, null, 2));
+}
+
+async function runBuiltinRuntimeCommand(
+  input: BashToolInput,
+  context: ToolContext,
+): Promise<ToolResponse | undefined> {
+  const rawCommand = String(input.command ?? "").trim();
+  if (
+    rawCommand !== runtimeCommandPrefix
+    && !rawCommand.startsWith(`${runtimeCommandPrefix} `)
+  ) return undefined;
+
+  if (
+    rawCommand === runtimeCommandPrefix
+    || rawCommand === `${runtimeCommandPrefix} help`
+  ) {
+    return textResponse([
+      "Built-in DevSpace runtime commands:",
+      "  devspace-runtime diagnose [--github] [command ...]",
+      "  devspace-runtime smoke",
+      "  devspace-runtime costs",
+      "  devspace-runtime finder <workspace-relative-path>",
+    ].join("\n"));
+  }
+
+  if (rawCommand === `${runtimeCommandPrefix} costs`) {
+    return jsonResponse(getExecutionCostSnapshot());
+  }
+
+  if (rawCommand === `${runtimeCommandPrefix} smoke`) {
+    const result = await runCompatibilitySmoke(context.root);
+    return {
+      ...jsonResponse(result),
+      ...(result.status === "failed" ? { isError: true } : {}),
+    };
+  }
+
+  if (
+    rawCommand === `${runtimeCommandPrefix} diagnose`
+    || rawCommand.startsWith(`${runtimeCommandPrefix} diagnose `)
+  ) {
+    const args = rawCommand
+      .slice(`${runtimeCommandPrefix} diagnose`.length)
+      .trim()
+      .split(/\s+/u)
+      .filter(Boolean);
+    const checkGitHubAuth = args.includes("--github");
+    const commands = args
+      .filter((arg) => arg !== "--github")
+      .filter((arg) => /^[A-Za-z0-9._+-]+$/u.test(arg))
+      .slice(0, 20);
+    const result = await diagnoseRuntime({
+      workspaceRoot: context.root,
+      commands: commands.length > 0 ? commands : undefined,
+      checkGitHubAuth,
+    });
+    return jsonResponse(result);
+  }
+
+  if (rawCommand.startsWith(`${runtimeCommandPrefix} finder `)) {
+    const rawPath = rawCommand
+      .slice(`${runtimeCommandPrefix} finder `.length)
+      .trim();
+    const requestedPath = (
+      (rawPath.startsWith("\"") && rawPath.endsWith("\""))
+      || (rawPath.startsWith("'") && rawPath.endsWith("'"))
+    ) ? rawPath.slice(1, -1) : rawPath;
+    if (!requestedPath) {
+      return textResponse("Finder path is required.", true);
+    }
+    try {
+      const absolutePath = resolveAllowedPath(requestedPath, context.cwd, [context.root]);
+      return jsonResponse(await openPathInFinder(absolutePath));
+    } catch (error) {
+      return textResponse(error instanceof Error ? error.message : String(error), true);
+    }
+  }
+
+  return textResponse(
+    "Unknown devspace-runtime command. Run `devspace-runtime help`.",
+    true,
+  );
+}
 function approvedCommandsPath(): string {
   return resolve(expandHomePath(
     process.env.DEVSPACE_APPROVED_SHELL_COMMANDS_FILE
@@ -201,6 +301,9 @@ export async function listDirectoryTool(input: LsToolInput, context: ToolContext
 }
 
 export async function runShellTool(input: BashToolInput, context: ToolContext): Promise<ToolResponse> {
+  const builtin = await runBuiltinRuntimeCommand(input, context);
+  if (builtin) return builtin;
+
   let approved: { input: BashToolInput; cwd: string };
   try {
     approved = await resolveApprovedShellAlias(input, context);
