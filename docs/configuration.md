@@ -134,6 +134,7 @@ MCP Tool catalog. These exact commands are intercepted by DevSpace and do not st
 | `devspace-runtime jobs resume <id>` | Resumes an interrupted job or an approval-waiting browser job after the local approval has been executed. |
 | `devspace-runtime computer doctor` | Reports Browser/Desktop Computer Use readiness without starting automation. |
 | `devspace-runtime computer policy` | Returns the non-secret Computer Use allowlist and confirmation policy. |
+| `devspace-runtime computer browser login [url]` | Opens the isolated browser profile without CDP for one-time manual sign-in. Close this window before starting automation. |
 | `devspace-runtime computer browser start\|status\|stop` | Controls the isolated Brave/Chrome CDP session after policy enablement. |
 | `devspace-runtime computer browser open <url>` | Navigates only to an HTTPS or loopback URL whose hostname matches the policy allowlist. |
 | `devspace-runtime computer browser inspect\|screenshot` | Returns bounded interactive-element metadata or a current PNG screenshot. |
@@ -182,8 +183,10 @@ This preset allows only `chatgpt.com`, disables Desktop Computer Use, enables do
 login, submit, upload, download, purchase, delete, and external communication behind local approval.
 
 The default policy requires confirmation for login, submission, upload, download, purchase,
-delete, and external communication; stores no raw credentials; uses a separate browser profile;
-and has empty browser-domain and desktop-application allowlists. Browser Computer uses the
+delete, and external communication; stores no raw credentials; uses a separate persistent browser profile;
+and has empty browser-domain and desktop-application allowlists. Run `devspace computer browser login`
+for the initial manual sign-in without remote debugging; cookies remain in the isolated profile and are
+reused by later automation sessions. Browser Computer uses the
 Node.js native WebSocket/fetch implementation and Chrome DevTools Protocol directly, so it does
 not download another browser or require Playwright. The isolated browser profile may retain its
 own cookies after the user logs in manually; GPT-Agent refuses to type password or credential-like

@@ -45,6 +45,7 @@ import {
   captureBrowserScreenshot,
   clickBrowserPoint,
   inspectBrowserPage,
+  launchBrowserLoginSession,
   listBrowserApprovals,
   openBrowserUrl,
   pressBrowserKey,
@@ -425,6 +426,11 @@ async function runComputerCommand(args: string[]): Promise<void> {
 async function runBrowserComputerCommand(args: string[]): Promise<void> {
   const [subcommand, ...rest] = args;
   switch (subcommand) {
+    case "login": {
+      const url = rest[0] ?? "https://chatgpt.com/";
+      console.log(JSON.stringify(await launchBrowserLoginSession({ url }), null, 2));
+      return;
+    }
     case "start":
       console.log(JSON.stringify(await startBrowserSession(), null, 2));
       return;
@@ -540,6 +546,7 @@ function printComputerHelp(): void {
     "  devspace computer init",
     "  devspace computer enable-chatgpt",
     "  devspace computer policy [--json]",
+    "  devspace computer browser login [url]",
     "  devspace computer browser start|status|stop",
     "  devspace computer browser open <url>",
     "  devspace computer browser inspect",
@@ -551,6 +558,7 @@ function printComputerHelp(): void {
     "  devspace computer browser approvals",
     "",
     "Approval execution is restricted to the local GPT-Agent Tool app.",
+    "Use `browser login` for the one-time manual sign-in without CDP; close that window before `browser start`.",
     "Credentials must be entered manually in the isolated browser.",
   ].join("\n"));
 }

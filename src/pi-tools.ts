@@ -40,6 +40,7 @@ import {
   captureBrowserScreenshot,
   clickBrowserPoint,
   inspectBrowserPage,
+  launchBrowserLoginSession,
   listBrowserApprovals,
   openBrowserUrl,
   pressBrowserKey,
@@ -132,6 +133,7 @@ async function runBuiltinRuntimeCommand(
       "  devspace-runtime jobs resume <id>",
       "  devspace-runtime computer doctor",
       "  devspace-runtime computer policy",
+      "  devspace-runtime computer browser login [url]",
       "  devspace-runtime computer browser start|status|stop",
       "  devspace-runtime computer browser open <url>",
       "  devspace-runtime computer browser inspect|screenshot",
@@ -238,6 +240,12 @@ async function runBuiltinRuntimeCommand(
 async function runRuntimeBrowserCommand(rawCommand: string): Promise<ToolResponse> {
   const prefix = `${runtimeCommandPrefix} computer browser `;
   const command = rawCommand.slice(prefix.length).trim();
+  if (command === "login") return jsonResponse(await launchBrowserLoginSession());
+  if (command.startsWith("login ")) {
+    const rawUrl = stripOuterQuotes(command.slice("login ".length).trim());
+    if (!rawUrl) throw new Error("Usage: devspace-runtime computer browser login [url]");
+    return jsonResponse(await launchBrowserLoginSession({ url: rawUrl }));
+  }
   if (command === "start") return jsonResponse(await startBrowserSession());
   if (command === "status") return jsonResponse(await browserStatus());
   if (command === "stop") return jsonResponse(await stopBrowserSession());

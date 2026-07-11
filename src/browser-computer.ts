@@ -385,6 +385,43 @@ function formatLocalDate(date: Date): string {
   return `${year}-${month}-${day}`;
 }
 
+export async function launchBrowserLoginSession(
+  input: { url?: string; policyPath?: string; home?: string } = {},
+): Promise<{
+  status: "launched";
+  pid: number;
+  browserName: string;
+  profileDirectory: string;
+  url: string;
+}> {
+  const home = input.home ?? homedir();
+  const policy = loadPolicy(input.policyPath, home);
+  const requested = validateBrowserUrl(input.url ?? "https://chatgpt.com/", policy);
+  await stopBrowserSession(home);
+  const browser = findSupportedBrowser();
+  if (!browser) throw new Error("Brave, Chrome, or Chromium was not found.");
+  const profileDirectory = resolve(policy.browser.profileDirectory);
+  ensurePrivateDirectory(profileDirectory);
+  const child = spawn(browser.path, [
+    `--user-data-dir=${profileDirectory}`,
+    "--no-first-run",
+    "--no-default-browser-check",
+    requested.toString(),
+  ], {
+    detached: true,
+    stdio: "ignore",
+  });
+  child.unref();
+  if (!child.pid) throw new Error("Login browser process did not return a PID.");
+  return {
+    status: "launched",
+    pid: child.pid,
+    browserName: browser.name,
+    profileDirectory,
+    url: requested.toString(),
+  };
+}
+
 export async function stopBrowserSession(home: string = homedir()): Promise<{ status: "stopped" | "not-running" }> {
   const session = readSession(home);
   if (!session) return { status: "not-running" };
