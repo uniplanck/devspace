@@ -377,6 +377,26 @@ function compactInstructionContent(content: string, limit: number): {
   };
 }
 
+function redactSensitiveShellCommand(command: string): string {
+  const typePrefix = "devspace-runtime computer browser type ";
+  if (command.startsWith(typePrefix)) {
+    return `${typePrefix}[REDACTED ${Math.max(0, command.length - typePrefix.length)} chars]`;
+  }
+  const openPrefix = "devspace-runtime computer browser open ";
+  if (command.startsWith(openPrefix)) {
+    const raw = command.slice(openPrefix.length).trim().replace(/^(["'])|(["'])$/gu, "");
+    try {
+      const url = new URL(raw);
+      url.search = "";
+      url.hash = "";
+      return `${openPrefix}${url.toString()}`;
+    } catch {
+      return `${openPrefix}[REDACTED URL]`;
+    }
+  }
+  return command;
+}
+
 function textSummary(content: ToolContent[]): {
   lines: number;
   characters: number;
@@ -1742,19 +1762,20 @@ function createMcpServer(
         workspaceId,
       });
 
+      const loggedCommand = redactSensitiveShellCommand(input.command);
       if (response.isError) {
         logFailedToolResponse(config, {
           tool: toolNames.shell,
           workspaceId,
           workingDirectory: workingDirectory ?? ".",
-          command: input.command,
+          command: loggedCommand,
           commandLength: input.command.length,
         }, response.content, startedAt);
         return response;
       }
 
       const summary = {
-        command: input.command,
+        command: loggedCommand,
         workingDirectory: workingDirectory ?? ".",
         ...textSummary(response.content),
       };
@@ -1774,7 +1795,7 @@ function createMcpServer(
         tool: toolNames.shell,
         workspaceId,
         workingDirectory: workingDirectory ?? ".",
-        command: input.command,
+        command: loggedCommand,
         commandLength: input.command.length,
         success: true,
         durationMs: Math.round(performance.now() - startedAt),

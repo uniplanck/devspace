@@ -132,6 +132,14 @@ MCP Tool catalog. These exact commands are intercepted by DevSpace and do not st
 | `devspace-runtime jobs cancel <id>` | Requests cancellation of an active job in the same workspace. |
 | `devspace-runtime computer doctor` | Reports Browser/Desktop Computer Use readiness without starting automation. |
 | `devspace-runtime computer policy` | Returns the non-secret Computer Use allowlist and confirmation policy. |
+| `devspace-runtime computer browser start\|status\|stop` | Controls the isolated Brave/Chrome CDP session after policy enablement. |
+| `devspace-runtime computer browser open <url>` | Navigates only to an HTTPS or loopback URL whose hostname matches the policy allowlist. |
+| `devspace-runtime computer browser inspect\|screenshot` | Returns bounded interactive-element metadata or a current PNG screenshot. |
+| `devspace-runtime computer browser click <x> <y>` | Clicks a safe element or creates a local human-approval request for sensitive actions. |
+| `devspace-runtime computer browser type <text>` | Types into a focused non-credential field; password and credential-like fields are rejected. |
+| `devspace-runtime computer browser key <key>` | Sends a bounded navigation key; Enter is approval-gated when form submission confirmation is enabled. |
+| `devspace-runtime computer browser scroll <dx> <dy>` | Scrolls the active page using bounded deltas. |
+| `devspace-runtime computer browser approvals` | Lists pending local approval requests without executing them. |
 | `devspace-runtime finder <path>` | On macOS, opens a validated workspace directory or reveals a validated file in Finder after an explicit request. |
 
 Shell execution augments the inherited PATH with existing standard locations such as
@@ -165,16 +173,22 @@ devspace computer policy
 ```
 
 The default policy requires confirmation for login, submission, upload, download, purchase,
-delete, and external communication; stores no credentials; uses a separate browser profile;
-and has empty browser-domain and desktop-application allowlists. Browser control additionally
-requires Playwright or Playwright Core. The doctor command only reports readiness and never
-requests permissions or launches a browser.
+delete, and external communication; stores no raw credentials; uses a separate browser profile;
+and has empty browser-domain and desktop-application allowlists. Browser Computer uses the
+Node.js native WebSocket/fetch implementation and Chrome DevTools Protocol directly, so it does
+not download another browser or require Playwright. The isolated browser profile may retain its
+own cookies after the user logs in manually; GPT-Agent refuses to type password or credential-like
+fields and does not return input values in inspection results.
 
-The v1.1 package intentionally ships Design Audit as an adapter only: no Playwright/CDP/axe
-runtime is currently bundled, no browser binary is downloaded, and an enabled Tool returns an
-unavailable error until a real adapter is connected. A future adapter must use an ephemeral
-browser, validate redirects and subresources against the same URL policy, avoid cookies, write
-artifacts only inside the requested workspace directory, and terminate the browser in `finally`.
+Sensitive clicks and Enter-based submissions create a short-lived approval request. ChatGPT can
+list the request but cannot execute it through the built-in runtime command. Approval is performed
+from the local GPT-Agent Tool app and is followed by a native macOS confirmation dialog. Screenshot
+artifacts, session state, and approvals are stored with private permissions under `~/.devspace`.
+Top-level navigation is revalidated after redirects and is reset to `about:blank` if it leaves the
+allowlist.
+
+Design Audit remains a separate adapter: the Browser Computer CDP session is not silently reused
+for design auditing, axe analysis, or authenticated page inspection.
 
 Skills may optionally declare bounded `short-description`, `triggers`, and `required-tools`
 frontmatter for matching. Existing `name` and `description` metadata remains fully compatible;

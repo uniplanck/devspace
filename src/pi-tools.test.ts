@@ -87,6 +87,16 @@ try {
     /"enabled": false/,
   );
 
+  const browserStartDenied = await runShellTool(
+    { command: "devspace-runtime computer browser start" },
+    { cwd: root, root },
+  );
+  assert.equal(browserStartDenied.isError, true);
+  assert.match(
+    browserStartDenied.content[0]?.type === "text" ? browserStartDenied.content[0].text : "",
+    /disabled by policy/,
+  );
+
   const finderEscape = await runShellTool(
     { command: "devspace-runtime finder ../outside" },
     { cwd: root, root },

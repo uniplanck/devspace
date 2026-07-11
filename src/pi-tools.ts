@@ -35,6 +35,19 @@ import {
   diagnoseComputerUse,
   loadComputerUsePolicy,
 } from "./computer-use.js";
+import {
+  browserStatus,
+  captureBrowserScreenshot,
+  clickBrowserPoint,
+  inspectBrowserPage,
+  listBrowserApprovals,
+  openBrowserUrl,
+  pressBrowserKey,
+  scrollBrowserPage,
+  startBrowserSession,
+  stopBrowserSession,
+  typeBrowserText,
+} from "./browser-computer.js";
 
 type McpContent = { type: "text"; text: string } | { type: "image"; data: string; mimeType: string };
 export type ToolResponse<TDetails = unknown> = {
@@ -117,6 +130,14 @@ async function runBuiltinRuntimeCommand(
       "  devspace-runtime jobs cancel <id>",
       "  devspace-runtime computer doctor",
       "  devspace-runtime computer policy",
+      "  devspace-runtime computer browser start|status|stop",
+      "  devspace-runtime computer browser open <url>",
+      "  devspace-runtime computer browser inspect|screenshot",
+      "  devspace-runtime computer browser click <x> <y>",
+      "  devspace-runtime computer browser type <text>",
+      "  devspace-runtime computer browser key <key>",
+      "  devspace-runtime computer browser scroll <delta-x> <delta-y>",
+      "  devspace-runtime computer browser approvals",
     ].join("\n"));
   }
 
@@ -165,6 +186,14 @@ async function runBuiltinRuntimeCommand(
     return jsonResponse({ path, exists: loaded.exists, policy: loaded.policy });
   }
 
+  if (rawCommand.startsWith(`${runtimeCommandPrefix} computer browser `)) {
+    try {
+      return await runRuntimeBrowserCommand(rawCommand);
+    } catch (error) {
+      return textResponse(error instanceof Error ? error.message : String(error), true);
+    }
+  }
+
   if (
     rawCommand === `${runtimeCommandPrefix} jobs list`
     || rawCommand.startsWith(`${runtimeCommandPrefix} jobs start `)
@@ -201,6 +230,55 @@ async function runBuiltinRuntimeCommand(
     "Unknown devspace-runtime command. Run `devspace-runtime help`.",
     true,
   );
+}
+
+async function runRuntimeBrowserCommand(rawCommand: string): Promise<ToolResponse> {
+  const prefix = `${runtimeCommandPrefix} computer browser `;
+  const command = rawCommand.slice(prefix.length).trim();
+  if (command === "start") return jsonResponse(await startBrowserSession());
+  if (command === "status") return jsonResponse(await browserStatus());
+  if (command === "stop") return jsonResponse(await stopBrowserSession());
+  if (command === "inspect") return jsonResponse(await inspectBrowserPage());
+  if (command === "approvals") {
+    return jsonResponse({ approvals: listBrowserApprovals() });
+  }
+  if (command === "screenshot") {
+    const screenshot = await captureBrowserScreenshot();
+    const { base64, ...metadata } = screenshot;
+    return {
+      content: [
+        { type: "text", text: JSON.stringify(metadata, null, 2) },
+        { type: "image", data: base64, mimeType: screenshot.mimeType },
+      ],
+      details: metadata,
+    };
+  }
+  if (command.startsWith("open ")) {
+    const rawUrl = stripOuterQuotes(command.slice("open ".length).trim());
+    if (!rawUrl) throw new Error("Usage: devspace-runtime computer browser open <url>");
+    return jsonResponse(await openBrowserUrl(rawUrl));
+  }
+  if (command.startsWith("click ")) {
+    const match = /^click\s+(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)$/u.exec(command);
+    if (!match) throw new Error("Usage: devspace-runtime computer browser click <x> <y>");
+    return jsonResponse(await clickBrowserPoint(Number(match[1]), Number(match[2])));
+  }
+  if (command.startsWith("type ")) {
+    const text = stripOuterQuotes(command.slice("type ".length));
+    if (!text) throw new Error("Usage: devspace-runtime computer browser type <text>");
+    return jsonResponse(await typeBrowserText(text));
+  }
+  if (command.startsWith("key ")) {
+    const key = command.slice("key ".length).trim();
+    if (!key) throw new Error("Usage: devspace-runtime computer browser key <key>");
+    return jsonResponse(await pressBrowserKey(key));
+  }
+  if (command.startsWith("scroll ")) {
+    const match = /^scroll\s+(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)$/u.exec(command);
+    if (!match) throw new Error("Usage: devspace-runtime computer browser scroll <delta-x> <delta-y>");
+    return jsonResponse(await scrollBrowserPage(Number(match[1]), Number(match[2])));
+  }
+  throw new Error("Unknown browser command. Run `devspace-runtime help`.");
 }
 
 function runRuntimeJobsCommand(rawCommand: string, context: ToolContext): ToolResponse {

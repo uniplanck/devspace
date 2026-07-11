@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { createRequire } from "node:module";
 import { stdin as input, stdout as output } from "node:process";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -37,6 +37,21 @@ import {
   initializeComputerUsePolicy,
   loadComputerUsePolicy,
 } from "./computer-use.js";
+import {
+  approveBrowserAction,
+  browserStatus,
+  cancelBrowserApproval,
+  captureBrowserScreenshot,
+  clickBrowserPoint,
+  inspectBrowserPage,
+  listBrowserApprovals,
+  openBrowserUrl,
+  pressBrowserKey,
+  scrollBrowserPage,
+  startBrowserSession,
+  stopBrowserSession,
+  typeBrowserText,
+} from "./browser-computer.js";
 import {
   ensureDevspaceDefaultSkills,
   generateOwnerToken,
@@ -79,7 +94,7 @@ async function main(argv: string[]): Promise<void> {
       await runJobsCommand(args);
       return;
     case "computer":
-      runComputerCommand(args);
+      await runComputerCommand(args);
       return;
     case "help":
       printHelp();
@@ -326,6 +341,7 @@ function printHelp(): void {
       "  devspace computer doctor [--json]",
       "  devspace computer init",
       "  devspace computer policy [--json]",
+      "  devspace computer browser <command>",
       "  devspace -v, --version   Print the installed version",
       "",
       "For temporary tunnels:",
@@ -334,7 +350,7 @@ function printHelp(): void {
   );
 }
 
-function runComputerCommand(args: string[]): void {
+async function runComputerCommand(args: string[]): Promise<void> {
   const [subcommand, ...rest] = args;
   switch (subcommand) {
     case "doctor": {
@@ -347,7 +363,7 @@ function runComputerCommand(args: string[]): void {
         `Computer Use: ${result.enabled ? "enabled" : "disabled"}`,
         `Policy: ${result.policyExists ? (result.policyValid ? "valid" : "invalid") : "not initialized"} (${result.policyPath})`,
         `Browser: ${result.browser.ready ? "ready" : "not ready"}${result.browser.name ? ` — ${result.browser.name}` : ""}`,
-        `Playwright: ${result.browser.playwrightAvailable ? "available" : "missing"}`,
+        `Browser adapter: ${result.browser.adapter} (${result.browser.nativeCdpAvailable ? "available" : "missing"})`,
         `Desktop: ${result.desktop.ready ? "ready" : "not ready"}`,
         `Confirmations: ${result.safety.confirmationsRequired.join(", ") || "none"}`,
         ...result.missingRequirements.map((item) => `Missing: ${item}`),
@@ -379,24 +395,150 @@ function runComputerCommand(args: string[]): void {
       ].join("\n"));
       return;
     }
+    case "browser":
+      await runBrowserComputerCommand(rest);
+      return;
     case undefined:
     case "help":
     case "--help":
     case "-h":
-      console.log([
-        "GPT-Agent Computer Use foundation",
-        "",
-        "Usage:",
-        "  devspace computer doctor [--json]",
-        "  devspace computer init",
-        "  devspace computer policy [--json]",
-        "",
-        "Initialization creates a disabled policy. It does not grant permissions or start automation.",
-      ].join("\n"));
+      printComputerHelp();
       return;
     default:
       throw new Error(`Unknown computer command: ${subcommand}`);
   }
+}
+
+async function runBrowserComputerCommand(args: string[]): Promise<void> {
+  const [subcommand, ...rest] = args;
+  switch (subcommand) {
+    case "start":
+      console.log(JSON.stringify(await startBrowserSession(), null, 2));
+      return;
+    case "status":
+      console.log(JSON.stringify(await browserStatus(), null, 2));
+      return;
+    case "stop":
+      console.log(JSON.stringify(await stopBrowserSession(), null, 2));
+      return;
+    case "open": {
+      const url = rest[0];
+      if (!url) throw new Error("Usage: devspace computer browser open <url>");
+      console.log(JSON.stringify(await openBrowserUrl(url), null, 2));
+      return;
+    }
+    case "inspect":
+      console.log(JSON.stringify(await inspectBrowserPage(), null, 2));
+      return;
+    case "screenshot": {
+      const screenshot = await captureBrowserScreenshot();
+      const { base64: _base64, ...safe } = screenshot;
+      console.log(JSON.stringify(safe, null, 2));
+      return;
+    }
+    case "click": {
+      const x = Number(rest[0]);
+      const y = Number(rest[1]);
+      console.log(JSON.stringify(await clickBrowserPoint(x, y), null, 2));
+      return;
+    }
+    case "type": {
+      const text = rest.join(" ");
+      if (!text) throw new Error("Usage: devspace computer browser type <text>");
+      console.log(JSON.stringify(await typeBrowserText(text), null, 2));
+      return;
+    }
+    case "key": {
+      const key = rest[0];
+      if (!key) throw new Error("Usage: devspace computer browser key <key>");
+      console.log(JSON.stringify(await pressBrowserKey(key), null, 2));
+      return;
+    }
+    case "scroll": {
+      const deltaX = Number(rest[0]);
+      const deltaY = Number(rest[1]);
+      console.log(JSON.stringify(await scrollBrowserPage(deltaX, deltaY), null, 2));
+      return;
+    }
+    case "approvals":
+      console.log(JSON.stringify({ approvals: listBrowserApprovals() }, null, 2));
+      return;
+    case "approve": {
+      const id = rest[0];
+      if (!id) throw new Error("Usage: devspace computer browser approve <approval-id>");
+      const localApproval = process.env.DEVSPACE_LOCAL_APPROVAL_UI === "1";
+      if (localApproval) confirmBrowserApprovalWithMacOS(id);
+      console.log(JSON.stringify(await approveBrowserAction(id, { localApproval }), null, 2));
+      return;
+    }
+    case "reject": {
+      const id = rest[0];
+      if (!id) throw new Error("Usage: devspace computer browser reject <approval-id>");
+      if (process.env.DEVSPACE_LOCAL_APPROVAL_UI !== "1") {
+        throw new Error("Browser approval rejection requires the local GPT-Agent Tool app.");
+      }
+      console.log(JSON.stringify(cancelBrowserApproval(id), null, 2));
+      return;
+    }
+    case undefined:
+    case "help":
+    case "--help":
+    case "-h":
+      printComputerHelp();
+      return;
+    default:
+      throw new Error(`Unknown browser computer command: ${subcommand}`);
+  }
+}
+
+function confirmBrowserApprovalWithMacOS(id: string): void {
+  if (process.platform !== "darwin") {
+    throw new Error("Local Browser Computer approval currently requires macOS.");
+  }
+  const approval = listBrowserApprovals().find((candidate) => candidate.id === id);
+  if (!approval || approval.status !== "pending") {
+    throw new Error(`Pending browser approval was not found: ${id}`);
+  }
+  const label = approval.element?.text || approval.element?.ariaLabel || approval.category;
+  const safeLabel = label.replace(/[\\"\n\r]/gu, " ").slice(0, 120);
+  const safeReason = approval.reason.replace(/[\\"\n\r]/gu, " ").slice(0, 180);
+  const script = [
+    `display dialog "GPT-Agent Browser Computer\\n\\n${safeLabel}\\n${safeReason}\\n\\nExecute this action?"`,
+    `buttons {"Cancel", "Approve"}`,
+    `default button "Approve"`,
+    `cancel button "Cancel"`,
+    `with icon caution`,
+  ].join(" ");
+  const result = spawnSync("/usr/bin/osascript", ["-e", script], {
+    encoding: "utf8",
+    timeout: 120_000,
+  });
+  if (result.status !== 0 || !String(result.stdout).includes("Approve")) {
+    throw new Error("Browser approval was cancelled locally.");
+  }
+}
+
+function printComputerHelp(): void {
+  console.log([
+    "GPT-Agent Computer Use",
+    "",
+    "Usage:",
+    "  devspace computer doctor [--json]",
+    "  devspace computer init",
+    "  devspace computer policy [--json]",
+    "  devspace computer browser start|status|stop",
+    "  devspace computer browser open <url>",
+    "  devspace computer browser inspect",
+    "  devspace computer browser screenshot",
+    "  devspace computer browser click <x> <y>",
+    "  devspace computer browser type <text>",
+    "  devspace computer browser key <Tab|Escape|Backspace|Arrow...|Enter>",
+    "  devspace computer browser scroll <delta-x> <delta-y>",
+    "  devspace computer browser approvals",
+    "",
+    "Approval execution is restricted to the local GPT-Agent Tool app.",
+    "Credentials must be entered manually in the isolated browser.",
+  ].join("\n"));
 }
 
 async function runJobsCommand(args: string[]): Promise<void> {

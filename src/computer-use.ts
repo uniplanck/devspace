@@ -36,6 +36,8 @@ export interface ComputerUseDoctorResult {
     enabled: boolean;
     executable?: string;
     name?: string;
+    adapter: "native-cdp";
+    nativeCdpAvailable: boolean;
     playwrightAvailable: boolean;
     allowedDomainCount: number;
     profileDirectory: string;
@@ -58,7 +60,7 @@ export interface ComputerUseDoctorResult {
   diagnostics: string[];
 }
 
-const browserCandidates = [
+export const browserCandidates = [
   {
     name: "Brave Browser",
     path: "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
@@ -159,6 +161,7 @@ export function diagnoseComputerUse(input: {
   const policy = loaded.policy;
   const browser = browserCandidates.find((candidate) => fileExists(candidate.path));
   const playwrightAvailable = packageAvailable("playwright") || packageAvailable("playwright-core");
+  const nativeCdpAvailable = typeof WebSocket === "function" && typeof fetch === "function";
   const screenCaptureTool = fileExists("/usr/sbin/screencapture") || fileExists("/usr/bin/screencapture");
   const accessibilityTool = fileExists("/usr/bin/osascript");
   const missingRequirements: string[] = [];
@@ -168,7 +171,7 @@ export function diagnoseComputerUse(input: {
   if (!loaded.valid) missingRequirements.push("Repair the invalid Computer Use policy file.");
   if (!policy.enabled) diagnostics.push("Computer Use is disabled by policy.");
   if (!browser) missingRequirements.push("Install Brave, Chrome, or Chromium.");
-  if (!playwrightAvailable) missingRequirements.push("Install Playwright or Playwright Core before browser control is enabled.");
+  if (!nativeCdpAvailable) missingRequirements.push("Node.js WebSocket/fetch support is required for the native CDP adapter.");
   if (policy.browser.enabled && policy.browser.allowedDomains.length === 0) {
     missingRequirements.push("Add at least one allowed browser domain.");
   }
@@ -187,7 +190,7 @@ export function diagnoseComputerUse(input: {
     && policy.enabled
     && policy.browser.enabled
     && browser
-    && playwrightAvailable
+    && nativeCdpAvailable
     && policy.browser.allowedDomains.length > 0,
   );
   const desktopReady = Boolean(
@@ -210,6 +213,8 @@ export function diagnoseComputerUse(input: {
       enabled: policy.browser.enabled,
       executable: browser?.path,
       name: browser?.name,
+      adapter: "native-cdp",
+      nativeCdpAvailable,
       playwrightAvailable,
       allowedDomainCount: policy.browser.allowedDomains.length,
       profileDirectory: resolve(expandHome(policy.browser.profileDirectory, home)),
@@ -279,6 +284,43 @@ function validatePolicy(value: unknown, home: string): ComputerUsePolicy {
       ),
     },
   };
+}
+
+export function findSupportedBrowser(
+  fileExists: (path: string) => boolean = existsSync,
+): { name: string; path: string } | undefined {
+  return browserCandidates.find((candidate) => fileExists(candidate.path));
+}
+
+export function isAllowedBrowserHost(hostname: string, allowedDomains: string[]): boolean {
+  const normalized = hostname.normalize("NFKC").trim().toLocaleLowerCase().replace(/\.$/u, "");
+  return allowedDomains.some((domain) => {
+    const allowed = normalizeDomain(domain);
+    if (allowed.startsWith("*.")) {
+      const suffix = allowed.slice(2);
+      return normalized !== suffix && normalized.endsWith(`.${suffix}`);
+    }
+    return normalized === allowed;
+  });
+}
+
+export function validateBrowserUrl(rawUrl: string, policy: ComputerUsePolicy): URL {
+  let url: URL;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    throw new Error("Browser URL must be an absolute URL.");
+  }
+  if (url.username || url.password) throw new Error("Credentials must not be embedded in browser URLs.");
+  const localHost = url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "[::1]" || url.hostname === "::1";
+  if (url.protocol !== "https:" && !(url.protocol === "http:" && localHost)) {
+    throw new Error("Browser navigation requires HTTPS, except for loopback development URLs.");
+  }
+  if (!isAllowedBrowserHost(url.hostname, policy.browser.allowedDomains)) {
+    throw new Error(`Browser domain is not allowed by policy: ${url.hostname}`);
+  }
+  url.hash = "";
+  return url;
 }
 
 function normalizeDomain(value: string): string {
