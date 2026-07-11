@@ -29,6 +29,14 @@ import {
 } from "./local-agent-targets.js";
 import { createLocalAgentStore, type LocalAgentRecord } from "./local-agent-store.js";
 import type { LocalAgentRunResult } from "./local-agent-runtime.js";
+import { cancelJob, runJobWorker, startJob } from "./job-runner.js";
+import { createJobStore, isJobPreset, JOB_PRESETS, type JobRecord } from "./job-store.js";
+import {
+  computerUsePolicyPath,
+  diagnoseComputerUse,
+  initializeComputerUsePolicy,
+  loadComputerUsePolicy,
+} from "./computer-use.js";
 import {
   ensureDevspaceDefaultSkills,
   generateOwnerToken,
@@ -40,7 +48,7 @@ import {
 } from "./user-config.js";
 import { expandHomePath } from "./roots.js";
 
-type Command = "serve" | "init" | "doctor" | "config" | "agents" | "help" | "version";
+type Command = "serve" | "init" | "doctor" | "config" | "agents" | "jobs" | "computer" | "help" | "version";
 const require = createRequire(import.meta.url);
 const SUPPORTED_NODE_RANGE = ">=20.12 <27";
 
@@ -67,6 +75,12 @@ async function main(argv: string[]): Promise<void> {
     case "agents":
       await runAgentsCommand(args);
       return;
+    case "jobs":
+      await runJobsCommand(args);
+      return;
+    case "computer":
+      runComputerCommand(args);
+      return;
     case "help":
       printHelp();
       return;
@@ -78,7 +92,7 @@ async function main(argv: string[]): Promise<void> {
 
 function normalizeCommand(command: string | undefined): Command {
   if (!command || command === "serve" || command === "start") return "serve";
-  if (command === "init" || command === "doctor" || command === "config" || command === "agents") return command;
+  if (command === "init" || command === "doctor" || command === "config" || command === "agents" || command === "jobs" || command === "computer") return command;
   if (command === "help" || command === "--help" || command === "-h") return "help";
   if (command === "version" || command === "--version" || command === "-v") return "version";
   throw new Error(`Unknown command: ${command}`);
@@ -305,12 +319,212 @@ function printHelp(): void {
       "  devspace agents ls       List subagent sessions",
       "  devspace agents run <profile-or-provider-or-id> [--model <model>] <prompt>",
       "  devspace agents show <id>",
+      "  devspace jobs start <preset> [--title <title>]",
+      "  devspace jobs ls [--json]",
+      "  devspace jobs show <id> [--events] [--json]",
+      "  devspace jobs cancel <id>",
+      "  devspace computer doctor [--json]",
+      "  devspace computer init",
+      "  devspace computer policy [--json]",
       "  devspace -v, --version   Print the installed version",
       "",
       "For temporary tunnels:",
       "  DEVSPACE_PUBLIC_BASE_URL=https://example.trycloudflare.com devspace serve",
     ].join("\n"),
   );
+}
+
+function runComputerCommand(args: string[]): void {
+  const [subcommand, ...rest] = args;
+  switch (subcommand) {
+    case "doctor": {
+      const result = diagnoseComputerUse();
+      if (rest.includes("--json")) {
+        console.log(JSON.stringify(result, null, 2));
+        return;
+      }
+      console.log([
+        `Computer Use: ${result.enabled ? "enabled" : "disabled"}`,
+        `Policy: ${result.policyExists ? (result.policyValid ? "valid" : "invalid") : "not initialized"} (${result.policyPath})`,
+        `Browser: ${result.browser.ready ? "ready" : "not ready"}${result.browser.name ? ` — ${result.browser.name}` : ""}`,
+        `Playwright: ${result.browser.playwrightAvailable ? "available" : "missing"}`,
+        `Desktop: ${result.desktop.ready ? "ready" : "not ready"}`,
+        `Confirmations: ${result.safety.confirmationsRequired.join(", ") || "none"}`,
+        ...result.missingRequirements.map((item) => `Missing: ${item}`),
+        ...result.diagnostics.map((item) => `Note: ${item}`),
+      ].join("\n"));
+      return;
+    }
+    case "init": {
+      const initialized = initializeComputerUsePolicy();
+      console.log(`${initialized.created ? "Created" : "Existing"} disabled-by-default policy: ${initialized.path}`);
+      return;
+    }
+    case "policy": {
+      const path = computerUsePolicyPath();
+      const loaded = loadComputerUsePolicy(path);
+      if (!loaded.valid) throw new Error(`Computer Use policy is invalid: ${loaded.error}`);
+      if (rest.includes("--json")) {
+        console.log(JSON.stringify({ path, exists: loaded.exists, policy: loaded.policy }, null, 2));
+        return;
+      }
+      console.log([
+        `Policy: ${path}`,
+        `Exists: ${loaded.exists}`,
+        `Enabled: ${loaded.policy.enabled}`,
+        `Browser enabled: ${loaded.policy.browser.enabled}`,
+        `Allowed domains: ${loaded.policy.browser.allowedDomains.length}`,
+        `Desktop enabled: ${loaded.policy.desktop.enabled}`,
+        `Allowed applications: ${loaded.policy.desktop.allowedApplications.length}`,
+      ].join("\n"));
+      return;
+    }
+    case undefined:
+    case "help":
+    case "--help":
+    case "-h":
+      console.log([
+        "GPT-Agent Computer Use foundation",
+        "",
+        "Usage:",
+        "  devspace computer doctor [--json]",
+        "  devspace computer init",
+        "  devspace computer policy [--json]",
+        "",
+        "Initialization creates a disabled policy. It does not grant permissions or start automation.",
+      ].join("\n"));
+      return;
+    default:
+      throw new Error(`Unknown computer command: ${subcommand}`);
+  }
+}
+
+async function runJobsCommand(args: string[]): Promise<void> {
+  const [subcommand, ...rest] = args;
+  switch (subcommand) {
+    case "start":
+      await runJobsStart(rest);
+      return;
+    case "ls":
+    case "list":
+      runJobsList(rest);
+      return;
+    case "show":
+      runJobsShow(rest);
+      return;
+    case "cancel":
+      runJobsCancel(rest);
+      return;
+    case "__worker":
+      await runJobsWorker(rest);
+      return;
+    case undefined:
+    case "help":
+    case "--help":
+    case "-h":
+      printJobsHelp();
+      return;
+    default:
+      throw new Error(`Unknown jobs command: ${subcommand}`);
+  }
+}
+
+async function runJobsStart(args: string[]): Promise<void> {
+  const [presetValue] = args;
+  if (!presetValue || !isJobPreset(presetValue)) {
+    throw new Error(`Usage: devspace jobs start <preset>. Presets: ${JOB_PRESETS.join(", ")}`);
+  }
+  const titleIndex = args.indexOf("--title");
+  const title = titleIndex >= 0 ? args[titleIndex + 1] : undefined;
+  if (titleIndex >= 0 && !title) throw new Error("--title requires a value.");
+  const config = loadConfig();
+  const record = startJob(config, {
+    workspaceId: process.env.DEVSPACE_WORKSPACE_ID || undefined,
+    workspaceRoot: resolveCurrentWorkspaceRoot(),
+    preset: presetValue,
+    title,
+  });
+  console.log(formatJobLine(record));
+}
+
+function runJobsList(args: string[]): void {
+  const config = loadConfig();
+  const store = createJobStore(config);
+  try {
+    store.recoverStaleJobs();
+    const all = args.includes("--all");
+    const json = args.includes("--json");
+    const scope = all ? {} : resolveCurrentWorkspaceScope();
+    const jobs = store.list({ ...scope, limit: 100 });
+    if (json) {
+      console.log(JSON.stringify({ jobs }, null, 2));
+      return;
+    }
+    if (jobs.length === 0) {
+      console.log(all ? "No GPT-Agent jobs found." : "No GPT-Agent jobs found for this workspace.");
+      return;
+    }
+    for (const job of jobs) console.log(formatJobLine(job));
+  } finally {
+    store.close();
+  }
+}
+
+function runJobsShow(args: string[]): void {
+  const [id] = args;
+  if (!id) throw new Error("Usage: devspace jobs show <id> [--events] [--json]");
+  const config = loadConfig();
+  const store = createJobStore(config);
+  try {
+    store.recoverStaleJobs();
+    const job = store.get(id);
+    if (!job) throw new Error(`Unknown or ambiguous job id: ${id}`);
+    const includeEvents = args.includes("--events");
+    const events = includeEvents ? store.events(job.id, 200) : undefined;
+    if (args.includes("--json")) {
+      console.log(JSON.stringify({ job, ...(events ? { events } : {}) }, null, 2));
+      return;
+    }
+    console.log(formatJobLine(job));
+    if (job.error) console.log(`error: ${job.error}`);
+    for (const event of events ?? []) {
+      console.log(`${event.timestamp} ${event.level.padEnd(7)} ${event.message}`);
+    }
+  } finally {
+    store.close();
+  }
+}
+
+function runJobsCancel(args: string[]): void {
+  const [id] = args;
+  if (!id) throw new Error("Usage: devspace jobs cancel <id>");
+  const record = cancelJob(loadConfig(), id);
+  console.log(formatJobLine(record));
+}
+
+async function runJobsWorker(args: string[]): Promise<void> {
+  const [id] = args;
+  if (!id) throw new Error("Usage: devspace jobs __worker <id>");
+  await runJobWorker(loadConfig(), id);
+}
+
+function formatJobLine(job: JobRecord): string {
+  return `${job.id} ${job.status.padEnd(11)} ${String(job.progress).padStart(3)}% ${job.preset.padEnd(13)} ${job.title} — ${job.currentStep}`;
+}
+
+function printJobsHelp(): void {
+  console.log([
+    "GPT-Agent jobs",
+    "",
+    "Safe parallel presets:",
+    `  ${JOB_PRESETS.join(", ")}`,
+    "",
+    "Usage:",
+    "  devspace jobs start <preset> [--title <title>]",
+    "  devspace jobs ls [--all] [--json]",
+    "  devspace jobs show <id> [--events] [--json]",
+    "  devspace jobs cancel <id>",
+  ].join("\n"));
 }
 
 async function runAgentsCommand(args: string[]): Promise<void> {

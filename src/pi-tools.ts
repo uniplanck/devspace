@@ -27,6 +27,14 @@ import {
 } from "./runtime-operations.js";
 import { commandWithAugmentedPath } from "./shell-environment.js";
 import { getExecutionCostSnapshot } from "./usage-meter.js";
+import { loadConfig } from "./config.js";
+import { cancelJob, startJob } from "./job-runner.js";
+import { createJobStore, isJobPreset, JOB_PRESETS } from "./job-store.js";
+import {
+  computerUsePolicyPath,
+  diagnoseComputerUse,
+  loadComputerUsePolicy,
+} from "./computer-use.js";
 
 type McpContent = { type: "text"; text: string } | { type: "image"; data: string; mimeType: string };
 export type ToolResponse<TDetails = unknown> = {
@@ -38,6 +46,7 @@ export type ToolResponse<TDetails = unknown> = {
 interface ToolContext {
   cwd: string;
   root: string;
+  workspaceId?: string;
   readRoots?: string[];
 }
 
@@ -102,6 +111,12 @@ async function runBuiltinRuntimeCommand(
       "  devspace-runtime smoke",
       "  devspace-runtime costs",
       "  devspace-runtime finder <workspace-relative-path>",
+      "  devspace-runtime jobs start <preset> [--title <title>]",
+      "  devspace-runtime jobs list",
+      "  devspace-runtime jobs show <id> [--events]",
+      "  devspace-runtime jobs cancel <id>",
+      "  devspace-runtime computer doctor",
+      "  devspace-runtime computer policy",
     ].join("\n"));
   }
 
@@ -139,6 +154,30 @@ async function runBuiltinRuntimeCommand(
     return jsonResponse(result);
   }
 
+  if (rawCommand === `${runtimeCommandPrefix} computer doctor`) {
+    return jsonResponse(diagnoseComputerUse());
+  }
+
+  if (rawCommand === `${runtimeCommandPrefix} computer policy`) {
+    const path = computerUsePolicyPath();
+    const loaded = loadComputerUsePolicy(path);
+    if (!loaded.valid) return textResponse(`Computer Use policy is invalid: ${loaded.error}`, true);
+    return jsonResponse({ path, exists: loaded.exists, policy: loaded.policy });
+  }
+
+  if (
+    rawCommand === `${runtimeCommandPrefix} jobs list`
+    || rawCommand.startsWith(`${runtimeCommandPrefix} jobs start `)
+    || rawCommand.startsWith(`${runtimeCommandPrefix} jobs show `)
+    || rawCommand.startsWith(`${runtimeCommandPrefix} jobs cancel `)
+  ) {
+    try {
+      return runRuntimeJobsCommand(rawCommand, context);
+    } catch (error) {
+      return textResponse(error instanceof Error ? error.message : String(error), true);
+    }
+  }
+
   if (rawCommand.startsWith(`${runtimeCommandPrefix} finder `)) {
     const rawPath = rawCommand
       .slice(`${runtimeCommandPrefix} finder `.length)
@@ -163,6 +202,85 @@ async function runBuiltinRuntimeCommand(
     true,
   );
 }
+
+function runRuntimeJobsCommand(rawCommand: string, context: ToolContext): ToolResponse {
+  const config = loadConfig();
+  const prefix = `${runtimeCommandPrefix} jobs `;
+  const command = rawCommand.slice(prefix.length).trim();
+
+  if (command === "list") {
+    const store = createJobStore(config);
+    try {
+      store.recoverStaleJobs();
+      return jsonResponse({
+        jobs: store.list({
+          ...(context.workspaceId ? { workspaceId: context.workspaceId } : { workspaceRoot: context.root }),
+          limit: 100,
+        }),
+      });
+    } finally {
+      store.close();
+    }
+  }
+
+  if (command.startsWith("start ")) {
+    const match = /^start\s+([a-z-]+)(?:\s+--title\s+(.+))?$/u.exec(command);
+    if (!match || !isJobPreset(match[1]!)) {
+      throw new Error(`Usage: devspace-runtime jobs start <preset>. Presets: ${JOB_PRESETS.join(", ")}`);
+    }
+    const title = match[2] ? stripOuterQuotes(match[2].trim()) : undefined;
+    return jsonResponse(startJob(config, {
+      workspaceId: context.workspaceId,
+      workspaceRoot: context.root,
+      preset: match[1],
+      title,
+    }));
+  }
+
+  const showMatch = /^show\s+(job_[A-Za-z0-9]+)(?:\s+--events)?$/u.exec(command);
+  if (showMatch) {
+    const includeEvents = command.endsWith(" --events");
+    const store = createJobStore(config);
+    try {
+      store.recoverStaleJobs();
+      const job = store.get(showMatch[1]!);
+      if (!job || resolve(job.workspaceRoot) !== resolve(context.root)) {
+        throw new Error(`Unknown job for this workspace: ${showMatch[1]}`);
+      }
+      return jsonResponse({
+        job,
+        ...(includeEvents ? { events: store.events(job.id, 200) } : {}),
+      });
+    } finally {
+      store.close();
+    }
+  }
+
+  const cancelMatch = /^cancel\s+(job_[A-Za-z0-9]+)$/u.exec(command);
+  if (cancelMatch) {
+    const store = createJobStore(config);
+    try {
+      const existing = store.get(cancelMatch[1]!);
+      if (!existing || resolve(existing.workspaceRoot) !== resolve(context.root)) {
+        throw new Error(`Unknown job for this workspace: ${cancelMatch[1]}`);
+      }
+    } finally {
+      store.close();
+    }
+    return jsonResponse(cancelJob(config, cancelMatch[1]!));
+  }
+
+  throw new Error("Unknown jobs command. Run `devspace-runtime help`.");
+}
+
+function stripOuterQuotes(value: string): string {
+  if (
+    (value.startsWith("\"") && value.endsWith("\""))
+    || (value.startsWith("'") && value.endsWith("'"))
+  ) return value.slice(1, -1);
+  return value;
+}
+
 function approvedCommandsPath(): string {
   return resolve(expandHomePath(
     process.env.DEVSPACE_APPROVED_SHELL_COMMANDS_FILE

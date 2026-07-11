@@ -126,6 +126,12 @@ MCP Tool catalog. These exact commands are intercepted by DevSpace and do not st
 | `devspace-runtime diagnose [--github] [command ...]` | Classifies workspace access, Git detection, executable discovery, safe PATH fallbacks, and optional GitHub CLI authentication without returning credentials. |
 | `devspace-runtime smoke` | Runs bounded read-only checks for list/read/search, shell PATH resolution, Git, and MCP App resources. |
 | `devspace-runtime costs` | Returns observed duration, calls, errors, retries, character volume, and estimated text tokens from the current server process. |
+| `devspace-runtime jobs start <preset> [--title <title>]` | Starts a persistent background job using one fixed safe preset: `typecheck`, `test`, `build`, `git-status`, or `runtime-smoke`. |
+| `devspace-runtime jobs list` | Lists recent jobs for the open workspace. |
+| `devspace-runtime jobs show <id> [--events]` | Returns current progress and optionally the latest bounded event log. |
+| `devspace-runtime jobs cancel <id>` | Requests cancellation of an active job in the same workspace. |
+| `devspace-runtime computer doctor` | Reports Browser/Desktop Computer Use readiness without starting automation. |
+| `devspace-runtime computer policy` | Returns the non-secret Computer Use allowlist and confirmation policy. |
 | `devspace-runtime finder <path>` | On macOS, opens a validated workspace directory or reveals a validated file in Finder after an explicit request. |
 
 Shell execution augments the inherited PATH with existing standard locations such as
@@ -137,11 +143,32 @@ action. The App calls the app-only `open_in_finder` Tool; it is hidden from the 
 The server validates the path against the workspace before invoking macOS Finder. Paths outside the
 approved workspace are rejected by the normal root guard.
 
+Parallel jobs are persisted in the local SQLite state database. The default concurrency is three
+jobs and may be changed from one to eight with `DEVSPACE_JOB_CONCURRENCY`. Jobs survive server
+restarts because the worker process is detached; stale running records are marked `interrupted`
+when their process is no longer present. Arbitrary shell text is not accepted by the job API.
+
 For a quick regression check after a host-model rollout, run `devspace-runtime smoke` through Bash or:
 
 ```bash
 npm run test:runtime
 ```
+
+## Computer Use safety foundation
+
+Computer Use remains disabled until a policy is explicitly initialized and edited:
+
+```bash
+devspace computer init
+devspace computer doctor
+devspace computer policy
+```
+
+The default policy requires confirmation for login, submission, upload, download, purchase,
+delete, and external communication; stores no credentials; uses a separate browser profile;
+and has empty browser-domain and desktop-application allowlists. Browser control additionally
+requires Playwright or Playwright Core. The doctor command only reports readiness and never
+requests permissions or launches a browser.
 
 The v1.1 package intentionally ships Design Audit as an adapter only: no Playwright/CDP/axe
 runtime is currently bundled, no browser binary is downloaded, and an enabled Tool returns an

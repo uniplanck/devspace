@@ -1,0 +1,53 @@
+import assert from "node:assert/strict";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  defaultComputerUsePolicy,
+  diagnoseComputerUse,
+  initializeComputerUsePolicy,
+  loadComputerUsePolicy,
+} from "./computer-use.js";
+
+const root = await mkdtemp(join(tmpdir(), "devspace-computer-use-"));
+const policyPath = join(root, "computer-use.json");
+const initialized = initializeComputerUsePolicy(policyPath, root);
+assert.equal(initialized.created, true);
+assert.equal(initialized.policy.enabled, false);
+assert.equal(initialized.policy.confirmations.purchase, true);
+
+const loaded = loadComputerUsePolicy(policyPath, root);
+assert.equal(loaded.valid, true);
+assert.equal(loaded.exists, true);
+
+const disabledDoctor = diagnoseComputerUse({
+  policyPath,
+  home: root,
+  platform: "darwin",
+  fileExists: (path) => path.includes("Brave Browser") || path.endsWith("screencapture") || path.endsWith("osascript"),
+  packageAvailable: () => true,
+});
+assert.equal(disabledDoctor.browser.name, "Brave Browser");
+assert.equal(disabledDoctor.browser.ready, false);
+assert.match(disabledDoctor.diagnostics.join(" "), /disabled by policy/);
+
+const enabled = defaultComputerUsePolicy(root);
+enabled.enabled = true;
+enabled.browser.enabled = true;
+enabled.browser.allowedDomains = ["example.com"];
+await writeFile(policyPath, `${JSON.stringify(enabled, null, 2)}\n`);
+const readyDoctor = diagnoseComputerUse({
+  policyPath,
+  home: root,
+  platform: "darwin",
+  fileExists: (path) => path.includes("Brave Browser") || path.endsWith("screencapture") || path.endsWith("osascript"),
+  packageAvailable: () => true,
+});
+assert.equal(readyDoctor.browser.ready, true);
+assert.deepEqual(readyDoctor.safety.credentialsStoredByGPTAgent, false);
+
+const raw = JSON.parse(await readFile(policyPath, "utf8"));
+raw.browser.allowedDomains = ["https://invalid.example.com/path"];
+await writeFile(policyPath, JSON.stringify(raw));
+const invalid = loadComputerUsePolicy(policyPath, root);
+assert.equal(invalid.valid, false);
