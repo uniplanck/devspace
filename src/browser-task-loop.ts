@@ -44,6 +44,7 @@ export interface BrowserTaskLoopInput {
   maxSteps?: number;
   plannerProvider?: string;
   plannerModel?: string;
+  downloadGroup?: string;
 }
 
 export interface BrowserTaskPlannerInput {
@@ -316,7 +317,9 @@ function buildPlannerPrompt(input: BrowserTaskPlannerInput): string {
     '{"kind":"fail","reason":"..."}',
     "Never invent coordinates. Click only an elementIndex listed below.",
     "Never type passwords, tokens, payment details, secrets, or authentication codes.",
-    "Sensitive submit, login, upload, download, purchase, delete, and external communication actions may pause for local human approval.",
+    "Never initiate a purchase, payment, public post, social-media publication, message send, email send, or other external communication unless that exact external action is explicitly required by the user goal.",
+    "Do not type draft copy into a public-post or message composer unless the goal explicitly requires preparing that communication.",
+    "Submit, login, upload, download, purchase, delete, and external communication actions are safety-sensitive and may pause for local human approval. Never try to bypass or work around that pause.",
     "Use done only when the visible page proves the goal is complete.",
     `Goal: ${input.goal}`,
     `Step: ${input.step}/${input.maxSteps}`,

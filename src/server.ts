@@ -480,6 +480,22 @@ function assetUrl(baseUrl: string, assetPath: string): string {
   return `${baseUrl}/${assetPath.replace(/^\/+/, "")}`;
 }
 
+function workspaceAppFallbackHtml(): string {
+  return `<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>GPT-Agent</title>
+    <style>
+      html,body{margin:0;padding:0;background:transparent;color:inherit;font:13px/1.45 system-ui,sans-serif}
+      .fallback{padding:10px 12px;border:1px solid rgba(127,127,127,.25);border-radius:10px;opacity:.75}
+    </style>
+  </head>
+  <body><div class="fallback">UI更新中です。ツール処理自体は完了しています。</div></body>
+</html>`;
+}
+
 function workspaceAppHtml(config: ServerConfig): string {
   const baseUrl = assetBaseUrl(config);
   const entry = getWorkspaceAppManifestEntry();
@@ -768,13 +784,19 @@ function createMcpServer(
       },
     },
     async () => {
-      await assertWorkspaceAppAssets();
+      let template: string;
+      try {
+        await assertWorkspaceAppAssets();
+        template = workspaceAppHtml(config);
+      } catch {
+        template = workspaceAppFallbackHtml();
+      }
       return {
         contents: [
           {
             uri: WORKSPACE_APP_URI,
             mimeType: RESOURCE_MIME_TYPE,
-            text: workspaceAppHtml(config),
+            text: template,
             _meta: {
               ui: {
                 csp: appCsp(config),

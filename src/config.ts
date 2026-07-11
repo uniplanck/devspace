@@ -270,7 +270,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     allowedHosts: parseAllowedHosts(env.DEVSPACE_ALLOWED_HOSTS, derivedAllowedHosts),
     publicBaseUrl,
     toolMode: parseToolMode(env),
-    widgets: parseWidgetMode(env.DEVSPACE_WIDGETS, openWorkspacePayload === "compact" ? "off" : "full"),
+    widgets: parseWidgetMode(env.DEVSPACE_WIDGETS, openWorkspacePayload === "compact" ? "off" : "changes"),
     openWorkspacePayload,
     openWorkspaceInstructionChars: parseIntegerAtLeast(
       env.DEVSPACE_OPEN_WORKSPACE_INSTRUCTION_CHARS,

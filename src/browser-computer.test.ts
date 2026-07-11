@@ -7,6 +7,7 @@ import {
   browserStatus,
   classifyBrowserElementRisk,
   listBrowserApprovals,
+  resolveBrowserDownloadDirectory,
   type BrowserElementDescriptor,
 } from "./browser-computer.js";
 import { defaultComputerUsePolicy } from "./computer-use.js";
@@ -19,6 +20,21 @@ try {
   assert.deepEqual(listBrowserApprovals(home), []);
 
   const policy = defaultComputerUsePolicy(home);
+  const downloadDirectory = resolveBrowserDownloadDirectory({
+    group: "images/chatgpt",
+    taskId: "Tiger image job_123",
+    now: new Date(2026, 6, 11, 12, 0, 0),
+  }, policy);
+  assert.equal(
+    downloadDirectory.path,
+    join(home, "Downloads", "GPT-Agent", "images", "chatgpt", "2026-07-11", "Tiger-image-job_123"),
+  );
+  assert.equal(
+    resolveBrowserDownloadDirectory({ group: "../../unsafe", taskId: "../task" }, policy).path.startsWith(
+      join(home, "Downloads", "GPT-Agent"),
+    ),
+    true,
+  );
   const base: BrowserElementDescriptor = {
     tag: "button",
     type: "button",
@@ -49,6 +65,14 @@ try {
   assert.equal(
     classifyBrowserElementRisk({ ...base, tag: "a", download: true }, policy)?.category,
     "download",
+  );
+  assert.equal(
+    classifyBrowserElementRisk({ ...base, text: "Post to social media" }, policy)?.category,
+    "externalCommunication",
+  );
+  assert.equal(
+    classifyBrowserElementRisk({ ...base, text: "Buy now" }, policy)?.category,
+    "purchase",
   );
 
   await assert.rejects(

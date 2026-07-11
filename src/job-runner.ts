@@ -13,7 +13,11 @@ import {
 } from "./job-store.js";
 import { runCompatibilitySmoke } from "./runtime-operations.js";
 import { resolveExecutable, shellPathInfo } from "./shell-environment.js";
-import { cancelBrowserApproval, listBrowserApprovals } from "./browser-computer.js";
+import {
+  cancelBrowserApproval,
+  configureBrowserDownloadDirectory,
+  listBrowserApprovals,
+} from "./browser-computer.js";
 import {
   createHermesBrowserTaskPlanner,
   createNativeBrowserTaskDriver,
@@ -313,6 +317,13 @@ async function runBrowserLoopJob(
   injectedRuntime?: BrowserTaskLoopRuntime,
 ): Promise<JobRecord> {
   const input = readBrowserLoopInput(job.input);
+  if (!injectedRuntime) {
+    const downloadDirectory = await configureBrowserDownloadDirectory({
+      group: input.downloadGroup ?? "browser",
+      taskId: `${job.title}-${job.id}`,
+    });
+    store.appendEvent(job.id, "info", `Browser downloads: ${downloadDirectory.path}`);
+  }
   const runtime = injectedRuntime ?? {
     planner: createHermesBrowserTaskPlanner({
       provider: input.plannerProvider ?? process.env.DEVSPACE_BROWSER_PLANNER_PROVIDER,
@@ -388,7 +399,8 @@ function readBrowserLoopInput(value: Record<string, unknown> | undefined): Brows
   const maxSteps = typeof value?.maxSteps === "number" ? value.maxSteps : undefined;
   const plannerProvider = typeof value?.plannerProvider === "string" ? value.plannerProvider : undefined;
   const plannerModel = typeof value?.plannerModel === "string" ? value.plannerModel : undefined;
-  return { goal, maxSteps, plannerProvider, plannerModel };
+  const downloadGroup = typeof value?.downloadGroup === "string" ? value.downloadGroup : undefined;
+  return { goal, maxSteps, plannerProvider, plannerModel, downloadGroup };
 }
 
 async function runRuntimeSmokeJob(store: JobStore, job: JobRecord): Promise<JobRecord> {

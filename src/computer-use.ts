@@ -9,6 +9,7 @@ export interface ComputerUsePolicy {
     enabled: boolean;
     allowedDomains: string[];
     profileDirectory: string;
+    downloadDirectory: string;
     allowDownloads: boolean;
   };
   desktop: {
@@ -41,6 +42,7 @@ export interface ComputerUseDoctorResult {
     playwrightAvailable: boolean;
     allowedDomainCount: number;
     profileDirectory: string;
+    downloadDirectory: string;
     ready: boolean;
   };
   desktop: {
@@ -90,6 +92,7 @@ export function defaultComputerUsePolicy(home: string = homedir()): ComputerUseP
       enabled: false,
       allowedDomains: [],
       profileDirectory: join(home, ".devspace", "computer-browser-profile"),
+      downloadDirectory: join(home, "Downloads", "GPT-Agent"),
       allowDownloads: false,
     },
     desktop: {
@@ -123,6 +126,44 @@ export function initializeComputerUsePolicy(
   writeFileSync(absolutePath, `${JSON.stringify(policy, null, 2)}\n`, { mode: 0o600, flag: "wx" });
   chmodSync(absolutePath, 0o600);
   return { path: absolutePath, created: true, policy };
+}
+
+export function enableChatGptBrowserPolicy(
+  path: string = computerUsePolicyPath(),
+  home: string = homedir(),
+): { path: string; policy: ComputerUsePolicy } {
+  const absolutePath = resolve(path);
+  const loaded = loadComputerUsePolicy(absolutePath, home);
+  if (!loaded.valid) throw new Error(`Computer Use policy is invalid: ${loaded.error}`);
+  const policy: ComputerUsePolicy = {
+    ...loaded.policy,
+    enabled: true,
+    browser: {
+      ...loaded.policy.browser,
+      enabled: true,
+      allowedDomains: ["chatgpt.com"],
+      downloadDirectory: join(home, "Downloads", "GPT-Agent"),
+      allowDownloads: true,
+    },
+    desktop: {
+      ...loaded.policy.desktop,
+      enabled: false,
+      allowedApplications: [],
+    },
+    confirmations: {
+      login: true,
+      submit: true,
+      upload: true,
+      download: true,
+      purchase: true,
+      delete: true,
+      externalCommunication: true,
+    },
+  };
+  mkdirSync(dirname(absolutePath), { recursive: true, mode: 0o700 });
+  writeFileSync(absolutePath, `${JSON.stringify(policy, null, 2)}\n`, { mode: 0o600 });
+  chmodSync(absolutePath, 0o600);
+  return { path: absolutePath, policy };
 }
 
 export function loadComputerUsePolicy(
@@ -218,6 +259,7 @@ export function diagnoseComputerUse(input: {
       playwrightAvailable,
       allowedDomainCount: policy.browser.allowedDomains.length,
       profileDirectory: resolve(expandHome(policy.browser.profileDirectory, home)),
+      downloadDirectory: resolve(expandHome(policy.browser.downloadDirectory, home)),
       ready: browserReady,
     },
     desktop: {
@@ -252,9 +294,19 @@ function validatePolicy(value: unknown, home: string): ComputerUsePolicy {
     readString(value.browser.profileDirectory, "browser.profileDirectory"),
     home,
   ));
+  const downloadDirectory = resolve(expandHome(
+    typeof value.browser.downloadDirectory === "string"
+      ? value.browser.downloadDirectory
+      : join(home, "Downloads", "GPT-Agent"),
+    home,
+  ));
   const computerStateRoot = resolve(join(home, ".devspace"));
   if (profileDirectory !== computerStateRoot && !profileDirectory.startsWith(`${computerStateRoot}${sep}`)) {
     throw new Error("browser.profileDirectory must remain inside ~/.devspace.");
+  }
+  const downloadsRoot = resolve(join(home, "Downloads"));
+  if (downloadDirectory !== downloadsRoot && !downloadDirectory.startsWith(`${downloadsRoot}${sep}`)) {
+    throw new Error("browser.downloadDirectory must remain inside ~/Downloads.");
   }
   const confirmations = value.confirmations;
 
@@ -265,6 +317,7 @@ function validatePolicy(value: unknown, home: string): ComputerUsePolicy {
       enabled: readBoolean(value.browser.enabled, "browser.enabled"),
       allowedDomains: [...new Set(domains)],
       profileDirectory,
+      downloadDirectory,
       allowDownloads: readBoolean(value.browser.allowDownloads, "browser.allowDownloads"),
     },
     desktop: {

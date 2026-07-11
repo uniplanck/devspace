@@ -83,8 +83,8 @@ sessions.
 
 | Value | Behavior |
 | --- | --- |
-| `full` | Widget UI is attached to exposed workspace, file, edit, and shell tools. This is the default when full workspace payloads are selected. |
-| `changes` | Enables the aggregate `show_changes` tool and attaches widget UI to `open_workspace` and `show_changes`. |
+| `full` | Opt-in diagnostic mode. Widget UI is attached to exposed workspace, file, edit, and shell tools, which uses substantially more vertical space. |
+| `changes` | Enables the aggregate `show_changes` tool and attaches widget UI only to `open_workspace` and `show_changes`. This is the default when full workspace payloads are selected. |
 | `off` | Disables widget UI. This is the default in compact mode. |
 
 ## Compact payloads and execution-cost estimates
@@ -127,7 +127,7 @@ MCP Tool catalog. These exact commands are intercepted by DevSpace and do not st
 | `devspace-runtime smoke` | Runs bounded read-only checks for list/read/search, shell PATH resolution, Git, and MCP App resources. |
 | `devspace-runtime costs` | Returns observed duration, calls, errors, retries, character volume, and estimated text tokens from the current server process. |
 | `devspace-runtime jobs start <preset> [--title <title>]` | Starts a persistent background verification job using `typecheck`, `test`, `build`, `git-status`, or `runtime-smoke`. |
-| `devspace-runtime jobs start browser-loop --goal <goal> [--max-steps <1-60>] [--provider <provider>] [--model <model>]` | Starts a bounded Browser Computer loop. Every step is re-grounded from a screenshot and DOM inspection; sensitive actions stop in `waiting_approval`. |
+| `devspace-runtime jobs start browser-loop --goal <goal> [--max-steps <1-60>] [--provider <provider>] [--model <model>] [--download-group <group>]` | Starts a bounded Browser Computer loop. Every step is re-grounded from a screenshot and DOM inspection; sensitive actions stop in `waiting_approval`. Downloads are grouped under the policy download root. |
 | `devspace-runtime jobs list` | Lists recent jobs for the open workspace. |
 | `devspace-runtime jobs show <id> [--events]` | Returns current progress and optionally the latest bounded event log. |
 | `devspace-runtime jobs cancel <id>` | Requests cancellation of an active job in the same workspace. Cancelling an approval-waiting browser job also cancels its unresolved approval request. |
@@ -148,10 +148,11 @@ Shell execution augments the inherited PATH with existing standard locations suc
 `/opt/homebrew/bin`, `/usr/local/bin`, `~/.local/bin`, and system binary directories. It does not
 source `.zshrc`, `.zprofile`, or another login-shell configuration, avoiding startup side effects.
 
-When Widgets are enabled, Tool cards with a workspace path display a link-style **Finderで表示**
-action. The App calls the app-only `open_in_finder` Tool; it is hidden from the model-facing catalog.
-The server validates the path against the workspace before invoking macOS Finder. Paths outside the
-approved workspace are rejected by the normal root guard.
+When Widgets are enabled and the host advertises server-Tool support, Tool cards with a workspace
+path display a link-style **Finderで表示** action. The App calls the app-only `open_in_finder` Tool;
+it is hidden from the model-facing catalog. If the host cannot execute the action, the control is
+removed instead of leaving a non-functional button. The server validates the path against the workspace
+before invoking macOS Finder. Paths outside the approved workspace are rejected by the normal root guard.
 
 Parallel jobs are persisted in the local SQLite state database. The default concurrency is three
 jobs and may be changed from one to eight with `DEVSPACE_JOB_CONCURRENCY`. Jobs survive server
@@ -169,13 +170,16 @@ npm run test:runtime
 
 ## Computer Use safety foundation
 
-Computer Use remains disabled until a policy is explicitly initialized and edited:
+Computer Use remains disabled until a policy is explicitly enabled. For a safe ChatGPT-only preset:
 
 ```bash
-devspace computer init
+devspace computer enable-chatgpt
 devspace computer doctor
 devspace computer policy
 ```
+
+This preset allows only `chatgpt.com`, disables Desktop Computer Use, enables downloads, and keeps
+login, submit, upload, download, purchase, delete, and external communication behind local approval.
 
 The default policy requires confirmation for login, submission, upload, download, purchase,
 delete, and external communication; stores no raw credentials; uses a separate browser profile;
@@ -190,7 +194,8 @@ list the request but cannot execute it through the built-in runtime command. App
 from the local GPT-Agent Tool app and is followed by a native macOS confirmation dialog. A browser-loop
 job then remains in `waiting_approval` until explicitly resumed; it does not poll through or bypass the
 approval boundary. Screenshot artifacts, session state, approvals, and bounded step history are stored
-with private permissions under `~/.devspace`.
+with private permissions under `~/.devspace`. Browser downloads default to
+`~/Downloads/GPT-Agent/<group>/<YYYY-MM-DD>/<job>/`; `--download-group` controls the group portion.
 Top-level navigation is revalidated after redirects and is reset to `about:blank` if it leaves the
 allowlist.
 

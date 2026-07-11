@@ -34,6 +34,7 @@ import { createJobStore, isJobPreset, JOB_PRESETS, type JobRecord } from "./job-
 import {
   computerUsePolicyPath,
   diagnoseComputerUse,
+  enableChatGptBrowserPolicy,
   initializeComputerUsePolicy,
   loadComputerUsePolicy,
 } from "./computer-use.js";
@@ -340,6 +341,7 @@ function printHelp(): void {
       "  devspace jobs cancel <id>",
       "  devspace computer doctor [--json]",
       "  devspace computer init",
+      "  devspace computer enable-chatgpt",
       "  devspace computer policy [--json]",
       "  devspace computer browser <command>",
       "  devspace -v, --version   Print the installed version",
@@ -364,6 +366,7 @@ async function runComputerCommand(args: string[]): Promise<void> {
         `Policy: ${result.policyExists ? (result.policyValid ? "valid" : "invalid") : "not initialized"} (${result.policyPath})`,
         `Browser: ${result.browser.ready ? "ready" : "not ready"}${result.browser.name ? ` — ${result.browser.name}` : ""}`,
         `Browser adapter: ${result.browser.adapter} (${result.browser.nativeCdpAvailable ? "available" : "missing"})`,
+        `Browser downloads: ${result.browser.downloadDirectory}`,
         `Desktop: ${result.desktop.ready ? "ready" : "not ready"}`,
         `Confirmations: ${result.safety.confirmationsRequired.join(", ") || "none"}`,
         ...result.missingRequirements.map((item) => `Missing: ${item}`),
@@ -374,6 +377,15 @@ async function runComputerCommand(args: string[]): Promise<void> {
     case "init": {
       const initialized = initializeComputerUsePolicy();
       console.log(`${initialized.created ? "Created" : "Existing"} disabled-by-default policy: ${initialized.path}`);
+      return;
+    }
+    case "enable-chatgpt": {
+      const enabled = enableChatGptBrowserPolicy();
+      console.log([
+        `Enabled Browser Computer Use for chatgpt.com only: ${enabled.path}`,
+        `Downloads: ${enabled.policy.browser.downloadDirectory}`,
+        "Purchase, submit, download, delete, login, upload, and external communication require local approval.",
+      ].join("\n"));
       return;
     }
     case "policy": {
@@ -389,7 +401,8 @@ async function runComputerCommand(args: string[]): Promise<void> {
         `Exists: ${loaded.exists}`,
         `Enabled: ${loaded.policy.enabled}`,
         `Browser enabled: ${loaded.policy.browser.enabled}`,
-        `Allowed domains: ${loaded.policy.browser.allowedDomains.length}`,
+        `Allowed domains: ${loaded.policy.browser.allowedDomains.join(", ") || "none"}`,
+        `Download directory: ${loaded.policy.browser.downloadDirectory}`,
         `Desktop enabled: ${loaded.policy.desktop.enabled}`,
         `Allowed applications: ${loaded.policy.desktop.allowedApplications.length}`,
       ].join("\n"));
@@ -525,6 +538,7 @@ function printComputerHelp(): void {
     "Usage:",
     "  devspace computer doctor [--json]",
     "  devspace computer init",
+    "  devspace computer enable-chatgpt",
     "  devspace computer policy [--json]",
     "  devspace computer browser start|status|stop",
     "  devspace computer browser open <url>",
@@ -666,11 +680,13 @@ function readBrowserLoopJobInput(args: string[]): Record<string, unknown> {
   }
   const plannerProvider = readJobsOption(args, "--provider");
   const plannerModel = readJobsOption(args, "--model");
+  const downloadGroup = readJobsOption(args, "--download-group");
   return {
     goal,
     ...(maxSteps === undefined ? {} : { maxSteps }),
     ...(plannerProvider ? { plannerProvider } : {}),
     ...(plannerModel ? { plannerModel } : {}),
+    ...(downloadGroup ? { downloadGroup } : {}),
   };
 }
 
@@ -701,7 +717,7 @@ function printJobsHelp(): void {
     "",
     "Usage:",
     "  devspace jobs start <preset> [--title <title>]",
-    "  devspace jobs start browser-loop --goal <goal> [--max-steps <1-60>] [--provider <provider>] [--model <model>]",
+    "  devspace jobs start browser-loop --goal <goal> [--max-steps <1-60>] [--provider <provider>] [--model <model>] [--download-group <group>]",
     "  devspace jobs ls [--all] [--json]",
     "  devspace jobs show <id> [--events] [--json]",
     "  devspace jobs cancel <id>",

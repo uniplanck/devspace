@@ -294,13 +294,95 @@ export async function startBrowserSession(input: {
 
   const browserClient = await CdpClient.connect(`ws://127.0.0.1:${port}${browserWebSocketPath}`);
   try {
+    const downloadDirectory = resolve(policy.browser.downloadDirectory);
+    if (policy.browser.allowDownloads) ensurePrivateDirectory(downloadDirectory);
     await browserClient.send("Browser.setDownloadBehavior", {
-      behavior: policy.browser.allowDownloads ? "default" : "deny",
+      behavior: policy.browser.allowDownloads ? "allow" : "deny",
+      ...(policy.browser.allowDownloads ? { downloadPath: downloadDirectory, eventsEnabled: true } : {}),
     });
   } finally {
     browserClient.close();
   }
   return { status: "started", session };
+}
+
+export interface BrowserDownloadDirectoryResult {
+  path: string;
+  relativePath: string;
+}
+
+export function resolveBrowserDownloadDirectory(
+  input: { group?: string; taskId?: string; now?: Date } = {},
+  policy: ComputerUsePolicy,
+): BrowserDownloadDirectoryResult {
+  const root = resolve(policy.browser.downloadDirectory);
+  const groupSegments = sanitizeDownloadPath(input.group ?? "browser");
+  const date = formatLocalDate(input.now ?? new Date());
+  const task = sanitizeDownloadSegment(input.taskId ?? "manual");
+  const relativePath = join(...groupSegments, date, task);
+  return { path: join(root, relativePath), relativePath };
+}
+
+export async function configureBrowserDownloadDirectory(
+  input: {
+    group?: string;
+    taskId?: string;
+    now?: Date;
+    policyPath?: string;
+    home?: string;
+  } = {},
+): Promise<BrowserDownloadDirectoryResult> {
+  const home = input.home ?? homedir();
+  const policy = loadPolicy(input.policyPath, home);
+  if (!policy.browser.allowDownloads) {
+    throw new Error("Browser downloads are disabled by policy.");
+  }
+  const session = await requireActiveSession(home);
+  const directory = resolveBrowserDownloadDirectory(input, policy);
+  ensurePrivateDirectory(directory.path);
+  const browserClient = await CdpClient.connect(
+    `ws://127.0.0.1:${session.port}${session.browserWebSocketPath}`,
+  );
+  try {
+    await browserClient.send("Browser.setDownloadBehavior", {
+      behavior: "allow",
+      downloadPath: directory.path,
+      eventsEnabled: true,
+    });
+  } finally {
+    browserClient.close();
+  }
+  return directory;
+}
+
+function sanitizeDownloadPath(value: string): string[] {
+  const segments = value
+    .normalize("NFKC")
+    .split(/[\\/]+/u)
+    .map(sanitizeDownloadSegment)
+    .filter(Boolean);
+  if (segments.length === 0) return ["browser"];
+  if (segments.length > 4) throw new Error("Download group may contain at most four path segments.");
+  return segments;
+}
+
+function sanitizeDownloadSegment(value: string): string {
+  const normalized = value
+    .normalize("NFKC")
+    .trim()
+    .replace(/\s+/gu, "-")
+    .replace(/[^\p{L}\p{N}._-]+/gu, "-")
+    .replace(/^-+|-+$/gu, "")
+    .slice(0, 80);
+  if (!normalized || normalized === "." || normalized === "..") return "browser";
+  return normalized;
+}
+
+function formatLocalDate(date: Date): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
 }
 
 export async function stopBrowserSession(home: string = homedir()): Promise<{ status: "stopped" | "not-running" }> {

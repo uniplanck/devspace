@@ -125,7 +125,7 @@ async function runBuiltinRuntimeCommand(
       "  devspace-runtime costs",
       "  devspace-runtime finder <workspace-relative-path>",
       "  devspace-runtime jobs start <preset> [--title <title>]",
-      "  devspace-runtime jobs start browser-loop --goal <goal> [--max-steps <1-60>] [--provider <provider>] [--model <model>]",
+      "  devspace-runtime jobs start browser-loop --goal <goal> [--max-steps <1-60>] [--provider <provider>] [--model <model>] [--download-group <group>]",
       "  devspace-runtime jobs list",
       "  devspace-runtime jobs show <id> [--events]",
       "  devspace-runtime jobs cancel <id>",
@@ -381,11 +381,13 @@ function runtimeBrowserLoopInput(tokens: string[]): Record<string, unknown> {
   }
   const plannerProvider = runtimeOption(tokens, "--provider");
   const plannerModel = runtimeOption(tokens, "--model");
+  const downloadGroup = runtimeOption(tokens, "--download-group");
   return {
     goal,
     ...(maxSteps === undefined ? {} : { maxSteps }),
     ...(plannerProvider ? { plannerProvider } : {}),
     ...(plannerModel ? { plannerModel } : {}),
+    ...(downloadGroup ? { downloadGroup } : {}),
   };
 }
 

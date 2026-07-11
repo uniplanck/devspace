@@ -23,7 +23,7 @@ assert.deepEqual(loadConfig(baseEnv).designAuditAllowedHosts, ["localhost", "127
 assert.equal(loadConfig(baseEnv).widgets, "off");
 assert.equal(
   loadConfig({ ...baseEnv, DEVSPACE_OPEN_WORKSPACE_PAYLOAD: "full" }).widgets,
-  "full",
+  "changes",
 );
 assert.equal(
   loadConfig({ ...baseEnv, DEVSPACE_OPEN_WORKSPACE_PAYLOAD: "full" }).openWorkspacePayload,

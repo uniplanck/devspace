@@ -53,6 +53,7 @@ let reviewFilesExpanded = false;
 let errorMessage: string | null = null;
 let currentPayload: MountedPayload | null = null;
 let currentPayloadContainer: HTMLElement | null = null;
+let finderUnavailable = false;
 
 const maybeAppRoot = document.querySelector<HTMLElement>("#app");
 
@@ -217,7 +218,14 @@ function render(): void {
 function renderPathAction(card: ToolResultCard): HTMLElement | null {
   const displayPath = card.path ?? card.root;
   const toolPath = card.path ?? (card.root ? "." : undefined);
-  if (!app || !card.workspaceId || !displayPath || !toolPath) return null;
+  if (
+    !app
+    || finderUnavailable
+    || !app.getHostCapabilities()?.serverTools
+    || !card.workspaceId
+    || !displayPath
+    || !toolPath
+  ) return null;
 
   const row = element("div", { className: "path-action-row" });
   const button = element("button", {
@@ -250,10 +258,8 @@ function renderPathAction(card: ToolResultCard): HTMLElement | null {
       });
       const structured = getStructuredContent<{ status?: string }>(result);
       if (result.isError || structured?.status === "unsupported") {
-        actionText.textContent = structured?.status === "unsupported"
-          ? "macOSのみ対応"
-          : "開けませんでした";
-        button.disabled = false;
+        finderUnavailable = true;
+        render();
         return;
       }
       actionText.textContent = "Finderで表示済み";
@@ -261,9 +267,9 @@ function renderPathAction(card: ToolResultCard): HTMLElement | null {
         actionText.textContent = "Finderで表示";
         button.disabled = false;
       }, 1_800);
-    } catch (openError) {
-      actionText.textContent = openError instanceof Error ? "開けませんでした" : "エラー";
-      button.disabled = false;
+    } catch {
+      finderUnavailable = true;
+      render();
     }
   });
 
