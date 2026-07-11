@@ -27,6 +27,11 @@ const migrations: Migration[] = [
     name: "parallel-jobs",
     up: migrateParallelJobs,
   },
+  {
+    version: 5,
+    name: "browser-loop-job-state",
+    up: migrateBrowserLoopJobState,
+  },
 ];
 
 export function migrateDatabase(sqlite: Database.Database): void {
@@ -223,9 +228,14 @@ function migrateParallelJobs(sqlite: Database.Database): void {
   `);
 }
 
+function migrateBrowserLoopJobState(sqlite: Database.Database): void {
+  addColumnIfMissing(sqlite, "jobs", "input_json", "text");
+  addColumnIfMissing(sqlite, "jobs", "state_json", "text");
+}
+
 function addColumnIfMissing(
   sqlite: Database.Database,
-  table: "workspace_sessions" | "local_agent_sessions",
+  table: "workspace_sessions" | "local_agent_sessions" | "jobs",
   column: string,
   definition: string,
 ): void {

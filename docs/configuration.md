@@ -126,10 +126,12 @@ MCP Tool catalog. These exact commands are intercepted by DevSpace and do not st
 | `devspace-runtime diagnose [--github] [command ...]` | Classifies workspace access, Git detection, executable discovery, safe PATH fallbacks, and optional GitHub CLI authentication without returning credentials. |
 | `devspace-runtime smoke` | Runs bounded read-only checks for list/read/search, shell PATH resolution, Git, and MCP App resources. |
 | `devspace-runtime costs` | Returns observed duration, calls, errors, retries, character volume, and estimated text tokens from the current server process. |
-| `devspace-runtime jobs start <preset> [--title <title>]` | Starts a persistent background job using one fixed safe preset: `typecheck`, `test`, `build`, `git-status`, or `runtime-smoke`. |
+| `devspace-runtime jobs start <preset> [--title <title>]` | Starts a persistent background verification job using `typecheck`, `test`, `build`, `git-status`, or `runtime-smoke`. |
+| `devspace-runtime jobs start browser-loop --goal <goal> [--max-steps <1-60>] [--provider <provider>] [--model <model>]` | Starts a bounded Browser Computer loop. Every step is re-grounded from a screenshot and DOM inspection; sensitive actions stop in `waiting_approval`. |
 | `devspace-runtime jobs list` | Lists recent jobs for the open workspace. |
 | `devspace-runtime jobs show <id> [--events]` | Returns current progress and optionally the latest bounded event log. |
-| `devspace-runtime jobs cancel <id>` | Requests cancellation of an active job in the same workspace. |
+| `devspace-runtime jobs cancel <id>` | Requests cancellation of an active job in the same workspace. Cancelling an approval-waiting browser job also cancels its unresolved approval request. |
+| `devspace-runtime jobs resume <id>` | Resumes an interrupted job or an approval-waiting browser job after the local approval has been executed. |
 | `devspace-runtime computer doctor` | Reports Browser/Desktop Computer Use readiness without starting automation. |
 | `devspace-runtime computer policy` | Returns the non-secret Computer Use allowlist and confirmation policy. |
 | `devspace-runtime computer browser start\|status\|stop` | Controls the isolated Brave/Chrome CDP session after policy enablement. |
@@ -155,6 +157,9 @@ Parallel jobs are persisted in the local SQLite state database. The default conc
 jobs and may be changed from one to eight with `DEVSPACE_JOB_CONCURRENCY`. Jobs survive server
 restarts because the worker process is detached; stale running records are marked `interrupted`
 when their process is no longer present. Arbitrary shell text is not accepted by the job API.
+Browser-loop goals and bounded step histories are stored as private JSON in the same database.
+The planner defaults to Hermes' configured provider and model; `DEVSPACE_BROWSER_PLANNER_PROVIDER`
+and `DEVSPACE_BROWSER_PLANNER_MODEL`, or per-job `--provider` and `--model`, may override routing.
 
 For a quick regression check after a host-model rollout, run `devspace-runtime smoke` through Bash or:
 
@@ -182,8 +187,10 @@ fields and does not return input values in inspection results.
 
 Sensitive clicks and Enter-based submissions create a short-lived approval request. ChatGPT can
 list the request but cannot execute it through the built-in runtime command. Approval is performed
-from the local GPT-Agent Tool app and is followed by a native macOS confirmation dialog. Screenshot
-artifacts, session state, and approvals are stored with private permissions under `~/.devspace`.
+from the local GPT-Agent Tool app and is followed by a native macOS confirmation dialog. A browser-loop
+job then remains in `waiting_approval` until explicitly resumed; it does not poll through or bypass the
+approval boundary. Screenshot artifacts, session state, approvals, and bounded step history are stored
+with private permissions under `~/.devspace`.
 Top-level navigation is revalidated after redirects and is reset to `about:blank` if it leaves the
 allowlist.
 

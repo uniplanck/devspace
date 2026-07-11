@@ -29,7 +29,7 @@ import {
 } from "./local-agent-targets.js";
 import { createLocalAgentStore, type LocalAgentRecord } from "./local-agent-store.js";
 import type { LocalAgentRunResult } from "./local-agent-runtime.js";
-import { cancelJob, runJobWorker, startJob } from "./job-runner.js";
+import { cancelJob, resumeJob, runJobWorker, startJob } from "./job-runner.js";
 import { createJobStore, isJobPreset, JOB_PRESETS, type JobRecord } from "./job-store.js";
 import {
   computerUsePolicyPath,
@@ -557,6 +557,9 @@ async function runJobsCommand(args: string[]): Promise<void> {
     case "cancel":
       runJobsCancel(rest);
       return;
+    case "resume":
+      runJobsResume(rest);
+      return;
     case "__worker":
       await runJobsWorker(rest);
       return;
@@ -576,15 +579,15 @@ async function runJobsStart(args: string[]): Promise<void> {
   if (!presetValue || !isJobPreset(presetValue)) {
     throw new Error(`Usage: devspace jobs start <preset>. Presets: ${JOB_PRESETS.join(", ")}`);
   }
-  const titleIndex = args.indexOf("--title");
-  const title = titleIndex >= 0 ? args[titleIndex + 1] : undefined;
-  if (titleIndex >= 0 && !title) throw new Error("--title requires a value.");
+  const title = readJobsOption(args, "--title");
+  const input = presetValue === "browser-loop" ? readBrowserLoopJobInput(args) : undefined;
   const config = loadConfig();
   const record = startJob(config, {
     workspaceId: process.env.DEVSPACE_WORKSPACE_ID || undefined,
     workspaceRoot: resolveCurrentWorkspaceRoot(),
     preset: presetValue,
     title,
+    input,
   });
   console.log(formatJobLine(record));
 }
@@ -644,6 +647,41 @@ function runJobsCancel(args: string[]): void {
   console.log(formatJobLine(record));
 }
 
+function runJobsResume(args: string[]): void {
+  const [id] = args;
+  if (!id) throw new Error("Usage: devspace jobs resume <id>");
+  const record = resumeJob(loadConfig(), id);
+  console.log(formatJobLine(record));
+}
+
+function readBrowserLoopJobInput(args: string[]): Record<string, unknown> {
+  const goal = readJobsOption(args, "--goal");
+  if (!goal) {
+    throw new Error("Browser loop jobs require --goal <goal>.");
+  }
+  const maxStepsValue = readJobsOption(args, "--max-steps");
+  const maxSteps = maxStepsValue === undefined ? undefined : Number(maxStepsValue);
+  if (maxSteps !== undefined && (!Number.isInteger(maxSteps) || maxSteps < 1 || maxSteps > 60)) {
+    throw new Error("--max-steps must be an integer from 1 to 60.");
+  }
+  const plannerProvider = readJobsOption(args, "--provider");
+  const plannerModel = readJobsOption(args, "--model");
+  return {
+    goal,
+    ...(maxSteps === undefined ? {} : { maxSteps }),
+    ...(plannerProvider ? { plannerProvider } : {}),
+    ...(plannerModel ? { plannerModel } : {}),
+  };
+}
+
+function readJobsOption(args: string[], option: string): string | undefined {
+  const index = args.indexOf(option);
+  if (index < 0) return undefined;
+  const value = args[index + 1];
+  if (!value || value.startsWith("--")) throw new Error(`${option} requires a value.`);
+  return value;
+}
+
 async function runJobsWorker(args: string[]): Promise<void> {
   const [id] = args;
   if (!id) throw new Error("Usage: devspace jobs __worker <id>");
@@ -663,9 +701,11 @@ function printJobsHelp(): void {
     "",
     "Usage:",
     "  devspace jobs start <preset> [--title <title>]",
+    "  devspace jobs start browser-loop --goal <goal> [--max-steps <1-60>] [--provider <provider>] [--model <model>]",
     "  devspace jobs ls [--all] [--json]",
     "  devspace jobs show <id> [--events] [--json]",
     "  devspace jobs cancel <id>",
+    "  devspace jobs resume <id>",
   ].join("\n"));
 }
 

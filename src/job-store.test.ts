@@ -13,9 +13,11 @@ try {
     workspaceRoot: stateDir,
     preset: "typecheck",
     title: "Store test",
+    input: { goal: "Persist this input" },
   });
   assert.match(created.id, /^job_[a-z0-9]+$/u);
   assert.equal(created.status, "queued");
+  assert.deepEqual(created.input, { goal: "Persist this input" });
   assert.equal(store.activeCount(stateDir), 1);
   assert.equal(store.get(created.id.slice(0, 8))?.id, created.id);
 
@@ -28,14 +30,24 @@ try {
     progress: 45,
     currentStep: "Testing",
     workerPid: 987_654,
+    state: { schemaVersion: 1, steps: [{ step: 1 }] },
   });
   assert.equal(store.runningCount(stateDir), 1);
+  assert.deepEqual(store.get(created.id)?.state, { schemaVersion: 1, steps: [{ step: 1 }] });
 
   const recovered = store.recoverStaleJobs(() => false);
   assert.equal(recovered.length, 1);
   assert.equal(recovered[0]?.status, "interrupted");
   assert.equal(store.activeCount(stateDir), 0);
   assert.equal(store.get(created.id)?.currentStep, "Interrupted after process exit");
+
+  const waiting = store.create({
+    workspaceRoot: stateDir,
+    preset: "browser-loop",
+    input: { goal: "Wait safely" },
+  });
+  store.update(waiting.id, { status: "waiting_approval", currentStep: "Waiting" });
+  assert.equal(store.activeCount(stateDir), 1);
 } finally {
   store.close();
 }

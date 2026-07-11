@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { cancelJob, runJobWorker } from "./job-runner.js";
 import { JobStore } from "./job-store.js";
+import type { BrowserTaskLoopRuntime } from "./browser-task-loop.js";
+import type { BrowserApprovalRecord } from "./browser-computer.js";
 
 const stateDir = await mkdtemp(join(tmpdir(), "devspace-job-runner-state-"));
 const workspaceRoot = await mkdtemp(join(tmpdir(), "devspace-job-runner-workspace-"));
@@ -46,6 +48,96 @@ const cancelling = cancelJob(config, cancellable.id);
 assert.equal(cancelling.status, "cancelling");
 const cancelled = await running;
 assert.equal(cancelled.status, "cancelled");
+
+const browserStore = new JobStore(stateDir);
+const browserJob = browserStore.create({
+  workspaceRoot,
+  preset: "browser-loop",
+  title: "Browser loop job",
+  input: { goal: "Confirm the page", maxSteps: 3 },
+});
+browserStore.close();
+const browserRuntime: BrowserTaskLoopRuntime = {
+  planner: async () => ({ kind: "done", summary: "Page confirmed." }),
+  driver: {
+    inspect: async () => ({
+      targetId: "target_test",
+      url: "https://example.com",
+      title: "Example",
+      viewport: { width: 1200, height: 800, deviceScaleFactor: 1 },
+      interactive: [],
+    }),
+    screenshot: async () => ({ path: "/tmp/browser-job-test.png" }),
+    click: async () => ({ status: "clicked" }),
+    type: async () => ({ status: "typed" }),
+    key: async () => ({ status: "pressed" }),
+    scroll: async () => ({ status: "scrolled" }),
+    approval: () => undefined,
+    wait: async () => undefined,
+  },
+};
+const browserCompleted = await runJobWorker(config, browserJob.id, {
+  concurrency: 2,
+  pollIntervalMs: 20,
+  browserLoopRuntime: browserRuntime,
+});
+assert.equal(browserCompleted.status, "succeeded");
+assert.equal(browserCompleted.currentStep, "Completed");
+assert.equal((browserCompleted.state?.steps as unknown[])?.length, 1);
+
+const approval: BrowserApprovalRecord = {
+  id: "approval_job_test",
+  status: "pending",
+  category: "submit",
+  reason: "Submit confirmation required.",
+  action: { kind: "click", targetId: "target_test", x: 10, y: 10 },
+  createdAt: new Date().toISOString(),
+  expiresAt: new Date(Date.now() + 60_000).toISOString(),
+};
+const waitingStore = new JobStore(stateDir);
+const waitingJob = waitingStore.create({
+  workspaceRoot,
+  preset: "browser-loop",
+  title: "Waiting browser loop job",
+  input: { goal: "Submit safely", maxSteps: 3 },
+});
+waitingStore.close();
+const waitingRuntime: BrowserTaskLoopRuntime = {
+  planner: async () => ({ kind: "click", elementIndex: 0 }),
+  driver: {
+    ...browserRuntime.driver,
+    inspect: async () => ({
+      targetId: "target_test",
+      url: "https://example.com",
+      title: "Example",
+      viewport: { width: 1200, height: 800, deviceScaleFactor: 1 },
+      interactive: [{
+        index: 0,
+        tag: "button",
+        type: "submit",
+        role: "button",
+        text: "Submit",
+        ariaLabel: "Submit",
+        name: "",
+        href: "",
+        download: false,
+        x: 0,
+        y: 0,
+        width: 20,
+        height: 20,
+      }],
+    }),
+    click: async () => ({ status: "approval-required", approval }),
+    approval: () => approval,
+  },
+};
+const browserWaiting = await runJobWorker(config, waitingJob.id, {
+  concurrency: 2,
+  pollIntervalMs: 20,
+  browserLoopRuntime: waitingRuntime,
+});
+assert.equal(browserWaiting.status, "waiting_approval");
+assert.equal(browserWaiting.state?.pendingApprovalId, approval.id);
 
 async function waitForStatus(
   directory: string,

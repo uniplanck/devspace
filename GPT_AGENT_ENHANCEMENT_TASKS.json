@@ -57,7 +57,7 @@
       "status": "in_progress",
       "priority": 7,
       "title": "Browser Computerの自律操作loop",
-      "detail": "スクリーンショットとDOMをモデルへ渡し、複数stepの目標を安全に実行するtask loop、step履歴、承認待ち停止、再開、失敗時復旧をjob runnerへ接続する。"
+      "detail": "job runner接続、スクリーンショット＋DOMのHermes planner入力、DOM index限定操作、step履歴永続化、承認待ち停止、承認後resume、失敗時状態保持まで実装。次はGPT-Agent Toolのgoal入力・resume UIと実サイトE2Eを追加する。"
     },
     {
       "id": "task-persistence-recovery",

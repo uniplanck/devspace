@@ -28,7 +28,7 @@ import {
 import { commandWithAugmentedPath } from "./shell-environment.js";
 import { getExecutionCostSnapshot } from "./usage-meter.js";
 import { loadConfig } from "./config.js";
-import { cancelJob, startJob } from "./job-runner.js";
+import { cancelJob, resumeJob, startJob } from "./job-runner.js";
 import { createJobStore, isJobPreset, JOB_PRESETS } from "./job-store.js";
 import {
   computerUsePolicyPath,
@@ -125,9 +125,11 @@ async function runBuiltinRuntimeCommand(
       "  devspace-runtime costs",
       "  devspace-runtime finder <workspace-relative-path>",
       "  devspace-runtime jobs start <preset> [--title <title>]",
+      "  devspace-runtime jobs start browser-loop --goal <goal> [--max-steps <1-60>] [--provider <provider>] [--model <model>]",
       "  devspace-runtime jobs list",
       "  devspace-runtime jobs show <id> [--events]",
       "  devspace-runtime jobs cancel <id>",
+      "  devspace-runtime jobs resume <id>",
       "  devspace-runtime computer doctor",
       "  devspace-runtime computer policy",
       "  devspace-runtime computer browser start|status|stop",
@@ -199,6 +201,7 @@ async function runBuiltinRuntimeCommand(
     || rawCommand.startsWith(`${runtimeCommandPrefix} jobs start `)
     || rawCommand.startsWith(`${runtimeCommandPrefix} jobs show `)
     || rawCommand.startsWith(`${runtimeCommandPrefix} jobs cancel `)
+    || rawCommand.startsWith(`${runtimeCommandPrefix} jobs resume `)
   ) {
     try {
       return runRuntimeJobsCommand(rawCommand, context);
@@ -302,16 +305,19 @@ function runRuntimeJobsCommand(rawCommand: string, context: ToolContext): ToolRe
   }
 
   if (command.startsWith("start ")) {
-    const match = /^start\s+([a-z-]+)(?:\s+--title\s+(.+))?$/u.exec(command);
-    if (!match || !isJobPreset(match[1]!)) {
+    const tokens = tokenizeRuntimeCommand(command);
+    const preset = tokens[1];
+    if (!preset || !isJobPreset(preset)) {
       throw new Error(`Usage: devspace-runtime jobs start <preset>. Presets: ${JOB_PRESETS.join(", ")}`);
     }
-    const title = match[2] ? stripOuterQuotes(match[2].trim()) : undefined;
+    const title = runtimeOption(tokens, "--title");
+    const input = preset === "browser-loop" ? runtimeBrowserLoopInput(tokens) : undefined;
     return jsonResponse(startJob(config, {
       workspaceId: context.workspaceId,
       workspaceRoot: context.root,
-      preset: match[1],
+      preset,
       title,
+      input,
     }));
   }
 
@@ -348,7 +354,85 @@ function runRuntimeJobsCommand(rawCommand: string, context: ToolContext): ToolRe
     return jsonResponse(cancelJob(config, cancelMatch[1]!));
   }
 
+  const resumeMatch = /^resume\s+(job_[A-Za-z0-9]+)$/u.exec(command);
+  if (resumeMatch) {
+    const store = createJobStore(config);
+    try {
+      const existing = store.get(resumeMatch[1]!);
+      if (!existing || resolve(existing.workspaceRoot) !== resolve(context.root)) {
+        throw new Error(`Unknown job for this workspace: ${resumeMatch[1]}`);
+      }
+    } finally {
+      store.close();
+    }
+    return jsonResponse(resumeJob(config, resumeMatch[1]!));
+  }
+
   throw new Error("Unknown jobs command. Run `devspace-runtime help`.");
+}
+
+function runtimeBrowserLoopInput(tokens: string[]): Record<string, unknown> {
+  const goal = runtimeOption(tokens, "--goal");
+  if (!goal) throw new Error("Browser loop jobs require --goal <goal>.");
+  const maxStepsValue = runtimeOption(tokens, "--max-steps");
+  const maxSteps = maxStepsValue === undefined ? undefined : Number(maxStepsValue);
+  if (maxSteps !== undefined && (!Number.isInteger(maxSteps) || maxSteps < 1 || maxSteps > 60)) {
+    throw new Error("--max-steps must be an integer from 1 to 60.");
+  }
+  const plannerProvider = runtimeOption(tokens, "--provider");
+  const plannerModel = runtimeOption(tokens, "--model");
+  return {
+    goal,
+    ...(maxSteps === undefined ? {} : { maxSteps }),
+    ...(plannerProvider ? { plannerProvider } : {}),
+    ...(plannerModel ? { plannerModel } : {}),
+  };
+}
+
+function runtimeOption(tokens: string[], option: string): string | undefined {
+  const index = tokens.indexOf(option);
+  if (index < 0) return undefined;
+  const value = tokens[index + 1];
+  if (!value || value.startsWith("--")) throw new Error(`${option} requires a value.`);
+  return value;
+}
+
+function tokenizeRuntimeCommand(command: string): string[] {
+  const tokens: string[] = [];
+  let current = "";
+  let quote: "'" | '"' | undefined;
+  let escaped = false;
+  for (const character of command) {
+    if (escaped) {
+      current += character;
+      escaped = false;
+      continue;
+    }
+    if (character === "\\" && quote !== "'") {
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      if (character === quote) quote = undefined;
+      else current += character;
+      continue;
+    }
+    if (character === "'" || character === '"') {
+      quote = character;
+      continue;
+    }
+    if (/\s/u.test(character)) {
+      if (current) {
+        tokens.push(current);
+        current = "";
+      }
+      continue;
+    }
+    current += character;
+  }
+  if (escaped || quote) throw new Error("Unclosed quote or escape in jobs command.");
+  if (current) tokens.push(current);
+  return tokens;
 }
 
 function stripOuterQuotes(value: string): string {

@@ -9,6 +9,7 @@ export const JOB_PRESETS = [
   "build",
   "git-status",
   "runtime-smoke",
+  "browser-loop",
 ] as const;
 
 export type JobPreset = (typeof JOB_PRESETS)[number];
@@ -19,6 +20,7 @@ export type JobStatus =
   | "failed"
   | "cancelling"
   | "cancelled"
+  | "waiting_approval"
   | "interrupted";
 export type JobEventLevel = "info" | "stdout" | "stderr" | "warning" | "error";
 
@@ -35,6 +37,8 @@ export interface JobRecord {
   processPid?: number;
   exitCode?: number;
   error?: string;
+  input?: Record<string, unknown>;
+  state?: Record<string, unknown>;
   createdAt: string;
   startedAt?: string;
   finishedAt?: string;
@@ -54,6 +58,7 @@ export interface CreateJobInput {
   workspaceRoot: string;
   title?: string;
   preset: JobPreset;
+  input?: Record<string, unknown>;
 }
 
 export interface JobListScope {
@@ -76,6 +81,8 @@ interface JobRow {
   process_pid: number | null;
   exit_code: number | null;
   error: string | null;
+  input_json: string | null;
+  state_json: string | null;
   created_at: string;
   started_at: string | null;
   finished_at: string | null;
@@ -109,6 +116,7 @@ export class JobStore {
       status: "queued",
       progress: 0,
       currentStep: "Queued",
+      input: sanitizeJsonRecord(input.input, "job input"),
       createdAt: now,
       updatedAt: now,
     };
@@ -116,8 +124,8 @@ export class JobStore {
     this.database.sqlite.prepare(`
       insert into jobs (
         id, workspace_id, workspace_root, title, preset, status, progress,
-        current_step, created_at, updated_at
-      ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        current_step, input_json, state_json, created_at, updated_at
+      ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       record.id,
       record.workspaceId ?? null,
@@ -127,6 +135,8 @@ export class JobStore {
       record.status,
       record.progress,
       record.currentStep,
+      serializeJsonRecord(record.input),
+      null,
       record.createdAt,
       record.updatedAt,
     );
@@ -176,6 +186,8 @@ export class JobStore {
       workspaceRoot: resolve(patch.workspaceRoot ?? current.workspaceRoot),
       title: patch.title === undefined ? current.title : sanitizeTitle(patch.title),
       progress: clampInteger(patch.progress, current.progress, 0, 100),
+      input: patch.input === undefined ? current.input : sanitizeJsonRecord(patch.input, "job input"),
+      state: patch.state === undefined ? current.state : sanitizeJsonRecord(patch.state, "job state"),
       updatedAt: new Date().toISOString(),
     };
 
@@ -183,7 +195,7 @@ export class JobStore {
       update jobs set
         workspace_id = ?, workspace_root = ?, title = ?, preset = ?, status = ?,
         progress = ?, current_step = ?, worker_pid = ?, process_pid = ?, exit_code = ?,
-        error = ?, started_at = ?, finished_at = ?, updated_at = ?
+        error = ?, input_json = ?, state_json = ?, started_at = ?, finished_at = ?, updated_at = ?
       where id = ?
     `).run(
       updated.workspaceId ?? null,
@@ -197,6 +209,8 @@ export class JobStore {
       updated.processPid ?? null,
       updated.exitCode ?? null,
       updated.error ?? null,
+      serializeJsonRecord(updated.input),
+      serializeJsonRecord(updated.state),
       updated.startedAt ?? null,
       updated.finishedAt ?? null,
       updated.updatedAt,
@@ -236,16 +250,16 @@ export class JobStore {
   }
 
   activeCount(workspaceRoot?: string): number {
-    const statuses = ["queued", "running", "cancelling"];
+    const statuses = ["queued", "running", "cancelling", "waiting_approval"];
     if (workspaceRoot) {
       const row = this.database.sqlite.prepare(
         `select count(*) as count from jobs
-         where workspace_root = ? and status in (?, ?, ?)`,
+         where workspace_root = ? and status in (?, ?, ?, ?)`,
       ).get(resolve(workspaceRoot), ...statuses) as { count: number };
       return row.count;
     }
     const row = this.database.sqlite.prepare(
-      "select count(*) as count from jobs where status in (?, ?, ?)",
+      "select count(*) as count from jobs where status in (?, ?, ?, ?)",
     ).get(...statuses) as { count: number };
     return row.count;
   }
@@ -329,6 +343,7 @@ export function defaultJobTitle(preset: JobPreset): string {
     case "build": return "Production build";
     case "git-status": return "Git status inspection";
     case "runtime-smoke": return "GPT-Agent runtime smoke";
+    case "browser-loop": return "Browser Computer task";
   }
 }
 
@@ -346,6 +361,8 @@ function rowToJobRecord(row: JobRow): JobRecord {
     processPid: row.process_pid ?? undefined,
     exitCode: row.exit_code ?? undefined,
     error: row.error ?? undefined,
+    input: parseJsonRecord(row.input_json),
+    state: parseJsonRecord(row.state_json),
     createdAt: row.created_at,
     startedAt: row.started_at ?? undefined,
     finishedAt: row.finished_at ?? undefined,
@@ -372,7 +389,7 @@ function readStatus(value: string): JobStatus {
   if (
     value === "queued" || value === "running" || value === "succeeded" ||
     value === "failed" || value === "cancelling" || value === "cancelled" ||
-    value === "interrupted"
+    value === "waiting_approval" || value === "interrupted"
   ) return value;
   return "failed";
 }
@@ -382,6 +399,42 @@ function readEventLevel(value: string): JobEventLevel {
     return value;
   }
   return "info";
+}
+
+function sanitizeJsonRecord(
+  value: Record<string, unknown> | undefined,
+  label: string,
+): Record<string, unknown> | undefined {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`${label} must be a JSON object.`);
+  }
+  let serialized: string;
+  try {
+    serialized = JSON.stringify(value);
+  } catch {
+    throw new Error(`${label} must be JSON serializable.`);
+  }
+  if (Buffer.byteLength(serialized, "utf8") > 256 * 1024) {
+    throw new Error(`${label} exceeds the 256 KiB limit.`);
+  }
+  return JSON.parse(serialized) as Record<string, unknown>;
+}
+
+function serializeJsonRecord(value: Record<string, unknown> | undefined): string | null {
+  return value === undefined ? null : JSON.stringify(value);
+}
+
+function parseJsonRecord(value: string | null): Record<string, unknown> | undefined {
+  if (!value) return undefined;
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function sanitizeTitle(value: string): string {

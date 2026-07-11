@@ -88,6 +88,8 @@ export const jobs = sqliteTable(
     processPid: integer("process_pid"),
     exitCode: integer("exit_code"),
     error: text("error"),
+    inputJson: text("input_json"),
+    stateJson: text("state_json"),
     createdAt: text("created_at").notNull(),
     startedAt: text("started_at"),
     finishedAt: text("finished_at"),

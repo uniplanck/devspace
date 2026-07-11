@@ -13,17 +13,28 @@ import {
 } from "./job-store.js";
 import { runCompatibilitySmoke } from "./runtime-operations.js";
 import { resolveExecutable, shellPathInfo } from "./shell-environment.js";
+import { cancelBrowserApproval, listBrowserApprovals } from "./browser-computer.js";
+import {
+  createHermesBrowserTaskPlanner,
+  createNativeBrowserTaskDriver,
+  runBrowserTaskLoop,
+  type BrowserTaskLoopInput,
+  type BrowserTaskLoopRuntime,
+  type BrowserTaskLoopState,
+} from "./browser-task-loop.js";
 
 export interface StartJobInput {
   workspaceId?: string;
   workspaceRoot: string;
   preset: JobPreset;
   title?: string;
+  input?: Record<string, unknown>;
 }
 
 export interface JobRunnerOptions {
   concurrency?: number;
   pollIntervalMs?: number;
+  browserLoopRuntime?: BrowserTaskLoopRuntime;
 }
 
 export function startJob(
@@ -34,29 +45,7 @@ export function startJob(
   try {
     store.recoverStaleJobs();
     const record = store.create(input);
-    const modulePath = fileURLToPath(import.meta.url);
-    const cliPath = fileURLToPath(new URL(modulePath.endsWith(".ts") ? "./cli.ts" : "./cli.js", import.meta.url));
-    const worker = spawn(
-      process.execPath,
-      [...process.execArgv, cliPath, "jobs", "__worker", record.id],
-      {
-        detached: true,
-        stdio: "ignore",
-        env: {
-          ...process.env,
-          DEVSPACE_WORKSPACE_ID: input.workspaceId ?? "",
-          DEVSPACE_WORKSPACE_ROOT: input.workspaceRoot,
-        },
-      },
-    );
-    worker.unref();
-    const updated = store.update(record.id, {
-      workerPid: worker.pid,
-      currentStep: "Worker starting",
-      progress: 2,
-    });
-    store.appendEvent(record.id, "info", `Worker started${worker.pid ? ` (pid ${worker.pid})` : ""}.`);
-    return updated;
+    return launchJobWorker(store, record, "Worker started");
   } finally {
     store.close();
   }
@@ -105,6 +94,9 @@ export async function runJobWorker(
 
     if (job.preset === "runtime-smoke") {
       return await runRuntimeSmokeJob(store, job);
+    }
+    if (job.preset === "browser-loop") {
+      return await runBrowserLoopJob(store, job, options.browserLoopRuntime);
     }
 
     const command = await resolvePresetCommand(job.preset, job.workspaceRoot);
@@ -218,7 +210,13 @@ export function cancelJob(
     if (!job) throw new Error(`Unknown or ambiguous job id: ${idOrPrefix}`);
     if (isTerminal(job.status)) return job;
 
-    if (job.status === "queued") {
+    if (job.status === "queued" || job.status === "waiting_approval") {
+      if (job.status === "waiting_approval") {
+        const pendingApprovalId = readPendingApprovalId(job.state);
+        if (pendingApprovalId) {
+          try { cancelBrowserApproval(pendingApprovalId); } catch { /* already resolved or unavailable */ }
+        }
+      }
       const cancelled = store.update(job.id, {
         status: "cancelled",
         currentStep: "Cancelled before start",
@@ -226,7 +224,9 @@ export function cancelJob(
         processPid: undefined,
         finishedAt: new Date().toISOString(),
       });
-      store.appendEvent(job.id, "warning", "Job cancelled before execution.");
+      store.appendEvent(job.id, "warning", job.status === "waiting_approval"
+        ? "Job cancelled while waiting for local approval."
+        : "Job cancelled before execution.");
       return cancelled;
     }
 
@@ -240,6 +240,155 @@ export function cancelJob(
   } finally {
     store.close();
   }
+}
+
+export function resumeJob(
+  config: Pick<ServerConfig, "stateDir">,
+  idOrPrefix: string,
+): JobRecord {
+  const store = createJobStore(config);
+  try {
+    store.recoverStaleJobs();
+    const job = store.get(idOrPrefix);
+    if (!job) throw new Error(`Unknown or ambiguous job id: ${idOrPrefix}`);
+    if (job.status !== "waiting_approval" && job.status !== "interrupted") {
+      throw new Error(`Job cannot be resumed from status ${job.status}.`);
+    }
+    if (job.status === "waiting_approval") {
+      const pendingApprovalId = readPendingApprovalId(job.state);
+      if (!pendingApprovalId) throw new Error("Waiting browser job has no pending approval id.");
+      const approval = listBrowserApprovals().find((candidate) => candidate.id === pendingApprovalId);
+      if (!approval) throw new Error(`Pending browser approval was not found: ${pendingApprovalId}`);
+      if (approval.status === "pending") {
+        throw new Error(`Browser approval is still pending: ${pendingApprovalId}`);
+      }
+      if (approval.status !== "executed") {
+        throw new Error(`Browser approval cannot resume the job from status ${approval.status}.`);
+      }
+    }
+    const queued = store.update(job.id, {
+      status: "queued",
+      currentStep: "Queued for resume",
+      workerPid: undefined,
+      processPid: undefined,
+      finishedAt: undefined,
+      error: undefined,
+    });
+    store.appendEvent(job.id, "info", `Resume requested from ${job.status}.`);
+    return launchJobWorker(store, queued, "Resume worker started");
+  } finally {
+    store.close();
+  }
+}
+
+function launchJobWorker(store: JobStore, record: JobRecord, eventPrefix: string): JobRecord {
+  const modulePath = fileURLToPath(import.meta.url);
+  const cliPath = fileURLToPath(new URL(modulePath.endsWith(".ts") ? "./cli.ts" : "./cli.js", import.meta.url));
+  const worker = spawn(
+    process.execPath,
+    [...process.execArgv, cliPath, "jobs", "__worker", record.id],
+    {
+      detached: true,
+      stdio: "ignore",
+      env: {
+        ...process.env,
+        DEVSPACE_WORKSPACE_ID: record.workspaceId ?? "",
+        DEVSPACE_WORKSPACE_ROOT: record.workspaceRoot,
+      },
+    },
+  );
+  worker.unref();
+  const updated = store.update(record.id, {
+    workerPid: worker.pid,
+    currentStep: "Worker starting",
+    progress: Math.max(2, record.progress),
+  });
+  store.appendEvent(record.id, "info", `${eventPrefix}${worker.pid ? ` (pid ${worker.pid})` : ""}.`);
+  return updated;
+}
+
+async function runBrowserLoopJob(
+  store: JobStore,
+  job: JobRecord,
+  injectedRuntime?: BrowserTaskLoopRuntime,
+): Promise<JobRecord> {
+  const input = readBrowserLoopInput(job.input);
+  const runtime = injectedRuntime ?? {
+    planner: createHermesBrowserTaskPlanner({
+      provider: input.plannerProvider ?? process.env.DEVSPACE_BROWSER_PLANNER_PROVIDER,
+      model: input.plannerModel ?? process.env.DEVSPACE_BROWSER_PLANNER_MODEL,
+    }),
+    driver: createNativeBrowserTaskDriver(),
+  };
+  store.update(job.id, { progress: Math.max(job.progress, 12), currentStep: "Inspecting browser page" });
+  const result = await runBrowserTaskLoop(
+    input,
+    runtime,
+    job.state as BrowserTaskLoopState | undefined,
+    (state, step) => {
+      const progress = Math.min(94, 12 + Math.round((step.step / (input.maxSteps ?? 20)) * 80));
+      store.update(job.id, {
+        state: state as unknown as Record<string, unknown>,
+        progress,
+        currentStep: `Browser step ${step.step}: ${step.action.kind}`,
+      });
+      store.appendEvent(job.id, "info", `Browser step ${step.step}: ${step.action.kind} — ${step.outcome}`);
+    },
+  );
+
+  if (result.status === "waiting-approval") {
+    const waiting = store.update(job.id, {
+      status: "waiting_approval",
+      state: result.state as unknown as Record<string, unknown>,
+      currentStep: `Waiting for local ${result.approval.category} approval`,
+      workerPid: undefined,
+      processPid: undefined,
+    });
+    store.appendEvent(job.id, "warning", `Local approval required: ${result.approval.id} (${result.approval.category}).`);
+    return waiting;
+  }
+  if (result.status === "succeeded") {
+    const completed = store.update(job.id, {
+      status: "succeeded",
+      progress: 100,
+      state: result.state as unknown as Record<string, unknown>,
+      currentStep: "Completed",
+      exitCode: 0,
+      processPid: undefined,
+      workerPid: undefined,
+      finishedAt: new Date().toISOString(),
+    });
+    store.appendEvent(job.id, "info", `Browser goal completed: ${result.summary}`);
+    return completed;
+  }
+  const failed = store.update(job.id, {
+    status: "failed",
+    progress: 100,
+    state: result.state as unknown as Record<string, unknown>,
+    currentStep: "Browser task failed",
+    exitCode: 1,
+    processPid: undefined,
+    workerPid: undefined,
+    error: result.error,
+    finishedAt: new Date().toISOString(),
+  });
+  store.appendEvent(job.id, "error", result.error);
+  return failed;
+}
+
+function readPendingApprovalId(value: Record<string, unknown> | undefined): string | undefined {
+  return typeof value?.pendingApprovalId === "string" && value.pendingApprovalId.trim()
+    ? value.pendingApprovalId.trim()
+    : undefined;
+}
+
+function readBrowserLoopInput(value: Record<string, unknown> | undefined): BrowserTaskLoopInput {
+  const goal = typeof value?.goal === "string" ? value.goal : "";
+  if (!goal.trim()) throw new Error("Browser loop job requires an input.goal string.");
+  const maxSteps = typeof value?.maxSteps === "number" ? value.maxSteps : undefined;
+  const plannerProvider = typeof value?.plannerProvider === "string" ? value.plannerProvider : undefined;
+  const plannerModel = typeof value?.plannerModel === "string" ? value.plannerModel : undefined;
+  return { goal, maxSteps, plannerProvider, plannerModel };
 }
 
 async function runRuntimeSmokeJob(store: JobStore, job: JobRecord): Promise<JobRecord> {
@@ -272,7 +421,7 @@ async function runRuntimeSmokeJob(store: JobStore, job: JobRecord): Promise<JobR
 }
 
 async function resolvePresetCommand(
-  preset: Exclude<JobPreset, "runtime-smoke">,
+  preset: Exclude<JobPreset, "runtime-smoke" | "browser-loop">,
   workspaceRoot: string,
 ): Promise<{ executable: string; args: string[]; label: string }> {
   if (preset === "git-status") {
