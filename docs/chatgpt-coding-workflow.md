@@ -150,13 +150,13 @@ a PTY, or send Ctrl-C. Set `tty: true` only for commands that need a terminal.
 
 ## Show Changes
 
-By default, `DEVSPACE_WIDGETS=full`.
+Compact workspace payloads default to `DEVSPACE_WIDGETS=off`; full payloads
+default to `DEVSPACE_WIDGETS=changes`.
 
-In that mode, DevSpace attaches widget UI to the exposed workspace, file, edit,
-and shell tools. The aggregate `show_changes` tool is not exposed by default.
-
-Use `DEVSPACE_WIDGETS=off` to disable widget UI, or `DEVSPACE_WIDGETS=changes`
-to expose the aggregate show-changes flow.
+The `changes` mode keeps individual read and shell calls compact and attaches
+widget UI only to `open_workspace` and the aggregate `show_changes` flow. Use
+`DEVSPACE_WIDGETS=full` only for per-tool diagnostic cards, or `off` to disable
+widget UI entirely.
 
 When `show_changes` is exposed, models should call it exactly once after the
 final file modification in any turn that changes files. The tool only requires

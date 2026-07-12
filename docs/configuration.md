@@ -83,9 +83,152 @@ sessions.
 
 | Value | Behavior |
 | --- | --- |
-| `full` | Default. Widget UI is attached to exposed workspace, file, edit, and shell tools. |
-| `changes` | Enables the aggregate `show_changes` tool and attaches widget UI to `open_workspace` and `show_changes`. |
-| `off` | Disables widget UI. |
+| `full` | Opt-in diagnostic mode. Widget UI is attached to exposed workspace, file, edit, and shell tools, which uses substantially more vertical space. |
+| `changes` | Enables the aggregate `show_changes` tool and attaches widget UI only to `open_workspace` and `show_changes`. This is the default when full workspace payloads are selected. |
+| `off` | Disables widget UI. This is the default in compact mode. |
+
+## Compact payloads and execution-cost estimates
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `DEVSPACE_OPEN_WORKSPACE_PAYLOAD` | `compact` | Use `compact` for bounded instruction excerpts and smaller skill metadata, or `full` for the v1.0 payload. |
+| `DEVSPACE_OPEN_WORKSPACE_INSTRUCTION_CHARS` | `6000` | Maximum characters returned per instruction excerpt; minimum `256`. |
+| `DEVSPACE_USAGE_CONTENT` | `compact` | Append `compact` or `full` execution-cost summaries to tool output, or use `off` to hide them. |
+| `DEVSPACE_USAGE_HISTORY` | `~/.local/share/devspace/usage-history.jsonl` | Local JSONL destination for non-blocking execution diagnostics. |
+
+Execution diagnostics record observed server duration, Tool call count, error count, retry count,
+input/output character volume, and text-token estimates. Token counts are estimates from text handled
+by GPT-Agent, not ChatGPT model billing or actual model usage. Run `devspace-runtime costs` through
+the existing Bash Tool for the current server-process aggregate.
+
+## GPT-Agent v1.1 feature flags
+
+All v1.1 feature flags default to `0`, so the existing compact Tool catalog and Fast Path remain unchanged.
+
+| Variable | Enables |
+| --- | --- |
+| `DEVSPACE_SKILL_MATCHER` | `match_skills`, which ranks bounded Skill metadata without loading bodies. |
+| `DEVSPACE_COMPOUND_TOOLS` | `project_snapshot`, `focused_context`, and read-only `review_changes`. |
+| `DEVSPACE_BUILTIN_PROFILES` | Built-in `explore`, `implement`, `review`, and `design` profiles when Subagents are enabled. |
+| `DEVSPACE_DESIGN_AUDIT` | The guarded `design_audit` adapter and three bundled Design Skills. |
+| `DEVSPACE_DESIGN_AUDIT_ALLOWED_HOSTS` | Comma-separated exact hosts/origins; defaults to loopback hosts only. |
+
+Feature flag values are strict: `1/0`, `true/false`, `yes/no`, and `on/off` are accepted.
+New Tool results include `serverDurationMs`, `payloadCharacters`, `returnedItems`, and `truncated`.
+
+## Runtime reliability commands
+
+Runtime diagnostics are integrated into the existing Bash Tool instead of increasing the model-facing
+MCP Tool catalog. These exact commands are intercepted by DevSpace and do not start a login shell:
+
+| Bash command | Purpose |
+| --- | --- |
+| `devspace-runtime diagnose [--github] [command ...]` | Classifies workspace access, Git detection, executable discovery, safe PATH fallbacks, and optional GitHub CLI authentication without returning credentials. |
+| `devspace-runtime smoke` | Runs bounded read-only checks for list/read/search, shell PATH resolution, Git, and MCP App resources. |
+| `devspace-runtime costs` | Returns observed duration, calls, errors, retries, character volume, and estimated text tokens from the current server process. |
+| `devspace-runtime jobs start <preset> [--title <title>]` | Starts a persistent background verification job using `typecheck`, `test`, `build`, `git-status`, or `runtime-smoke`. |
+| `devspace-runtime jobs start browser-loop --goal <goal> [--max-steps <1-60>] [--provider <provider>] [--model <model>] [--download-group <group>]` | Starts a bounded Browser Computer loop. Every step is re-grounded from a screenshot and DOM inspection; sensitive actions stop in `waiting_approval`. Downloads are grouped under the policy download root. |
+| `devspace-runtime jobs list` | Lists recent jobs for the open workspace. |
+| `devspace-runtime jobs show <id> [--events]` | Returns current progress and optionally the latest bounded event log. |
+| `devspace-runtime jobs cancel <id>` | Requests cancellation of an active job in the same workspace. Cancelling an approval-waiting browser job also cancels its unresolved approval request. |
+| `devspace-runtime jobs resume <id>` | Resumes an interrupted job or an approval-waiting browser job after the local approval has been executed. |
+| `devspace-runtime computer doctor` | Reports Browser/Desktop Computer Use readiness without starting automation. |
+| `devspace-runtime computer policy` | Returns the non-secret Computer Use allowlist and confirmation policy. |
+| `devspace-runtime computer browser login [url]` | Opens the isolated browser profile without CDP for one-time manual sign-in. Close this window before starting automation. |
+| `devspace-runtime computer browser start\|status\|stop` | Controls the isolated Brave/Chrome CDP session after policy enablement. |
+| `devspace-runtime computer browser open <url>` | Navigates only to an HTTPS or loopback URL whose hostname matches the policy allowlist. |
+| `devspace-runtime computer browser inspect\|screenshot` | Returns bounded interactive-element metadata or a current PNG screenshot. |
+| `devspace-runtime computer browser click <x> <y>` | Clicks a safe element or creates a local human-approval request for sensitive actions. |
+| `devspace-runtime computer browser type <text>` | Types into a focused non-credential field; password and credential-like fields are rejected. |
+| `devspace-runtime computer browser key <key>` | Sends a bounded navigation key; Enter is approval-gated when form submission confirmation is enabled. |
+| `devspace-runtime computer browser scroll <dx> <dy>` | Scrolls the active page using bounded deltas. |
+| `devspace-runtime computer browser approvals` | Lists pending local approval requests without executing them. |
+| `devspace-runtime finder <path>` | On macOS, opens a validated workspace directory or reveals a validated file in Finder after an explicit request. |
+
+Shell execution augments the inherited PATH with existing standard locations such as
+`/opt/homebrew/bin`, `/usr/local/bin`, `~/.local/bin`, and system binary directories. It does not
+source `.zshrc`, `.zprofile`, or another login-shell configuration, avoiding startup side effects.
+
+When Widgets are enabled and the host advertises server-Tool support, Tool cards with a workspace
+path display a link-style **Finderで表示** action. The App calls the app-only `open_in_finder` Tool;
+it is hidden from the model-facing catalog. If the host cannot execute the action, the control is
+removed instead of leaving a non-functional button. The server validates the path against the workspace
+before invoking macOS Finder. Paths outside the approved workspace are rejected by the normal root guard.
+
+Parallel jobs are persisted in the local SQLite state database. The default concurrency is three
+jobs and may be changed from one to eight with `DEVSPACE_JOB_CONCURRENCY`. Jobs survive server
+restarts because the worker process is detached; stale running records are marked `interrupted`
+when their process is no longer present. Arbitrary shell text is not accepted by the job API.
+Browser-loop goals and bounded step histories are stored as private JSON in the same database.
+The planner defaults to Hermes' configured provider and model; `DEVSPACE_BROWSER_PLANNER_PROVIDER`
+and `DEVSPACE_BROWSER_PLANNER_MODEL`, or per-job `--provider` and `--model`, may override routing.
+
+For a quick regression check after a host-model rollout, run `devspace-runtime smoke` through Bash or:
+
+```bash
+npm run test:runtime
+```
+
+## Computer Use safety foundation
+
+Computer Use remains disabled until a policy is explicitly enabled. For a safe ChatGPT-only preset:
+
+```bash
+devspace computer enable-chatgpt
+devspace computer doctor
+devspace computer policy
+```
+
+This preset allows only `chatgpt.com`, disables Desktop Computer Use, enables downloads, and keeps
+login, submit, upload, download, purchase, delete, and external communication behind local approval.
+
+The default policy requires confirmation for login, submission, upload, download, purchase,
+delete, and external communication; stores no raw credentials; uses a separate persistent browser profile;
+and has empty browser-domain and desktop-application allowlists. Run `devspace computer browser login`
+for the initial manual sign-in without remote debugging; cookies remain in the isolated profile and are
+reused by later automation sessions. Browser Computer uses the
+Node.js native WebSocket/fetch implementation and Chrome DevTools Protocol directly, so it does
+not download another browser or require Playwright. The isolated browser profile may retain its
+own cookies after the user logs in manually; GPT-Agent refuses to type password or credential-like
+fields and does not return input values in inspection results.
+
+Sensitive clicks and Enter-based submissions create a short-lived approval request. ChatGPT can
+list the request but cannot execute it through the built-in runtime command. Approval is performed
+from the local GPT-Agent Tool app and is followed by a native macOS confirmation dialog. A browser-loop
+job then remains in `waiting_approval` until explicitly resumed; it does not poll through or bypass the
+approval boundary. Screenshot artifacts, session state, approvals, and bounded step history are stored
+with private permissions under `~/.devspace`. Browser downloads default to
+`~/Downloads/GPT-Agent/<group>/<YYYY-MM-DD>/<job>/`; `--download-group` controls the group portion.
+Top-level navigation is revalidated after redirects and is reset to `about:blank` if it leaves the
+allowlist.
+
+Design Audit remains a separate adapter: the Browser Computer CDP session is not silently reused
+for design auditing, axe analysis, or authenticated page inspection.
+
+Skills may optionally declare bounded `short-description`, `triggers`, and `required-tools`
+frontmatter for matching. Existing `name` and `description` metadata remains fully compatible;
+only a selected Skill is activated by reading its `SKILL.md`.
+
+## Approved shell aliases
+
+`DEVSPACE_APPROVED_SHELL_COMMANDS_FILE` may point to a local JSON file. The
+default is `~/.devspace/approved-shell-commands.json`. An alias is invoked as
+`devspace-approved <alias>` and is accepted only when its configured
+`workspaceRoot` exactly matches the open workspace. Its optional
+`workingDirectory` must remain inside that root.
+
+```json
+{
+  "commands": [
+    {
+      "alias": "verify",
+      "workspaceRoot": "/absolute/project/path",
+      "workingDirectory": ".",
+      "command": "npm test"
+    }
+  ]
+}
+```
 
 ## Skills
 

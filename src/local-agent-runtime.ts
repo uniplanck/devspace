@@ -6,6 +6,7 @@ import type {
   SandboxMode,
   ThreadOptions,
 } from "@openai/codex-sdk";
+import { assertLocalAgentProviderAllowed } from "./no-codex.js";
 
 export type LocalAgentWriteMode = "read_only" | "allowed" | "full_access";
 
@@ -55,12 +56,15 @@ function sandboxModeFor(writeMode: LocalAgentWriteMode | undefined): SandboxMode
 }
 
 function threadOptionsFor(input: LocalAgentRunInput): ThreadOptions {
+  const readOnly = input.writeMode === "read_only" || input.writeMode === undefined;
   return {
     workingDirectory: input.workspace,
     sandboxMode: sandboxModeFor(input.writeMode),
     approvalPolicy: "never",
     model: input.model,
     modelReasoningEffort: input.thinking as ModelReasoningEffort | undefined,
+    networkAccessEnabled: readOnly ? false : undefined,
+    webSearchMode: readOnly ? "disabled" : undefined,
   };
 }
 
@@ -92,6 +96,7 @@ export async function createCodexSdkLocalAgentRuntime(
   options?: CodexOptions,
   codexFactory?: CodexFactory,
 ): Promise<CodexSdkLocalAgentRuntime> {
+  if (!codexFactory) assertLocalAgentProviderAllowed("codex");
   const factory = codexFactory ?? (await defaultCodexFactory());
   return new CodexSdkLocalAgentRuntime(factory(options));
 }

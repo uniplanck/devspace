@@ -73,6 +73,51 @@ export const oauthRefreshTokens = sqliteTable(
   },
 );
 
+export const jobs = sqliteTable(
+  "jobs",
+  {
+    id: text("id").primaryKey(),
+    workspaceId: text("workspace_id"),
+    workspaceRoot: text("workspace_root").notNull(),
+    title: text("title").notNull(),
+    preset: text("preset").notNull(),
+    status: text("status").notNull(),
+    progress: integer("progress").notNull().default(0),
+    currentStep: text("current_step").notNull().default("Queued"),
+    workerPid: integer("worker_pid"),
+    processPid: integer("process_pid"),
+    exitCode: integer("exit_code"),
+    error: text("error"),
+    inputJson: text("input_json"),
+    stateJson: text("state_json"),
+    createdAt: text("created_at").notNull(),
+    startedAt: text("started_at"),
+    finishedAt: text("finished_at"),
+    updatedAt: text("updated_at").notNull(),
+  },
+  (table) => [
+    index("jobs_workspace_id_idx").on(table.workspaceId, table.updatedAt),
+    index("jobs_workspace_root_idx").on(table.workspaceRoot, table.updatedAt),
+    index("jobs_status_idx").on(table.status, table.updatedAt),
+  ],
+);
+
+export const jobEvents = sqliteTable(
+  "job_events",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    jobId: text("job_id")
+      .notNull()
+      .references(() => jobs.id, { onDelete: "cascade" }),
+    timestamp: text("timestamp").notNull(),
+    level: text("level").notNull(),
+    message: text("message").notNull(),
+  },
+  (table) => [
+    index("job_events_job_id_idx").on(table.jobId, table.id),
+  ],
+);
+
 export const localAgentSessions = sqliteTable(
   "local_agent_sessions",
   {
@@ -103,3 +148,7 @@ export type LoadedAgentFileRow = typeof loadedAgentFiles.$inferSelect;
 export type NewLoadedAgentFileRow = typeof loadedAgentFiles.$inferInsert;
 export type LocalAgentSessionRow = typeof localAgentSessions.$inferSelect;
 export type NewLocalAgentSessionRow = typeof localAgentSessions.$inferInsert;
+export type JobRow = typeof jobs.$inferSelect;
+export type NewJobRow = typeof jobs.$inferInsert;
+export type JobEventRow = typeof jobEvents.$inferSelect;
+export type NewJobEventRow = typeof jobEvents.$inferInsert;

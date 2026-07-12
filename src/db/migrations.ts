@@ -22,6 +22,16 @@ const migrations: Migration[] = [
     name: "local-agent-sessions",
     up: migrateLocalAgentSessions,
   },
+  {
+    version: 4,
+    name: "parallel-jobs",
+    up: migrateParallelJobs,
+  },
+  {
+    version: 5,
+    name: "browser-loop-job-state",
+    up: migrateBrowserLoopJobState,
+  },
 ];
 
 export function migrateDatabase(sqlite: Database.Database): void {
@@ -174,9 +184,58 @@ function migrateLocalAgentSessions(sqlite: Database.Database): void {
   addColumnIfMissing(sqlite, "local_agent_sessions", "thinking", "text");
 }
 
+function migrateParallelJobs(sqlite: Database.Database): void {
+  sqlite.exec(`
+    create table if not exists jobs (
+      id text primary key,
+      workspace_id text,
+      workspace_root text not null,
+      title text not null,
+      preset text not null,
+      status text not null,
+      progress integer not null default 0,
+      current_step text not null default 'Queued',
+      worker_pid integer,
+      process_pid integer,
+      exit_code integer,
+      error text,
+      created_at text not null,
+      started_at text,
+      finished_at text,
+      updated_at text not null
+    );
+
+    create index if not exists jobs_workspace_id_idx
+      on jobs(workspace_id, updated_at desc);
+
+    create index if not exists jobs_workspace_root_idx
+      on jobs(workspace_root, updated_at desc);
+
+    create index if not exists jobs_status_idx
+      on jobs(status, updated_at desc);
+
+    create table if not exists job_events (
+      id integer primary key autoincrement,
+      job_id text not null,
+      timestamp text not null,
+      level text not null,
+      message text not null,
+      foreign key (job_id) references jobs(id) on delete cascade
+    );
+
+    create index if not exists job_events_job_id_idx
+      on job_events(job_id, id asc);
+  `);
+}
+
+function migrateBrowserLoopJobState(sqlite: Database.Database): void {
+  addColumnIfMissing(sqlite, "jobs", "input_json", "text");
+  addColumnIfMissing(sqlite, "jobs", "state_json", "text");
+}
+
 function addColumnIfMissing(
   sqlite: Database.Database,
-  table: "workspace_sessions" | "local_agent_sessions",
+  table: "workspace_sessions" | "local_agent_sessions" | "jobs",
   column: string,
   definition: string,
 ): void {

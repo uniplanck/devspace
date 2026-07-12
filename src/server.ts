@@ -18,6 +18,7 @@ import express from "express";
 import type { Request, Response } from "express";
 import * as z from "zod/v4";
 import { applyPatch } from "./apply-patch.js";
+import { formatChatProgressResult, updateChatProgress } from "./chat-progress.js";
 import { loadConfig, type ServerConfig, type WidgetMode } from "./config.js";
 import {
   logEvent,
@@ -35,6 +36,13 @@ import {
   runShellTool,
   writeFileTool,
 } from "./pi-tools.js";
+import {
+  appendUsageToContent,
+  editInputChars,
+  estimateFileChars,
+  recordObservedToolUsage,
+  textContentChars,
+} from "./usage-meter.js";
 import { SingleUserOAuthProvider } from "./oauth-provider.js";
 import { ProcessSessionManager, type ProcessSnapshot } from "./process-sessions.js";
 import { createReviewCheckpointManager } from "./review-checkpoints.js";
@@ -47,6 +55,7 @@ import {
   getLocalAgentProviderAvailabilitySnapshot,
   type LocalAgentProviderAvailability,
 } from "./local-agent-availability.js";
+import { registerV11Tools } from "./register-v11-tools.js";
 
 type Transport = StreamableHTTPServerTransport;
 const WORKSPACE_APP_URI = "ui://devspace/workspace-app.html";
@@ -147,6 +156,7 @@ function toolWidgetDescriptorMeta(
 }
 
 const toolNames = {
+  reportProgress: "report_progress",
   openWorkspace: "open_workspace",
   read: "read",
   write: "write",
@@ -170,13 +180,14 @@ interface ToolLogFields {
 }
 
 function serverInstructions(config: ServerConfig): string {
+  const progressInstruction = ` For work expected to take more than two minutes, call ${toolNames.reportProgress} before the first substantive workspace action with a short chatLabel, the current task, overallProgress 0, and an initial estimateMinutes. Update it at meaningful milestones or about every ten minutes, and call it once more with status completed or failed before the final response. Keep raw tool narration out of the user-facing response; report only progress, elapsed time, ETA, result, and risk. Include the returned GPT-5.6 API-conversion yen estimate in the final response and state that it is not ChatGPT billing.`;
   const showChangesInstruction =
     config.widgets === "changes"
       ? " If the turn successfully modifies files by creating, editing, overwriting, deleting, moving, or applying patches, call show_changes exactly once for that workspace after the final related file change and before your final response so the user can inspect the aggregate diff for that turn. Do not call it after every individual file change; do not skip it because individual file-change tools already returned diffs."
       : "";
 
   if (config.toolMode === "codex") {
-    return `Use DevSpace as a local coding workspace. Call ${toolNames.openWorkspace} once per project folder or worktree and reuse its workspaceId. Use ${toolNames.read} for direct file reads, apply_patch for all file modifications, exec_command for inspection, tests, builds, and other commands, and write_stdin to poll or interact with running processes. Follow instructions returned by ${toolNames.openWorkspace}; read applicable instruction and skill files before working in their scope.${showChangesInstruction}`;
+    return `Use DevSpace as a local coding workspace. Call ${toolNames.openWorkspace} once per project folder or worktree and reuse its workspaceId. Use ${toolNames.read} for direct file reads, apply_patch for all file modifications, exec_command for inspection, tests, builds, and other commands, and write_stdin to poll or interact with running processes. Follow instructions returned by ${toolNames.openWorkspace}; read applicable instruction and skill files before working in their scope.${progressInstruction}${showChangesInstruction}`;
   }
 
   const inspection = config.toolMode !== "full"
@@ -187,9 +198,11 @@ function serverInstructions(config: ServerConfig): string {
     ? `When ${toolNames.openWorkspace} returns available skills and a task matches a skill, use ${toolNames.read} to read that skill's path before proceeding. Skill paths may be outside the workspace, but ${toolNames.read} only permits advertised SKILL.md files and files under already-loaded skill directories. `
     : "";
 
-  const agentsMd = `Follow instructions returned by ${toolNames.openWorkspace}. Before working under a path listed in availableAgentsFiles, use ${toolNames.read} to inspect that instruction file and follow it. `;
+  const agentsMd = config.openWorkspacePayload === "compact"
+    ? `Follow instructions returned by ${toolNames.openWorkspace}. It returns bounded instruction excerpts to keep the initial result small; use ${toolNames.read} to read every path listed in agentsFiles before other project work, and read applicable paths in availableAgentsFiles before working in their scope. `
+    : `Follow instructions returned by ${toolNames.openWorkspace}. Before working under a path listed in availableAgentsFiles, use ${toolNames.read} to inspect that instruction file and follow it. `;
 
-  return `Use DevSpace as a local coding workspace. Call ${toolNames.openWorkspace} once per project folder or worktree to obtain a workspaceId. Reuse that same workspaceId for all later file, search, edit, write, show-changes, and shell tools in that folder; do not call ${toolNames.openWorkspace} again unless switching folders/worktrees, changing checkout/worktree mode, the workspaceId is rejected as unknown, or the user explicitly asks to reopen. ${agentsMd}${skills}${inspection}Prefer ${toolNames.edit} for targeted modifications, ${toolNames.write} only for new files or complete rewrites, and ${toolNames.shell} for tests, builds, git inspection, package scripts, and commands that are better executed by the shell. Do not create or modify files with ${toolNames.shell}; avoid shell redirection, heredocs, tee, sed -i, perl -i, node/python/ruby scripts, or any command whose purpose is to write project files.${showChangesInstruction}`;
+  return `Use DevSpace as a local coding workspace. Call ${toolNames.openWorkspace} once per project folder or worktree to obtain a workspaceId. Reuse that same workspaceId for all later file, search, edit, write, show-changes, and shell tools in that folder; do not call ${toolNames.openWorkspace} again unless switching folders/worktrees, changing checkout/worktree mode, the workspaceId is rejected as unknown, or the user explicitly asks to reopen. ${agentsMd}${skills}${inspection}Prefer ${toolNames.edit} for targeted modifications, ${toolNames.write} only for new files or complete rewrites, and ${toolNames.shell} for tests, builds, git inspection, package scripts, and commands that are better executed by the shell. Do not create or modify files with ${toolNames.shell}; avoid shell redirection, heredocs, tee, sed -i, perl -i, node/python/ruby scripts, or any command whose purpose is to write project files.${progressInstruction}${showChangesInstruction}`;
 }
 
 function formatVisibleAgent(agent: {
@@ -225,13 +238,15 @@ function resultOutputSchema(extra: z.ZodRawShape = {}): z.ZodRawShape {
 
 const workspaceSkillOutputSchema = z.object({
   name: z.string(),
-  description: z.string(),
+  description: z.string().optional(),
   path: z.string(),
 });
 
 const workspaceAgentsFileOutputSchema = z.object({
   path: z.string(),
-  content: z.string(),
+  content: z.string().optional(),
+  characters: z.number().int().nonnegative().optional(),
+  truncated: z.boolean().optional(),
 });
 
 const workspaceLocalAgentOutputSchema = z.object({
@@ -240,6 +255,7 @@ const workspaceLocalAgentOutputSchema = z.object({
   provider: z.string(),
   model: z.string().optional(),
   thinking: z.string().optional(),
+  writeMode: z.enum(["read_only", "allowed"]).optional(),
   providerAvailable: z.boolean().optional(),
   providerUnavailableReason: z.string().optional(),
 });
@@ -323,16 +339,65 @@ function logFailedToolResponse(
   content: ToolContent[],
   startedAt: number,
 ): void {
+  const durationMs = Math.round(performance.now() - startedAt);
+  const outputChars = textContentChars(content);
+  recordObservedToolUsage({
+    tool: fields.tool,
+    workspaceId: fields.workspaceId,
+    path: fields.path,
+    observedChars: outputChars,
+    savedChars: 0,
+    outputChars,
+    durationMs,
+    error: true,
+  });
   logToolCall(config, {
     ...fields,
     success: false,
-    durationMs: Math.round(performance.now() - startedAt),
+    durationMs,
     error: toolErrorPreview(content),
   });
 }
 
 function textBlock(text: string): ToolContent {
   return { type: "text", text };
+}
+
+function compactInstructionContent(content: string, limit: number): {
+  content: string;
+  truncated: boolean;
+} {
+  if (content.length <= limit) return { content, truncated: false };
+
+  const marker = "\n\n[... instruction file truncated by GPT-5.6 compact mode; use read with this path for the full file ...]\n\n";
+  const available = Math.max(0, limit - marker.length);
+  const headLength = Math.ceil(available * 0.7);
+  const tailLength = available - headLength;
+
+  return {
+    content: `${content.slice(0, headLength)}${marker}${content.slice(content.length - tailLength)}`,
+    truncated: true,
+  };
+}
+
+function redactSensitiveShellCommand(command: string): string {
+  const typePrefix = "devspace-runtime computer browser type ";
+  if (command.startsWith(typePrefix)) {
+    return `${typePrefix}[REDACTED ${Math.max(0, command.length - typePrefix.length)} chars]`;
+  }
+  const openPrefix = "devspace-runtime computer browser open ";
+  if (command.startsWith(openPrefix)) {
+    const raw = command.slice(openPrefix.length).trim().replace(/^(["'])|(["'])$/gu, "");
+    try {
+      const url = new URL(raw);
+      url.search = "";
+      url.hash = "";
+      return `${openPrefix}${url.toString()}`;
+    } catch {
+      return `${openPrefix}[REDACTED URL]`;
+    }
+  }
+  return command;
 }
 
 function textSummary(content: ToolContent[]): {
@@ -416,6 +481,22 @@ function getWorkspaceAppManifestEntry(): WorkspaceAppManifestEntry {
 
 function assetUrl(baseUrl: string, assetPath: string): string {
   return `${baseUrl}/${assetPath.replace(/^\/+/, "")}`;
+}
+
+function workspaceAppFallbackHtml(): string {
+  return `<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>GPT-Agent</title>
+    <style>
+      html,body{margin:0;padding:0;background:transparent;color:inherit;font:13px/1.45 system-ui,sans-serif}
+      .fallback{padding:10px 12px;border:1px solid rgba(127,127,127,.25);border-radius:10px;opacity:.75}
+    </style>
+  </head>
+  <body><div class="fallback">UI更新中です。ツール処理自体は完了しています。</div></body>
+</html>`;
 }
 
 function workspaceAppHtml(config: ServerConfig): string {
@@ -683,8 +764,8 @@ function createMcpServer(
   const server = new McpServer(
     {
       name: "devspace",
-      title: "DevSpace",
-      version: "0.1.0",
+      title: "GPT-Agent",
+      version: "1.1.0",
       description:
         "Secure local coding workspace for MCP clients. Provides workspace-scoped file, search, edit, write, and shell tools.",
     },
@@ -706,13 +787,19 @@ function createMcpServer(
       },
     },
     async () => {
-      await assertWorkspaceAppAssets();
+      let template: string;
+      try {
+        await assertWorkspaceAppAssets();
+        template = workspaceAppHtml(config);
+      } catch {
+        template = workspaceAppFallbackHtml();
+      }
       return {
         contents: [
           {
             uri: WORKSPACE_APP_URI,
             mimeType: RESOURCE_MIME_TYPE,
-            text: workspaceAppHtml(config),
+            text: template,
             _meta: {
               ui: {
                 csp: appCsp(config),
@@ -724,13 +811,83 @@ function createMcpServer(
     },
   );
 
+  server.registerTool(
+    toolNames.reportProgress,
+    {
+      title: "Report progress",
+      description:
+        "Persist user-facing progress for a long GPT-Agent task so GPT-Agent Tool can show the chat/task label, percentage, current step, elapsed time, ETA, risks, and GPT-5.6 API-conversion cost estimate. Call at task start, meaningful milestones, and completion.",
+      inputSchema: {
+        chatLabel: z.string().min(1).max(160).describe("Short human-readable chat or task label."),
+        workspaceId: z.string().optional().describe("Workspace identifier when one is already open."),
+        overallProgress: z.number().min(0).max(100).describe("Overall task progress percentage."),
+        currentProgress: z.number().min(0).max(100).optional().describe("Current subtask progress percentage."),
+        currentTask: z.string().min(1).max(240).describe("Current user-relevant task."),
+        completed: z.string().max(500).optional().describe("Short summary of what is complete."),
+        next: z.string().max(500).optional().describe("Short summary of the next action."),
+        risk: z.string().max(500).optional().describe("Current blocker or risk, if any."),
+        status: z.enum(["running", "paused", "completed", "failed"]).optional(),
+        estimateMinutes: z.number().min(1).max(1440).optional().describe("Initial completion estimate in minutes."),
+      },
+      outputSchema: {
+        result: z.string(),
+        id: z.string(),
+        overallProgress: z.number(),
+        currentProgress: z.number(),
+        elapsedSeconds: z.number(),
+        remainingSeconds: z.number().optional(),
+        estimatedJpy: z.number(),
+        estimatedJpyMax: z.number(),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async (input, extra) => {
+      const workspace = input.workspaceId
+        ? workspaces.getWorkspace(input.workspaceId)
+        : undefined;
+      const record = updateChatProgress({
+        sessionId: extra.sessionId,
+        chatLabel: input.chatLabel,
+        workspaceId: input.workspaceId,
+        workspaceRoot: workspace?.root,
+        overallProgress: input.overallProgress,
+        currentProgress: input.currentProgress,
+        currentTask: input.currentTask,
+        completed: input.completed,
+        next: input.next,
+        risk: input.risk,
+        status: input.status,
+        estimateMinutes: input.estimateMinutes,
+      });
+      const result = formatChatProgressResult(record);
+      return {
+        content: [textBlock(result)],
+        structuredContent: {
+          result,
+          id: record.id,
+          overallProgress: record.overallProgress,
+          currentProgress: record.currentProgress,
+          elapsedSeconds: record.elapsedSeconds,
+          remainingSeconds: record.remainingSeconds,
+          estimatedJpy: record.sessionEstimatedJpy,
+          estimatedJpyMax: record.sessionEstimatedJpyMax ?? record.sessionEstimatedJpy,
+        },
+      };
+    },
+  );
+
   registerAppTool(
     server,
     "open_workspace",
     {
       title: "Open workspace",
       description:
-        "Open a local project directory as a coding workspace. Call this once per project folder or worktree before reading, editing, searching, writing, showing changes, or running commands. Reuse the returned workspaceId for later calls in the same folder; do not call open_workspace again unless switching folders/worktrees, changing checkout/worktree mode, the workspaceId is rejected as unknown, or the user explicitly asks to reopen. By default this opens the actual checkout; set mode=\"worktree\" when the user asks for an isolated or parallel coding session. Returns a workspaceId, loaded root project instructions, and nested instruction file paths the model should read before working in those directories.",
+        "Open a local project directory as a coding workspace. Call this once per project folder or worktree before reading, editing, searching, writing, showing changes, or running commands. Reuse the returned workspaceId for later calls in the same folder. In compact mode, instruction files are returned as bounded excerpts and can be read in full through the read tool.",
       inputSchema: {
         path: z
           .string()
@@ -765,31 +922,49 @@ function createMcpServer(
           .optional(),
         agentsFiles: z.array(workspaceAgentsFileOutputSchema),
         availableAgentsFiles: z.array(workspaceAvailableAgentsFileOutputSchema),
+        availableAgentsFilesTotal: z.number().int().nonnegative(),
+        availableAgentsFilesTruncated: z.boolean(),
         skills: z.array(workspaceSkillOutputSchema),
         agentProviders: z.array(workspaceLocalAgentProviderOutputSchema),
         agents: z.array(workspaceLocalAgentOutputSchema),
         skillDiagnostics: z.array(z.unknown()),
         instruction: z.string(),
+        metrics: z.object({
+          compact: z.boolean(),
+          serverDurationMs: z.number().int().nonnegative(),
+          payloadCharacters: z.number().int().nonnegative(),
+          fullInstructionCharacters: z.number().int().nonnegative(),
+          returnedInstructionCharacters: z.number().int().nonnegative(),
+        }),
       },
       ...toolWidgetDescriptorMeta(config, "workspace"),
       annotations: { readOnlyHint: true },
     },
     async ({ path, mode, baseRef }) => {
       const startedAt = performance.now();
+      const compact = config.openWorkspacePayload === "compact";
       const { workspace, agentsFiles, availableAgentsFiles } = await workspaces.openWorkspace({ path, mode, baseRef });
+
       if (config.widgets === "changes") {
         void reviewCheckpoints.initializeWorkspace({
           workspaceId: workspace.id,
           root: workspace.root,
         });
       }
+
       const visibleSkills = workspace.skills
         .filter((skill) => !skill.disableModelInvocation)
-        .map((skill) => ({
-          name: skill.name,
-          description: skill.description,
-          path: formatPathForPrompt(skill.filePath),
-        }));
+        .map((skill) => compact
+          ? {
+              name: skill.name,
+              path: formatPathForPrompt(skill.filePath),
+            }
+          : {
+              name: skill.name,
+              description: skill.description,
+              path: formatPathForPrompt(skill.filePath),
+            });
+
       const visibleAgentProviders = config.subagents ? localAgentProviders : [];
       const visibleAgents = workspace.agentProfiles.map((profile) => {
         const summary = summarizeLocalAgentProfile(profile);
@@ -800,16 +975,38 @@ function createMcpServer(
           providerUnavailableReason: availability?.reason,
         };
       });
-      const loadedAgentsFiles = agentsFiles.map((file) => ({
-        path: formatAgentsPath(file.path, workspace.root),
-        content: file.content,
-      }));
+
+      const loadedAgentsFiles = agentsFiles.map((file) => {
+        const formattedPath = formatAgentsPath(file.path, workspace.root);
+        if (!compact) {
+          return {
+            path: formattedPath,
+            content: file.content,
+          };
+        }
+
+        const excerpt = compactInstructionContent(
+          file.content,
+          config.openWorkspaceInstructionChars,
+        );
+        return {
+          path: formattedPath,
+          content: excerpt.content,
+          characters: file.content.length,
+          truncated: excerpt.truncated,
+        };
+      });
+
       const availableAgentsFileOutputs = availableAgentsFiles.map((file) => ({
         path: formatAgentsPath(file.path, workspace.root),
       }));
-      const instruction = config.skillsEnabled
-        ? "Use this workspaceId in all subsequent tool calls for this project. Do not call open_workspace again for this same folder unless this workspaceId stops working, the user asks to reopen, or you switch to a different folder/worktree. Follow loaded agentsFiles instructions. Before working under a path listed in availableAgentsFiles, read that instruction file. When a task matches an available skill in skills, read its path before proceeding."
-        : "Use this workspaceId in all subsequent tool calls for this project. Do not call open_workspace again for this same folder unless this workspaceId stops working, the user asks to reopen, or you switch to a different folder/worktree. Follow loaded agentsFiles instructions. Before working under a path listed in availableAgentsFiles, read that instruction file.";
+
+      const instruction = compact
+        ? "Use this workspaceId for later calls in this project. Treat agentsFiles content as excerpts and read every listed path in full before other project work. Read applicable availableAgentsFiles before working in their nested scope. Read a skill only when the task matches it."
+        : config.skillsEnabled
+          ? "Use this workspaceId in all subsequent tool calls for this project. Do not call open_workspace again for this same folder unless this workspaceId stops working, the user asks to reopen, or you switch to a different folder/worktree. Follow loaded agentsFiles instructions. Before working under a path listed in availableAgentsFiles, read that instruction file. When a task matches an available skill in skills, read its path before proceeding."
+          : "Use this workspaceId in all subsequent tool calls for this project. Do not call open_workspace again for this same folder unless this workspaceId stops working, the user asks to reopen, or you switch to a different folder/worktree. Follow loaded agentsFiles instructions. Before working under a path listed in availableAgentsFiles, read that instruction file.";
+
       const resultContent: ToolContent[] = [
         {
           type: "text" as const,
@@ -817,34 +1014,74 @@ function createMcpServer(
             `Opened workspace ${workspace.id}`,
             `Root: ${workspace.root}`,
             `Mode: ${workspace.mode}`,
+            compact ? "Payload: compact" : "Payload: full",
             loadedAgentsFiles.length > 0
-              ? `Loaded project instructions: ${loadedAgentsFiles.map((file) => file.path).join(", ")}`
+              ? compact
+                ? `Instruction files: ${loadedAgentsFiles.map((file) => file.path).join(", ")}`
+                : `Loaded project instructions: ${loadedAgentsFiles.map((file) => file.path).join(", ")}`
               : undefined,
             availableAgentsFileOutputs.length > 0
-              ? `Available nested instructions: ${availableAgentsFileOutputs.map((file) => file.path).join(", ")}`
+              ? compact
+                ? `Nested instruction files: ${availableAgentsFileOutputs.length}`
+                : `Available nested instructions: ${availableAgentsFileOutputs.map((file) => file.path).join(", ")}`
               : undefined,
             visibleSkills.length > 0
-              ? `Available skills: ${visibleSkills.map((skill) => skill.name).join(", ")}`
+              ? `${compact ? "Skills" : "Available skills"}: ${visibleSkills.map((skill) => skill.name).join(", ")}`
               : undefined,
-            visibleAgentProviders.some((provider) => provider.available)
+            !compact && visibleAgentProviders.some((provider) => provider.available)
               ? `Available subagent providers: ${visibleAgentProviders.filter((provider) => provider.available).map((provider) => provider.name).join(", ")}`
               : undefined,
-            visibleAgentProviders.some((provider) => !provider.available)
+            !compact && visibleAgentProviders.some((provider) => !provider.available)
               ? `Unavailable subagent providers: ${visibleAgentProviders.filter((provider) => !provider.available).map(formatUnavailableAgentProvider).join(", ")}`
               : undefined,
-            visibleAgents.length > 0
+            !compact && visibleAgents.length > 0
               ? `Available subagent profiles: ${visibleAgents.map(formatVisibleAgent).join(", ")}`
               : undefined,
             instruction,
           ].filter(Boolean).join("\n"),
         },
       ];
+
+      const fullInstructionCharacters = agentsFiles.reduce(
+        (total, file) => total + file.content.length,
+        0,
+      );
+      const returnedInstructionCharacters = loadedAgentsFiles.reduce(
+        (total, file) => total + (file.content?.length ?? 0),
+        0,
+      );
+      const serverDurationMs = Math.round(performance.now() - startedAt);
+      const structuredContent = {
+        workspaceId: workspace.id,
+        root: workspace.root,
+        mode: workspace.mode,
+        sourceRoot: workspace.sourceRoot,
+        worktree: workspace.worktree,
+        agentsFiles: loadedAgentsFiles,
+        availableAgentsFiles: availableAgentsFileOutputs,
+        availableAgentsFilesTotal: availableAgentsFiles.length,
+        availableAgentsFilesTruncated: availableAgentsFileOutputs.length < availableAgentsFiles.length,
+        skills: visibleSkills,
+        agentProviders: visibleAgentProviders,
+        agents: visibleAgents,
+        skillDiagnostics: compact ? [] : workspace.skillDiagnostics,
+        instruction,
+        metrics: {
+          compact,
+          serverDurationMs,
+          payloadCharacters: 0,
+          fullInstructionCharacters,
+          returnedInstructionCharacters,
+        },
+      };
+      structuredContent.metrics.payloadCharacters = JSON.stringify(structuredContent).length;
+
       logToolCall(config, {
         tool: "open_workspace",
         workspaceId: workspace.id,
         path: workspace.root,
         success: true,
-        durationMs: Math.round(performance.now() - startedAt),
+        durationMs: serverDurationMs,
       });
 
       return {
@@ -856,29 +1093,21 @@ function createMcpServer(
             root: workspace.root,
             path: workspace.root,
             summary: {
+              compact,
+              payloadCharacters: structuredContent.metrics.payloadCharacters,
+              fullInstructionCharacters,
+              returnedInstructionCharacters,
               agentsFiles: loadedAgentsFiles.length,
               availableAgentsFiles: availableAgentsFileOutputs.length,
+              availableAgentsFilesTotal: availableAgentsFiles.length,
               skills: visibleSkills.length,
               agentProviders: visibleAgentProviders.length,
               agents: visibleAgents.length,
-              skillDiagnostics: workspace.skillDiagnostics.length,
+              skillDiagnostics: compact ? 0 : workspace.skillDiagnostics.length,
             },
           },
         },
-        structuredContent: {
-          workspaceId: workspace.id,
-          root: workspace.root,
-          mode: workspace.mode,
-          sourceRoot: workspace.sourceRoot,
-          worktree: workspace.worktree,
-          agentsFiles: loadedAgentsFiles,
-          availableAgentsFiles: availableAgentsFileOutputs,
-          skills: visibleSkills,
-          agentProviders: visibleAgentProviders,
-          agents: visibleAgents,
-          skillDiagnostics: workspace.skillDiagnostics,
-          instruction,
-        },
+        structuredContent,
       };
     },
   );
@@ -954,6 +1183,22 @@ function createMcpServer(
         offset: input.offset ?? 1,
         limited: input.limit !== undefined,
       };
+      const observedChars = textContentChars(response.content);
+      const savedChars = input.offset !== undefined || input.limit !== undefined
+        ? Math.max(0, estimateFileChars(readPath.absolutePath) - observedChars)
+        : 0;
+      const usage = recordObservedToolUsage({
+        tool: toolNames.read,
+        workspaceId,
+        workspaceRoot: workspace.root,
+        path: input.path,
+        observedChars,
+        savedChars,
+        inputChars: String(input.path).length,
+        outputChars: observedChars,
+        durationMs: Math.round(performance.now() - startedAt),
+      });
+      const content = appendUsageToContent(response.content, usage, config.usageContent);
       logToolCall(config, {
         tool: toolNames.read,
         workspaceId,
@@ -964,17 +1209,18 @@ function createMcpServer(
 
       return {
         ...response,
+        content,
         _meta: {
           tool: toolNames.read,
           card: {
             workspaceId,
             path: input.path,
             summary,
-            payload: { content: response.content },
+            payload: { content },
           },
         },
         structuredContent: {
-          result: contentText(response.content),
+          result: contentText(content),
         },
       };
     },
@@ -1026,6 +1272,18 @@ function createMcpServer(
         lines: contentLineCount(input.content),
         characters: input.content.length,
       };
+      const usage = recordObservedToolUsage({
+        tool: toolNames.write,
+        workspaceId,
+        workspaceRoot: workspace.root,
+        path: input.path,
+        observedChars: input.content.length + textContentChars(response.content),
+        savedChars: 0,
+        inputChars: input.content.length,
+        outputChars: textContentChars(response.content),
+        durationMs: Math.round(performance.now() - startedAt),
+      });
+      const content = appendUsageToContent(response.content, usage, config.usageContent);
       logToolCall(config, {
         tool: toolNames.write,
         workspaceId,
@@ -1036,6 +1294,7 @@ function createMcpServer(
 
       return {
         ...response,
+        content,
         _meta: {
           tool: toolNames.write,
           card: {
@@ -1043,13 +1302,13 @@ function createMcpServer(
             path: input.path,
             summary,
             payload: {
-              content: response.content,
+              content,
               patch,
             },
           },
         },
         structuredContent: {
-          result: contentText(response.content),
+          result: contentText(content),
         },
       };
     },
@@ -1091,7 +1350,7 @@ function createMcpServer(
     async ({ workspaceId, ...input }) => {
       const startedAt = performance.now();
       const workspace = workspaces.getWorkspace(workspaceId);
-      workspaces.resolvePath(workspace, input.path);
+      const targetPath = workspaces.resolvePath(workspace, input.path);
       const response = await editFileTool(input, {
         cwd: workspace.root,
         root: workspace.root,
@@ -1115,6 +1374,20 @@ function createMcpServer(
       };
       const editResultText = `Edited ${input.path} (+${stats.additions} -${stats.removals}).`;
       const editContent = [textBlock(editResultText)];
+      const observedChars = editInputChars(input.edits) + textContentChars(editContent);
+      const savedChars = Math.max(0, estimateFileChars(targetPath) * 2 - observedChars);
+      const usage = recordObservedToolUsage({
+        tool: toolNames.edit,
+        workspaceId,
+        workspaceRoot: workspace.root,
+        path: input.path,
+        observedChars,
+        savedChars,
+        inputChars: editInputChars(input.edits),
+        outputChars: textContentChars(editContent),
+        durationMs: Math.round(performance.now() - startedAt),
+      });
+      const content = appendUsageToContent(editContent, usage, config.usageContent);
       logToolCall(config, {
         tool: toolNames.edit,
         workspaceId,
@@ -1124,7 +1397,7 @@ function createMcpServer(
       });
 
       return {
-        content: editContent,
+        content,
         _meta: {
           tool: toolNames.edit,
           card: {
@@ -1139,7 +1412,7 @@ function createMcpServer(
         },
         structuredContent: {
           status: "applied",
-          result: contentText(editContent),
+          result: contentText(content),
         },
       };
     },
@@ -1324,6 +1597,25 @@ function createMcpServer(
           scope: input.path ?? ".",
           ...textSummary(response.content),
         };
+        const usage = recordObservedToolUsage({
+          tool: toolNames.grep,
+          workspaceId,
+          workspaceRoot: workspace.root,
+          path: input.path,
+          observedChars:
+            String(input.pattern ?? "").length
+            + String(input.path ?? "").length
+            + String(input.include ?? "").length
+            + textContentChars(response.content),
+          savedChars: 0,
+          inputChars:
+            String(input.pattern ?? "").length
+            + String(input.path ?? "").length
+            + String(input.include ?? "").length,
+          outputChars: textContentChars(response.content),
+          durationMs: Math.round(performance.now() - startedAt),
+        });
+        const content = appendUsageToContent(response.content, usage, config.usageContent);
         logToolCall(config, {
           tool: toolNames.grep,
           workspaceId,
@@ -1334,17 +1626,18 @@ function createMcpServer(
 
         return {
           ...response,
+          content,
           _meta: {
             tool: toolNames.grep,
             card: {
               workspaceId,
               path: input.path,
               summary,
-              payload: { content: response.content },
+              payload: { content },
             },
           },
           structuredContent: {
-            result: contentText(response.content),
+            result: contentText(content),
           },
         };
       },
@@ -1394,6 +1687,21 @@ function createMcpServer(
           scope: input.path ?? ".",
           ...textSummary(response.content),
         };
+        const usage = recordObservedToolUsage({
+          tool: toolNames.glob,
+          workspaceId,
+          workspaceRoot: workspace.root,
+          path: input.path,
+          observedChars:
+            String(input.pattern ?? "").length
+            + String(input.path ?? "").length
+            + textContentChars(response.content),
+          savedChars: 0,
+          inputChars: String(input.pattern ?? "").length + String(input.path ?? "").length,
+          outputChars: textContentChars(response.content),
+          durationMs: Math.round(performance.now() - startedAt),
+        });
+        const content = appendUsageToContent(response.content, usage, config.usageContent);
         logToolCall(config, {
           tool: toolNames.glob,
           workspaceId,
@@ -1404,17 +1712,18 @@ function createMcpServer(
 
         return {
           ...response,
+          content,
           _meta: {
             tool: toolNames.glob,
             card: {
               workspaceId,
               path: input.path,
               summary,
-              payload: { content: response.content },
+              payload: { content },
             },
           },
           structuredContent: {
-            result: contentText(response.content),
+            result: contentText(content),
           },
         };
       },
@@ -1460,6 +1769,18 @@ function createMcpServer(
         }
 
         const summary = textSummary(response.content);
+        const usage = recordObservedToolUsage({
+          tool: toolNames.ls,
+          workspaceId,
+          workspaceRoot: workspace.root,
+          path: input.path,
+          observedChars: String(input.path ?? "").length + textContentChars(response.content),
+          savedChars: 0,
+          inputChars: String(input.path ?? "").length,
+          outputChars: textContentChars(response.content),
+          durationMs: Math.round(performance.now() - startedAt),
+        });
+        const content = appendUsageToContent(response.content, usage, config.usageContent);
         logToolCall(config, {
           tool: toolNames.ls,
           workspaceId,
@@ -1470,17 +1791,18 @@ function createMcpServer(
 
         return {
           ...response,
+          content,
           _meta: {
             tool: toolNames.ls,
             card: {
               workspaceId,
               path: input.path,
               summary,
-              payload: { content: response.content },
+              payload: { content },
             },
           },
           structuredContent: {
-            result: contentText(response.content),
+            result: contentText(content),
           },
         };
       },
@@ -1494,8 +1816,8 @@ function createMcpServer(
     {
       title: "Bash",
       description: config.toolMode !== "full"
-        ? `Run a shell command inside an open workspace. Use only for tests, builds, git inspection, package scripts, search, file discovery, and directory inspection. In minimal tool mode, ${toolNames.grep}, ${toolNames.glob}, and ${toolNames.ls} are disabled; use command-line tools such as grep, rg, find, ls, and tree for those read-only inspection actions. Do not use ${toolNames.shell} to create or modify files. Do not use shell redirection, heredocs, tee, sed -i, perl -i, node/python/ruby scripts, or generated scripts to write project files; use ${toolNames.edit} for targeted changes and ${toolNames.write} for new files or full rewrites. Prefer ${toolNames.read} for direct file reads. Call open_workspace first and pass workspaceId. This is powerful local execution and should only be exposed behind strong authentication.`
-        : `Run a shell command inside an open workspace. Use only for tests, builds, git inspection, package scripts, and commands that are better executed by the shell. Do not use ${toolNames.shell} to create or modify files. Do not use shell redirection, heredocs, tee, sed -i, perl -i, node/python/ruby scripts, or generated scripts to write project files; use ${toolNames.edit} for targeted changes and ${toolNames.write} for new files or full rewrites. Prefer ${toolNames.read}, ${toolNames.grep}, ${toolNames.glob}, and ${toolNames.ls} for file inspection. Call open_workspace first and pass workspaceId. This is powerful local execution and should only be exposed behind strong authentication.`,
+        ? `Run a shell command inside an open workspace. Use only for tests, builds, git inspection, package scripts, search, file discovery, and directory inspection. In minimal tool mode, ${toolNames.grep}, ${toolNames.glob}, and ${toolNames.ls} are disabled; use command-line tools such as grep, rg, find, ls, and tree for those read-only inspection actions. Built-in commands are available without adding more MCP Tools: devspace-runtime diagnose [--github] [command ...], devspace-runtime smoke, devspace-runtime costs, devspace-runtime jobs start/list/show/cancel/resume, and devspace-runtime finder <path> for an explicit user request. Verification jobs use fixed presets: typecheck, test, build, git-status, and runtime-smoke. The browser-loop preset accepts a bounded goal and must stop for configured local approvals. Do not use ${toolNames.shell} to create or modify files. Do not use shell redirection, heredocs, tee, sed -i, perl -i, node/python/ruby scripts, or generated scripts to write project files; use ${toolNames.edit} for targeted changes and ${toolNames.write} for new files or full rewrites. Prefer ${toolNames.read} for direct file reads. Call open_workspace first and pass workspaceId. This is powerful local execution and should only be exposed behind strong authentication.`
+        : `Run a shell command inside an open workspace. Use only for tests, builds, git inspection, package scripts, and commands that are better executed by the shell. Built-in commands are available without adding more MCP Tools: devspace-runtime diagnose [--github] [command ...], devspace-runtime smoke, devspace-runtime costs, devspace-runtime jobs start/list/show/cancel/resume, and devspace-runtime finder <path> for an explicit user request. Verification jobs use fixed presets: typecheck, test, build, git-status, and runtime-smoke. The browser-loop preset accepts a bounded goal and must stop for configured local approvals. Do not use ${toolNames.shell} to create or modify files. Do not use shell redirection, heredocs, tee, sed -i, perl -i, node/python/ruby scripts, or generated scripts to write project files; use ${toolNames.edit} for targeted changes and ${toolNames.write} for new files or full rewrites. Prefer ${toolNames.read}, ${toolNames.grep}, ${toolNames.glob}, and ${toolNames.ls} for file inspection. Call open_workspace first and pass workspaceId. This is powerful local execution and should only be exposed behind strong authentication.`,
       inputSchema: {
         workspaceId: z
           .string()
@@ -1503,7 +1825,7 @@ function createMcpServer(
         command: z
           .string()
           .describe(
-            `Shell command to run. Must not create or modify project files; use ${toolNames.edit} or ${toolNames.write} for file changes.`,
+            `Shell command to run. Use devspace-runtime diagnose, smoke, costs, or jobs start/list/show/cancel/resume for built-in diagnostics and bounded jobs; use devspace-runtime finder <path> only on explicit request. Must not create or modify project files; use ${toolNames.edit} or ${toolNames.write} for file changes.`,
           ),
         workingDirectory: z
           .string()
@@ -1532,29 +1854,43 @@ function createMcpServer(
       const response = await runShellTool(input, {
         cwd,
         root: workspace.root,
+        workspaceId,
       });
 
+      const loggedCommand = redactSensitiveShellCommand(input.command);
       if (response.isError) {
         logFailedToolResponse(config, {
           tool: toolNames.shell,
           workspaceId,
           workingDirectory: workingDirectory ?? ".",
-          command: input.command,
+          command: loggedCommand,
           commandLength: input.command.length,
         }, response.content, startedAt);
         return response;
       }
 
       const summary = {
-        command: input.command,
+        command: loggedCommand,
         workingDirectory: workingDirectory ?? ".",
         ...textSummary(response.content),
       };
+      const usage = recordObservedToolUsage({
+        tool: toolNames.shell,
+        workspaceId,
+        workspaceRoot: workspace.root,
+        path: workingDirectory ?? ".",
+        observedChars: input.command.length + textContentChars(response.content),
+        savedChars: 0,
+        inputChars: input.command.length,
+        outputChars: textContentChars(response.content),
+        durationMs: Math.round(performance.now() - startedAt),
+      });
+      const content = appendUsageToContent(response.content, usage, config.usageContent);
       logToolCall(config, {
         tool: toolNames.shell,
         workspaceId,
         workingDirectory: workingDirectory ?? ".",
-        command: input.command,
+        command: loggedCommand,
         commandLength: input.command.length,
         success: true,
         durationMs: Math.round(performance.now() - startedAt),
@@ -1562,17 +1898,18 @@ function createMcpServer(
 
       return {
         ...response,
+        content,
         _meta: {
           tool: toolNames.shell,
           card: {
             workspaceId,
             path: workingDirectory,
             summary,
-            payload: { content: response.content },
+            payload: { content },
           },
         },
         structuredContent: {
-          result: contentText(response.content),
+          result: contentText(content),
         },
       };
     },
@@ -1582,6 +1919,8 @@ function createMcpServer(
   if (config.toolMode === "codex") {
     registerCodexProcessTools(server, config, workspaces, processSessions);
   }
+
+  registerV11Tools(server, { config, workspaces, localAgentProviders });
 
   return server;
 }

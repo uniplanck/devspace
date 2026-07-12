@@ -1,0 +1,127 @@
+{
+  "schemaVersion": 1,
+  "updatedAt": "2026-07-11",
+  "vision": "GPT-Agent Toolを、ChatGPTから安全に複数のローカル開発タスクを起動し、進捗・ログ・成果物・コストをリアルタイム監視できる統合アプリへ進化させる。",
+  "tasks": [
+    {
+      "id": "roadmap-in-tool-app",
+      "phase": "NOW",
+      "status": "done",
+      "priority": 1,
+      "title": "強化タスクをGPT-Agent Toolへ統合",
+      "detail": "正本ロードマップをアプリ内に表示し、NOW / NEXT / LATER / FUTUREを一覧できるようにした。"
+    },
+    {
+      "id": "safe-parallel-job-foundation",
+      "phase": "NOW",
+      "status": "done",
+      "priority": 2,
+      "title": "安全な並列job基盤",
+      "detail": "typecheck / test / build / git-status / runtime-smokeを最大3並列で実行。SQLite永続化、イベントログ、進捗、取消、異常終了復旧、CLIとChatGPT内蔵コマンドを実装した。"
+    },
+    {
+      "id": "live-task-dashboard",
+      "phase": "NOW",
+      "status": "done",
+      "priority": 3,
+      "title": "Execution Center",
+      "detail": "GPT-Agent Toolにjob一覧、2秒更新、進捗、現在工程、最新ログ、エラー、取消、Finder表示、Smoke / Typecheck / Test / Build起動を統合した。"
+    },
+    {
+      "id": "chat-progress-observability",
+      "phase": "NOW",
+      "status": "done",
+      "priority": 4,
+      "title": "Chat進捗・ETA・料金・背景操作の可視化",
+      "detail": "Chatごとの作業名、全体/現在進捗、経過時間、過去記録を使ったETA、GPT-5.6 Sol API換算料金を永続化。技術カードはChatで既定非表示とし、GPT-Agent Toolで背景操作履歴を確認できるようにした。"
+    },
+    {
+      "id": "computer-use-safety-foundation",
+      "phase": "NOW",
+      "status": "done",
+      "priority": 4,
+      "title": "Computer Use安全基盤",
+      "detail": "デフォルト無効のpolicy、許可ドメイン・許可アプリ、重要操作の確認ゲート、隔離browser profile、Native CDP / macOS readiness診断を実装した。"
+    },
+    {
+      "id": "parallel-chatgpt-jobs",
+      "phase": "NEXT",
+      "status": "in_progress",
+      "priority": 5,
+      "title": "ChatGPTの実装タスクを並列実行",
+      "detail": "固定presetの並列実行は完成。次は各job専用worktree、同一ファイル競合検出、AI task runner接続、成果物統合、再試行を追加する。"
+    },
+    {
+      "id": "ec2-gag-runtime",
+      "phase": "NEXT",
+      "status": "in_progress",
+      "priority": 6,
+      "title": "EC2版GAG Runtime",
+      "detail": "Minecraft用EC2へ/home/ubuntu/GPT-AgentとAI-Agent-Coreを共存配置。Node 22.19、build、doctor、read/grep/test E2Eを確認し、gpt-agent-ec2.serviceを有効化した。GAG本体は127.0.0.1:7676、Tailscale Serveでtailnet限定HTTPS、MemoryMax 1400M・低CPU/IO weightでMinecraftを優先。残りはChatGPTクラウド接続用の外部HTTPS中継と接続登録で、外部公開の明示承認待ち。"
+    },
+    {
+      "id": "browser-computer-use",
+      "phase": "NOW",
+      "status": "done",
+      "priority": 7,
+      "title": "Browser Computer実動作版",
+      "detail": "依存追加なしのNative CDPで隔離Braveを操作。許可URL、DOM抽出、スクリーンショット、クリック、入力、キー、スクロール、認証情報入力拒否、危険操作の承認キュー、macOS確認、GPT-Agent Tool操作画面を実装した。"
+    },
+    {
+      "id": "browser-model-action-loop",
+      "phase": "NEXT",
+      "status": "in_progress",
+      "priority": 8,
+      "title": "Browser Computerの自律操作loop",
+      "detail": "job runner接続、スクリーンショット＋DOMのHermes planner入力、DOM index限定操作、step履歴永続化、承認待ち停止、承認後resume、失敗時状態保持まで実装。次はGPT-Agent Toolのgoal入力・resume UIと実サイトE2Eを追加する。"
+    },
+    {
+      "id": "task-persistence-recovery",
+      "phase": "NEXT",
+      "status": "in_progress",
+      "priority": 9,
+      "title": "job復旧・通知・再試行",
+      "detail": "SQLite保存と異常終了検知は完成。次はMac再起動後の安全な再開、完了通知、承認待ち通知、one-click retryを追加する。"
+    },
+    {
+      "id": "native-macos-computer-use",
+      "phase": "LATER",
+      "status": "planned",
+      "priority": 10,
+      "title": "macOSネイティブComputer Use",
+      "detail": "Screen Recording、Accessibility、AXUIElement、CGEventを用いてMacアプリを操作。対象アプリallowlist、画面マスキング、破壊操作の人間承認を必須化する。"
+    },
+    {
+      "id": "subagent-provider-recovery",
+      "phase": "HOLD",
+      "status": "deferred",
+      "priority": 11,
+      "title": "サブエージェント接続正常化",
+      "detail": "Codex更新、Claudeログイン、OpenCode CLI PATH、Cursor ACP、Pi / Copilot導入を診断・修復し、provider別healthとone-click repairを追加する。"
+    },
+    {
+      "id": "multi-agent-orchestration",
+      "phase": "LATER",
+      "status": "planned",
+      "priority": 12,
+      "title": "マルチエージェント並列オーケストレーション",
+      "detail": "調査・実装・レビューをCodex / Claude / OpenCode / Cursor等へ分配し、結果をGPT-Agentが統合・競合解決・最終検証する。"
+    },
+    {
+      "id": "app-originated-chatgpt-command",
+      "phase": "FUTURE",
+      "status": "vision",
+      "priority": 13,
+      "title": "GPT-AgentアプリからChatGPTへ直接指示",
+      "detail": "アプリ内の自然言語入力からChatGPT側の実行を開始する。ChatGPT / OpenAIへのログイン、API認証、Workspace AgentまたはBrowserレベル連携、権限・課金・監査設計が必要なため将来タスクとする。"
+    },
+    {
+      "id": "unified-gpt-agent-app",
+      "phase": "FUTURE",
+      "status": "vision",
+      "priority": 14,
+      "title": "独立した統合GPT-Agentアプリ",
+      "detail": "現在のGPT-Agent Toolへ、指示入力、ChatGPT接続、並列job、Computer Use画面、承認、進捗、履歴、成果物、設定を統合し、ローカルAI開発OS化する。"
+    }
+  ]
+}

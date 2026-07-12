@@ -7,7 +7,9 @@ export default defineConfig({
   plugins: [react()],
   base: "./",
   build: {
-    outDir: resolve(__dirname, "dist/ui"),
+    outDir: process.env.DEVSPACE_UI_OUT_DIR
+      ? resolve(process.env.DEVSPACE_UI_OUT_DIR)
+      : resolve(__dirname, "dist/ui"),
     emptyOutDir: true,
     manifest: true,
     rollupOptions: {

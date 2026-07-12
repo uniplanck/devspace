@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { createRequire } from "node:module";
 import { stdin as input, stdout as output } from "node:process";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -13,6 +13,7 @@ import { satisfies } from "semver";
 import { loadConfig } from "./config.js";
 import { runLocalAgentProvider } from "./local-agent-adapters.js";
 import {
+  assertLocalAgentProfileBoundary,
   isLocalAgentProvider,
   loadLocalAgentProfiles,
   type LocalAgentProfile,
@@ -27,7 +28,33 @@ import {
   resolveLocalAgentTarget,
 } from "./local-agent-targets.js";
 import { createLocalAgentStore, type LocalAgentRecord } from "./local-agent-store.js";
+import { isCodexAllowed } from "./no-codex.js";
 import type { LocalAgentRunResult } from "./local-agent-runtime.js";
+import { cancelJob, resumeJob, runJobWorker, startJob } from "./job-runner.js";
+import { createJobStore, isJobPreset, JOB_PRESETS, type JobRecord } from "./job-store.js";
+import {
+  computerUsePolicyPath,
+  diagnoseComputerUse,
+  enableChatGptBrowserPolicy,
+  initializeComputerUsePolicy,
+  loadComputerUsePolicy,
+} from "./computer-use.js";
+import {
+  approveBrowserAction,
+  browserStatus,
+  cancelBrowserApproval,
+  captureBrowserScreenshot,
+  clickBrowserPoint,
+  inspectBrowserPage,
+  launchBrowserLoginSession,
+  listBrowserApprovals,
+  openBrowserUrl,
+  pressBrowserKey,
+  scrollBrowserPage,
+  startBrowserSession,
+  stopBrowserSession,
+  typeBrowserText,
+} from "./browser-computer.js";
 import {
   ensureDevspaceDefaultSkills,
   generateOwnerToken,
@@ -39,7 +66,7 @@ import {
 } from "./user-config.js";
 import { expandHomePath } from "./roots.js";
 
-type Command = "serve" | "init" | "doctor" | "config" | "agents" | "help" | "version";
+type Command = "serve" | "init" | "doctor" | "config" | "agents" | "jobs" | "computer" | "help" | "version";
 const require = createRequire(import.meta.url);
 const SUPPORTED_NODE_RANGE = ">=20.12 <27";
 
@@ -66,6 +93,12 @@ async function main(argv: string[]): Promise<void> {
     case "agents":
       await runAgentsCommand(args);
       return;
+    case "jobs":
+      await runJobsCommand(args);
+      return;
+    case "computer":
+      await runComputerCommand(args);
+      return;
     case "help":
       printHelp();
       return;
@@ -77,7 +110,7 @@ async function main(argv: string[]): Promise<void> {
 
 function normalizeCommand(command: string | undefined): Command {
   if (!command || command === "serve" || command === "start") return "serve";
-  if (command === "init" || command === "doctor" || command === "config" || command === "agents") return command;
+  if (command === "init" || command === "doctor" || command === "config" || command === "agents" || command === "jobs" || command === "computer") return command;
   if (command === "help" || command === "--help" || command === "-h") return "help";
   if (command === "version" || command === "--version" || command === "-v") return "version";
   throw new Error(`Unknown command: ${command}`);
@@ -304,12 +337,424 @@ function printHelp(): void {
       "  devspace agents ls       List subagent sessions",
       "  devspace agents run <profile-or-provider-or-id> [--model <model>] <prompt>",
       "  devspace agents show <id>",
+      "  devspace jobs start <preset> [--title <title>]",
+      "  devspace jobs ls [--json]",
+      "  devspace jobs show <id> [--events] [--json]",
+      "  devspace jobs cancel <id>",
+      "  devspace computer doctor [--json]",
+      "  devspace computer init",
+      "  devspace computer enable-chatgpt",
+      "  devspace computer policy [--json]",
+      "  devspace computer browser <command>",
       "  devspace -v, --version   Print the installed version",
       "",
       "For temporary tunnels:",
       "  DEVSPACE_PUBLIC_BASE_URL=https://example.trycloudflare.com devspace serve",
     ].join("\n"),
   );
+}
+
+async function runComputerCommand(args: string[]): Promise<void> {
+  const [subcommand, ...rest] = args;
+  switch (subcommand) {
+    case "doctor": {
+      const result = diagnoseComputerUse();
+      if (rest.includes("--json")) {
+        console.log(JSON.stringify(result, null, 2));
+        return;
+      }
+      console.log([
+        `Computer Use: ${result.enabled ? "enabled" : "disabled"}`,
+        `Policy: ${result.policyExists ? (result.policyValid ? "valid" : "invalid") : "not initialized"} (${result.policyPath})`,
+        `Browser: ${result.browser.ready ? "ready" : "not ready"}${result.browser.name ? ` — ${result.browser.name}` : ""}`,
+        `Browser adapter: ${result.browser.adapter} (${result.browser.nativeCdpAvailable ? "available" : "missing"})`,
+        `Browser downloads: ${result.browser.downloadDirectory}`,
+        `Desktop: ${result.desktop.ready ? "ready" : "not ready"}`,
+        `Confirmations: ${result.safety.confirmationsRequired.join(", ") || "none"}`,
+        `No-Codex guard: ${isCodexAllowed() ? "override enabled" : "active"}`,
+        ...result.missingRequirements.map((item) => `Missing: ${item}`),
+        ...result.diagnostics.map((item) => `Note: ${item}`),
+      ].join("\n"));
+      return;
+    }
+    case "init": {
+      const initialized = initializeComputerUsePolicy();
+      console.log(`${initialized.created ? "Created" : "Existing"} disabled-by-default policy: ${initialized.path}`);
+      return;
+    }
+    case "enable-chatgpt": {
+      const enabled = enableChatGptBrowserPolicy();
+      console.log([
+        `Enabled Browser Computer Use for chatgpt.com only: ${enabled.path}`,
+        `Downloads: ${enabled.policy.browser.downloadDirectory}`,
+        "Purchase, submit, download, delete, login, upload, and external communication require local approval.",
+      ].join("\n"));
+      return;
+    }
+    case "policy": {
+      const path = computerUsePolicyPath();
+      const loaded = loadComputerUsePolicy(path);
+      if (!loaded.valid) throw new Error(`Computer Use policy is invalid: ${loaded.error}`);
+      if (rest.includes("--json")) {
+        console.log(JSON.stringify({ path, exists: loaded.exists, policy: loaded.policy }, null, 2));
+        return;
+      }
+      console.log([
+        `Policy: ${path}`,
+        `Exists: ${loaded.exists}`,
+        `Enabled: ${loaded.policy.enabled}`,
+        `Browser enabled: ${loaded.policy.browser.enabled}`,
+        `Allowed domains: ${loaded.policy.browser.allowedDomains.join(", ") || "none"}`,
+        `Download directory: ${loaded.policy.browser.downloadDirectory}`,
+        `Desktop enabled: ${loaded.policy.desktop.enabled}`,
+        `Allowed applications: ${loaded.policy.desktop.allowedApplications.length}`,
+      ].join("\n"));
+      return;
+    }
+    case "browser":
+      await runBrowserComputerCommand(rest);
+      return;
+    case undefined:
+    case "help":
+    case "--help":
+    case "-h":
+      printComputerHelp();
+      return;
+    default:
+      throw new Error(`Unknown computer command: ${subcommand}`);
+  }
+}
+
+async function runBrowserComputerCommand(args: string[]): Promise<void> {
+  const [subcommand, ...rest] = args;
+  switch (subcommand) {
+    case "login": {
+      const url = rest[0] ?? "https://chatgpt.com/";
+      console.log(JSON.stringify(await launchBrowserLoginSession({ url }), null, 2));
+      return;
+    }
+    case "start":
+      console.log(JSON.stringify(await startBrowserSession(), null, 2));
+      return;
+    case "status":
+      console.log(JSON.stringify(await browserStatus(), null, 2));
+      return;
+    case "stop":
+      console.log(JSON.stringify(await stopBrowserSession(), null, 2));
+      return;
+    case "open": {
+      const url = rest[0];
+      if (!url) throw new Error("Usage: devspace computer browser open <url>");
+      console.log(JSON.stringify(await openBrowserUrl(url), null, 2));
+      return;
+    }
+    case "inspect":
+      console.log(JSON.stringify(await inspectBrowserPage(), null, 2));
+      return;
+    case "screenshot": {
+      const screenshot = await captureBrowserScreenshot();
+      const { base64: _base64, ...safe } = screenshot;
+      console.log(JSON.stringify(safe, null, 2));
+      return;
+    }
+    case "click": {
+      const x = Number(rest[0]);
+      const y = Number(rest[1]);
+      console.log(JSON.stringify(await clickBrowserPoint(x, y), null, 2));
+      return;
+    }
+    case "type": {
+      const text = rest.join(" ");
+      if (!text) throw new Error("Usage: devspace computer browser type <text>");
+      console.log(JSON.stringify(await typeBrowserText(text), null, 2));
+      return;
+    }
+    case "key": {
+      const key = rest[0];
+      if (!key) throw new Error("Usage: devspace computer browser key <key>");
+      console.log(JSON.stringify(await pressBrowserKey(key), null, 2));
+      return;
+    }
+    case "scroll": {
+      const deltaX = Number(rest[0]);
+      const deltaY = Number(rest[1]);
+      console.log(JSON.stringify(await scrollBrowserPage(deltaX, deltaY), null, 2));
+      return;
+    }
+    case "approvals":
+      console.log(JSON.stringify({ approvals: listBrowserApprovals() }, null, 2));
+      return;
+    case "approve": {
+      const id = rest[0];
+      if (!id) throw new Error("Usage: devspace computer browser approve <approval-id>");
+      const localApproval = process.env.DEVSPACE_LOCAL_APPROVAL_UI === "1";
+      if (localApproval) confirmBrowserApprovalWithMacOS(id);
+      console.log(JSON.stringify(await approveBrowserAction(id, { localApproval }), null, 2));
+      return;
+    }
+    case "reject": {
+      const id = rest[0];
+      if (!id) throw new Error("Usage: devspace computer browser reject <approval-id>");
+      if (process.env.DEVSPACE_LOCAL_APPROVAL_UI !== "1") {
+        throw new Error("Browser approval rejection requires the local GPT-Agent Tool app.");
+      }
+      console.log(JSON.stringify(cancelBrowserApproval(id), null, 2));
+      return;
+    }
+    case undefined:
+    case "help":
+    case "--help":
+    case "-h":
+      printComputerHelp();
+      return;
+    default:
+      throw new Error(`Unknown browser computer command: ${subcommand}`);
+  }
+}
+
+function confirmBrowserApprovalWithMacOS(id: string): void {
+  if (process.platform !== "darwin") {
+    throw new Error("Local Browser Computer approval currently requires macOS.");
+  }
+  const approval = listBrowserApprovals().find((candidate) => candidate.id === id);
+  if (!approval || approval.status !== "pending") {
+    throw new Error(`Pending browser approval was not found: ${id}`);
+  }
+  const label = approval.element?.text || approval.element?.ariaLabel || approval.category;
+  const safeLabel = label.replace(/[\\"\n\r]/gu, " ").slice(0, 120);
+  const safeReason = approval.reason.replace(/[\\"\n\r]/gu, " ").slice(0, 180);
+  const script = [
+    `display dialog "GPT-Agent Browser Computer\\n\\n${safeLabel}\\n${safeReason}\\n\\nExecute this action?"`,
+    `buttons {"Cancel", "Approve"}`,
+    `default button "Approve"`,
+    `cancel button "Cancel"`,
+    `with icon caution`,
+  ].join(" ");
+  const result = spawnSync("/usr/bin/osascript", ["-e", script], {
+    encoding: "utf8",
+    timeout: 120_000,
+  });
+  if (result.status !== 0 || !String(result.stdout).includes("Approve")) {
+    throw new Error("Browser approval was cancelled locally.");
+  }
+}
+
+function printComputerHelp(): void {
+  console.log([
+    "GPT-Agent Computer Use",
+    "",
+    "Usage:",
+    "  devspace computer doctor [--json]",
+    "  devspace computer init",
+    "  devspace computer enable-chatgpt",
+    "  devspace computer policy [--json]",
+    "  devspace computer browser login [url]",
+    "  devspace computer browser start|status|stop",
+    "  devspace computer browser open <url>",
+    "  devspace computer browser inspect",
+    "  devspace computer browser screenshot",
+    "  devspace computer browser click <x> <y>",
+    "  devspace computer browser type <text>",
+    "  devspace computer browser key <Tab|Escape|Backspace|Arrow...|Enter>",
+    "  devspace computer browser scroll <delta-x> <delta-y>",
+    "  devspace computer browser approvals",
+    "",
+    "Approval execution is restricted to the local GPT-Agent Tool app.",
+    "Use `browser login` for the one-time manual sign-in without CDP; close that window before `browser start`.",
+    "Credentials must be entered manually in the isolated browser.",
+  ].join("\n"));
+}
+
+async function runJobsCommand(args: string[]): Promise<void> {
+  const [subcommand, ...rest] = args;
+  switch (subcommand) {
+    case "start":
+      await runJobsStart(rest);
+      return;
+    case "ls":
+    case "list":
+      runJobsList(rest);
+      return;
+    case "show":
+      runJobsShow(rest);
+      return;
+    case "cancel":
+      runJobsCancel(rest);
+      return;
+    case "resume":
+      runJobsResume(rest);
+      return;
+    case "__worker":
+      await runJobsWorker(rest);
+      return;
+    case undefined:
+    case "help":
+    case "--help":
+    case "-h":
+      printJobsHelp();
+      return;
+    default:
+      throw new Error(`Unknown jobs command: ${subcommand}`);
+  }
+}
+
+async function runJobsStart(args: string[]): Promise<void> {
+  const [presetValue] = args;
+  if (!presetValue || !isJobPreset(presetValue)) {
+    throw new Error(`Usage: devspace jobs start <preset>. Presets: ${JOB_PRESETS.join(", ")}`);
+  }
+  const title = readJobsOption(args, "--title");
+  const input = presetValue === "browser-loop"
+    ? readBrowserLoopJobInput(args)
+    : presetValue === "chatgpt-task" ? readChatGptTaskJobInput(args) : undefined;
+  const config = loadConfig();
+  const record = startJob(config, {
+    workspaceId: process.env.DEVSPACE_WORKSPACE_ID || undefined,
+    workspaceRoot: resolveCurrentWorkspaceRoot(),
+    preset: presetValue,
+    title,
+    input,
+  });
+  console.log(formatJobLine(record));
+}
+
+function runJobsList(args: string[]): void {
+  const config = loadConfig();
+  const store = createJobStore(config);
+  try {
+    store.recoverStaleJobs();
+    const all = args.includes("--all");
+    const json = args.includes("--json");
+    const scope = all ? {} : resolveCurrentWorkspaceScope();
+    const jobs = store.list({ ...scope, limit: 100 });
+    if (json) {
+      console.log(JSON.stringify({ jobs }, null, 2));
+      return;
+    }
+    if (jobs.length === 0) {
+      console.log(all ? "No GPT-Agent jobs found." : "No GPT-Agent jobs found for this workspace.");
+      return;
+    }
+    for (const job of jobs) console.log(formatJobLine(job));
+  } finally {
+    store.close();
+  }
+}
+
+function runJobsShow(args: string[]): void {
+  const [id] = args;
+  if (!id) throw new Error("Usage: devspace jobs show <id> [--events] [--json]");
+  const config = loadConfig();
+  const store = createJobStore(config);
+  try {
+    store.recoverStaleJobs();
+    const job = store.get(id);
+    if (!job) throw new Error(`Unknown or ambiguous job id: ${id}`);
+    const includeEvents = args.includes("--events");
+    const events = includeEvents ? store.events(job.id, 200) : undefined;
+    if (args.includes("--json")) {
+      console.log(JSON.stringify({ job, ...(events ? { events } : {}) }, null, 2));
+      return;
+    }
+    console.log(formatJobLine(job));
+    if (job.error) console.log(`error: ${job.error}`);
+    for (const event of events ?? []) {
+      console.log(`${event.timestamp} ${event.level.padEnd(7)} ${event.message}`);
+    }
+  } finally {
+    store.close();
+  }
+}
+
+function runJobsCancel(args: string[]): void {
+  const [id] = args;
+  if (!id) throw new Error("Usage: devspace jobs cancel <id>");
+  const record = cancelJob(loadConfig(), id);
+  console.log(formatJobLine(record));
+}
+
+function runJobsResume(args: string[]): void {
+  const [id] = args;
+  if (!id) throw new Error("Usage: devspace jobs resume <id>");
+  const record = resumeJob(loadConfig(), id);
+  console.log(formatJobLine(record));
+}
+
+function readChatGptTaskJobInput(args: string[]): Record<string, unknown> {
+  const prompt = readJobsOption(args, "--prompt");
+  if (!prompt) throw new Error("ChatGPT task jobs require --prompt <prompt>.");
+  const url = readJobsOption(args, "--url");
+  const expectedMarker = readJobsOption(args, "--expect");
+  const timeoutSecondsValue = readJobsOption(args, "--timeout-seconds");
+  const timeoutSeconds = timeoutSecondsValue === undefined ? undefined : Number(timeoutSecondsValue);
+  if (timeoutSeconds !== undefined && (!Number.isFinite(timeoutSeconds) || timeoutSeconds < 5 || timeoutSeconds > 600)) {
+    throw new Error("--timeout-seconds must be from 5 to 600.");
+  }
+  return {
+    prompt,
+    ...(url ? { url } : {}),
+    ...(expectedMarker ? { expectedMarker } : {}),
+    ...(timeoutSeconds === undefined ? {} : { timeoutMs: Math.round(timeoutSeconds * 1000) }),
+    closeWhenDone: !args.includes("--keep-tab"),
+  };
+}
+
+function readBrowserLoopJobInput(args: string[]): Record<string, unknown> {
+  const goal = readJobsOption(args, "--goal");
+  if (!goal) {
+    throw new Error("Browser loop jobs require --goal <goal>.");
+  }
+  const maxStepsValue = readJobsOption(args, "--max-steps");
+  const maxSteps = maxStepsValue === undefined ? undefined : Number(maxStepsValue);
+  if (maxSteps !== undefined && (!Number.isInteger(maxSteps) || maxSteps < 1 || maxSteps > 60)) {
+    throw new Error("--max-steps must be an integer from 1 to 60.");
+  }
+  const plannerProvider = readJobsOption(args, "--provider");
+  const plannerModel = readJobsOption(args, "--model");
+  const downloadGroup = readJobsOption(args, "--download-group");
+  return {
+    goal,
+    ...(maxSteps === undefined ? {} : { maxSteps }),
+    ...(plannerProvider ? { plannerProvider } : {}),
+    ...(plannerModel ? { plannerModel } : {}),
+    ...(downloadGroup ? { downloadGroup } : {}),
+  };
+}
+
+function readJobsOption(args: string[], option: string): string | undefined {
+  const index = args.indexOf(option);
+  if (index < 0) return undefined;
+  const value = args[index + 1];
+  if (!value || value.startsWith("--")) throw new Error(`${option} requires a value.`);
+  return value;
+}
+
+async function runJobsWorker(args: string[]): Promise<void> {
+  const [id] = args;
+  if (!id) throw new Error("Usage: devspace jobs __worker <id>");
+  await runJobWorker(loadConfig(), id);
+}
+
+function formatJobLine(job: JobRecord): string {
+  return `${job.id} ${job.status.padEnd(11)} ${String(job.progress).padStart(3)}% ${job.preset.padEnd(13)} ${job.title} — ${job.currentStep}`;
+}
+
+function printJobsHelp(): void {
+  console.log([
+    "GPT-Agent jobs",
+    "",
+    "Safe parallel presets:",
+    `  ${JOB_PRESETS.join(", ")}`,
+    "",
+    "Usage:",
+    "  devspace jobs start <preset> [--title <title>]",
+    "  devspace jobs start browser-loop --goal <goal> --provider <non-codex-provider> [--max-steps <1-60>] [--model <model>] [--download-group <group>]",
+    "  devspace jobs start chatgpt-task --prompt <prompt> [--url <chat-url>] [--expect <marker>] [--timeout-seconds <5-600>] [--keep-tab]",
+    "  devspace jobs ls [--all] [--json]",
+    "  devspace jobs show <id> [--events] [--json]",
+    "  devspace jobs cancel <id>",
+    "  devspace jobs resume <id>",
+  ].join("\n"));
 }
 
 async function runAgentsCommand(args: string[]): Promise<void> {
@@ -392,6 +837,7 @@ async function runAgentsRun(args: string[]): Promise<void> {
       `Unknown subagent profile, provider, or id: ${parsed.target}. Available ${formatAvailableLocalAgentTargets(profiles)}`,
     );
   }
+  if (target.kind === "profile") assertLocalAgentProfileBoundary(target.profile);
   assertLocalAgentProviderAvailable(target.provider);
 
   const promptFile = writeAgentPromptFile(parsed.prompt);
@@ -475,13 +921,14 @@ async function runLocalAgentProfile(
   record: LocalAgentRecord,
   prompt: string,
 ): Promise<LocalAgentRunResult> {
+  assertLocalAgentProfileBoundary(profile);
   const body = profile.body.trim();
   const fullPrompt = body ? `${body}\n\nTask:\n${prompt}` : prompt;
   return runLocalAgentProvider(profile.provider, {
     prompt: fullPrompt,
     workspace: record.workspaceRoot,
     providerSessionId: record.providerSessionId,
-    writeMode: "allowed",
+    writeMode: profile.writeMode,
     model: record.model ?? profile.model,
     thinking: record.thinking ?? profile.thinking,
   });

@@ -1,12 +1,12 @@
 import { randomUUID } from "node:crypto";
-import type { Stats } from "node:fs";
+import { realpathSync, type Stats } from "node:fs";
 import type { WorkspaceMode, WorkspaceStore } from "./workspace-store.js";
 import { mkdir, opendir, readFile, realpath, stat } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { loadProjectContextFiles } from "@earendil-works/pi-coding-agent";
 import type { ServerConfig } from "./config.js";
 import { createManagedWorktree } from "./git-worktrees.js";
-import { assertAllowedPath, isPathInsideRoot, resolveAllowedPath } from "./roots.js";
+import { assertAllowedPath, expandHomePath, isPathInsideRoot, resolveAllowedPath } from "./roots.js";
 import {
   loadWorkspaceSkills,
   markSkillActivated,
@@ -47,6 +47,7 @@ export interface Workspace {
   skillDiagnostics: LoadedSkills["diagnostics"];
   agentProfiles: LocalAgentProfile[];
   activatedSkillDirs: Set<string>;
+  advertisedInstructionPaths: Set<string>;
 }
 
 export interface WorkspaceContext {
@@ -124,6 +125,7 @@ export class WorkspaceRegistry {
       ...this.loadSkillsForWorkspace(root),
       agentProfiles: [],
       activatedSkillDirs: new Set(),
+      advertisedInstructionPaths: new Set(this.loadInitialAgentsPaths(root)),
     };
     this.store?.touchSession(workspaceId);
     this.workspaces.set(restoredWorkspace.id, restoredWorkspace);
@@ -147,6 +149,14 @@ export class WorkspaceRegistry {
         readRoots: [workspace.root],
       };
     } catch (workspaceError) {
+      const advertisedInstructionPath = resolve(expandHomePath(inputPath));
+      if (workspace.advertisedInstructionPaths.has(advertisedInstructionPath)) {
+        return {
+          absolutePath: advertisedInstructionPath,
+          readRoots: [dirname(advertisedInstructionPath)],
+        };
+      }
+
       const skillRead = resolveSkillReadPath(
         workspace.skills,
         workspace.activatedSkillDirs,
@@ -213,6 +223,7 @@ export class WorkspaceRegistry {
       ...this.loadSkillsForWorkspace(input.root),
       agentProfiles: await loadLocalAgentProfiles(this.config, input.root),
       activatedSkillDirs: new Set(),
+      advertisedInstructionPaths: new Set(),
     };
 
     this.store?.createSession({
@@ -227,6 +238,9 @@ export class WorkspaceRegistry {
     this.workspaces.set(workspace.id, workspace);
     const agentsFiles = await this.loadInitialAgentsFiles(workspace.root);
     const availableAgentsFiles = await this.findAvailableAgentsFiles(workspace.root, agentsFiles);
+    workspace.advertisedInstructionPaths = new Set(
+      [...agentsFiles, ...availableAgentsFiles].map((file) => resolve(file.path)),
+    );
 
     return { workspace, agentsFiles, availableAgentsFiles };
   }
@@ -249,6 +263,21 @@ export class WorkspaceRegistry {
     }
 
     return assertAllowedPath(root, this.config.allowedRoots);
+  }
+
+  private loadInitialAgentsPaths(root: string): string[] {
+    const agentDir = resolve(this.config.agentDir);
+    const resolvedRoot = tryRealpathSync(root) ?? root;
+    const resolvedAgentDir = tryRealpathSync(agentDir) ?? agentDir;
+
+    return loadProjectContextFiles({ cwd: root, agentDir })
+      .map((file) => resolve(file.path))
+      .filter((path) => {
+        if (!isInitialAgentsFilePath(path, root, agentDir)) return false;
+        const resolvedPath = tryRealpathSync(path);
+        return resolvedPath !== undefined
+          && isInitialAgentsFilePath(resolvedPath, resolvedRoot, resolvedAgentDir);
+      });
   }
 
   private async loadInitialAgentsFiles(root: string): Promise<LoadedAgentsFile[]> {
@@ -366,6 +395,14 @@ async function readResolvedContextFile(
     return await readFile(resolvedPath, "utf8");
   } catch {
     return fallbackContent;
+  }
+}
+
+function tryRealpathSync(path: string): string | undefined {
+  try {
+    return realpathSync(path);
+  } catch {
+    return undefined;
   }
 }
 
