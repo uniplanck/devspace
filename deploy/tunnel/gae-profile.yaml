@@ -1,0 +1,16 @@
+config_version: 1
+control_plane:
+  base_url: "https://api.openai.com"
+  tunnel_id: "tunnel_6a531990d5b0819185adc2b22c99f3df"
+  api_key: "file:/run/credentials/gae-tunnel.service/runtime-api-key"
+health:
+  listen_addr: "127.0.0.1:8765"
+admin_ui:
+  open_browser: false
+log:
+  level: info
+  format: json
+mcp:
+  server_urls:
+    - channel: main
+      url: "http://127.0.0.1:7676/mcp-internal"
