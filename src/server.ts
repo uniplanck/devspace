@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { access, realpath } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
@@ -59,6 +59,8 @@ import { registerV11Tools } from "./register-v11-tools.js";
 
 type Transport = StreamableHTTPServerTransport;
 const WORKSPACE_APP_URI = "ui://devspace/workspace-app.html";
+const INTERNAL_MCP_PATH = "/mcp-internal";
+const INTERNAL_MCP_HEADER = "x-devspace-internal-key";
 const WORKSPACE_APP_MANIFEST_ENTRY = "workspace-app.html";
 const WRITE_TOOL_ANNOTATIONS = {
   readOnlyHint: false,
@@ -295,6 +297,23 @@ function sendJsonRpcError(
     error: { code, message },
     id: null,
   });
+}
+
+function isAuthorizedInternalMcpRequest(req: Request, configuredSecret: string | null): boolean {
+  if (!configuredSecret) return false;
+
+  const hostHeader = req.header("host") ?? "";
+  const host = hostHeader.startsWith("[")
+    ? hostHeader.slice(1, hostHeader.indexOf("]"))
+    : hostHeader.split(":", 1)[0];
+  if (!host || !["127.0.0.1", "localhost", "::1"].includes(host.toLowerCase())) {
+    return false;
+  }
+
+  const suppliedSecret = req.header(INTERNAL_MCP_HEADER) ?? "";
+  const expected = Buffer.from(configuredSecret);
+  const supplied = Buffer.from(suppliedSecret);
+  return expected.length === supplied.length && timingSafeEqual(expected, supplied);
 }
 
 function requestLogFields(req: Request, config: ServerConfig): Record<string, unknown> {
@@ -2007,30 +2026,10 @@ export function createServer(config = loadConfig()): RunningServer {
     res.json({ ok: true, name: "devspace" });
   });
 
-  app.all("/mcp", async (req, res) => {
+  const handleMcpRequest = async (req: Request, res: Response): Promise<void> => {
     const requestId = res.locals.requestId as string | undefined;
     const sessionId = req.header("mcp-session-id");
     const initializeRequest = req.method === "POST" && isInitializeRequest(req.body);
-
-    await new Promise<void>((resolve, reject) => {
-      bearerAuth(req, res, (error?: unknown) => {
-        if (error) reject(error);
-        else resolve();
-      });
-    });
-    if (res.headersSent) return;
-
-    if (!req.auth?.resource || !checkResourceAllowed({ requestedResource: req.auth.resource, configuredResource: resourceServerUrl })) {
-      logEvent(config.logging, "warn", "auth_denied", {
-        requestId,
-        method: req.method,
-        path: requestPath(req),
-        reason: "invalid_oauth_resource",
-        ...requestLogFields(req, config),
-      });
-      sendJsonRpcError(res, 401, -32001, "Unauthorized");
-      return;
-    }
 
     logEvent(config.logging, "debug", "mcp_request", {
       requestId,
@@ -2095,6 +2094,40 @@ export function createServer(config = loadConfig()): RunningServer {
         sendJsonRpcError(res, 500, -32603, "Internal server error");
       }
     }
+  };
+
+  app.all(INTERNAL_MCP_PATH, async (req, res) => {
+    if (!isAuthorizedInternalMcpRequest(req, config.internalMcpSecret)) {
+      res.sendStatus(404);
+      return;
+    }
+    await handleMcpRequest(req, res);
+  });
+
+  app.all("/mcp", async (req, res) => {
+    const requestId = res.locals.requestId as string | undefined;
+
+    await new Promise<void>((resolve, reject) => {
+      bearerAuth(req, res, (error?: unknown) => {
+        if (error) reject(error);
+        else resolve();
+      });
+    });
+    if (res.headersSent) return;
+
+    if (!req.auth?.resource || !checkResourceAllowed({ requestedResource: req.auth.resource, configuredResource: resourceServerUrl })) {
+      logEvent(config.logging, "warn", "auth_denied", {
+        requestId,
+        method: req.method,
+        path: requestPath(req),
+        reason: "invalid_oauth_resource",
+        ...requestLogFields(req, config),
+      });
+      sendJsonRpcError(res, 401, -32001, "Unauthorized");
+      return;
+    }
+
+    await handleMcpRequest(req, res);
   });
 
   let closed = false;

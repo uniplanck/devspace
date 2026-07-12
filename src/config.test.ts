@@ -164,6 +164,19 @@ assert.throws(
   /Invalid DEVSPACE_LOG_FORMAT: color/,
 );
 
+assert.equal(loadConfig(baseEnv).internalMcpSecret, null);
+assert.equal(
+  loadConfig({
+    ...baseEnv,
+    DEVSPACE_INTERNAL_MCP_SECRET: "internal-mcp-secret-that-is-long-enough",
+  }).internalMcpSecret,
+  "internal-mcp-secret-that-is-long-enough",
+);
+assert.throws(
+  () => loadConfig({ ...baseEnv, DEVSPACE_INTERNAL_MCP_SECRET: "too-short" }),
+  /DEVSPACE_INTERNAL_MCP_SECRET must be at least 32 characters long/,
+);
+
 assert.equal(loadConfig(baseEnv).oauth.ownerToken, "test-owner-token-that-is-long-enough");
 assert.deepEqual(loadConfig(baseEnv).oauth.scopes, ["devspace"]);
 assert.deepEqual(loadConfig(baseEnv).oauth.allowedRedirectHosts, [

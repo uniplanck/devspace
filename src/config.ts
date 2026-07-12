@@ -16,6 +16,7 @@ export interface ServerConfig {
   host: string;
   port: number;
   oauth: OAuthConfig;
+  internalMcpSecret: string | null;
   allowedRoots: string[];
   allowedHosts: string[];
   publicBaseUrl: string;
@@ -211,6 +212,15 @@ function parseRequiredSecret(value: string | undefined, name: string): string {
   return secret;
 }
 
+function parseOptionalSecret(value: string | undefined, name: string): string | null {
+  const secret = value?.trim();
+  if (!secret) return null;
+  if (secret.length < 32) {
+    throw new Error(`${name} must be at least 32 characters long.`);
+  }
+  return secret;
+}
+
 function parseOAuthConfig(env: NodeJS.ProcessEnv, ownerToken: string | undefined): OAuthConfig {
   return {
     ownerToken: parseRequiredSecret(env.DEVSPACE_OAUTH_OWNER_TOKEN ?? ownerToken, "DEVSPACE_OAUTH_OWNER_TOKEN"),
@@ -266,6 +276,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     host,
     port,
     oauth: parseOAuthConfig(env, files.auth.ownerToken),
+    internalMcpSecret: parseOptionalSecret(
+      env.DEVSPACE_INTERNAL_MCP_SECRET,
+      "DEVSPACE_INTERNAL_MCP_SECRET",
+    ),
     allowedRoots: parseAllowedRoots(env.DEVSPACE_ALLOWED_ROOTS ?? files.config.allowedRoots),
     allowedHosts: parseAllowedHosts(env.DEVSPACE_ALLOWED_HOSTS, derivedAllowedHosts),
     publicBaseUrl,
