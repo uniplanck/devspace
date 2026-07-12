@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
 import { opendir, readFile, realpath, stat } from "node:fs/promises";
-import { basename, dirname, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import { isPathInsideRoot, resolveAllowedPath } from "./roots.js";
 import {
@@ -477,8 +477,25 @@ function displayPath(path: string, root: string): string {
   }
   const relationship = relative(comparableRoot, comparablePath);
   if (relationship === "" || relationship === ".") return ".";
-  if (relationship === ".." || relationship.startsWith(`..${sep}`)) return resolve(path).split(sep).join("/");
+  if (relationship === ".." || relationship.startsWith(`..${sep}`) || isAbsolute(relationship)) {
+    const anchored = relativeFromRootName(comparablePath, comparableRoot);
+    if (anchored) return anchored;
+    return resolve(path).split(sep).join("/");
+  }
   return relationship.split(sep).join("/");
+}
+
+function relativeFromRootName(path: string, root: string): string | undefined {
+  const pathSegments = path.replaceAll("\\", "/").split("/").filter(Boolean);
+  const rootSegments = root.replaceAll("\\", "/").split("/").filter(Boolean);
+  const rootName = rootSegments.at(-1)?.toLocaleLowerCase();
+  if (!rootName) return undefined;
+  for (let index = pathSegments.length - 1; index >= 0; index -= 1) {
+    if (pathSegments[index]?.toLocaleLowerCase() !== rootName) continue;
+    const relationship = pathSegments.slice(index + 1).join("/");
+    return relationship || ".";
+  }
+  return undefined;
 }
 
 function normalizeComparablePath(path: string): string {
