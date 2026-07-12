@@ -32,7 +32,7 @@ import {
   type BrowserTaskLoopRuntime,
   type BrowserTaskLoopState,
 } from "./browser-task-loop.js";
-import { loadBrowserPlannerConfig } from "./google-ai-key-pool.js";
+import { GoogleAIKeyPool, loadBrowserPlannerConfig } from "./google-ai-key-pool.js";
 
 export interface StartJobInput {
   workspaceId?: string;
@@ -337,8 +337,10 @@ async function runBrowserLoopJob(
     store.appendEvent(job.id, "info", `Browser downloads: ${downloadDirectory.path}`);
   }
   const plannerConfig = loadBrowserPlannerConfig();
-  const configuredProvider = plannerConfig.enabled ? plannerConfig.provider : undefined;
-  const configuredModel = plannerConfig.enabled ? plannerConfig.model : undefined;
+  const configuredKeyCount = new GoogleAIKeyPool().configuredSlots().length;
+  const configuredPlannerReady = plannerConfig.enabled && configuredKeyCount > 0;
+  const configuredProvider = configuredPlannerReady ? plannerConfig.provider : undefined;
+  const configuredModel = configuredPlannerReady ? plannerConfig.model : undefined;
   const plannerProvider = input.plannerProvider
     ?? process.env.DEVSPACE_BROWSER_PLANNER_PROVIDER
     ?? configuredProvider;

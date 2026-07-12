@@ -234,8 +234,16 @@ export function createHermesBrowserTaskPlanner(options: {
             GEMINI_API_KEY: candidate.key,
           },
         );
+        let action: BrowserTaskAction;
+        try {
+          action = parseBrowserTaskAction(extractJsonObject(output));
+        } catch (parseError) {
+          const safeOutput = redactGoogleAISecrets(output.slice(-2_000), [candidate.key]);
+          const parseDetail = parseError instanceof Error ? parseError.message : String(parseError);
+          throw new Error(`${parseDetail}${safeOutput ? `; Hermes output: ${safeOutput}` : ""}`);
+        }
         googleAIKeyPool.markSuccess(candidate.slot);
-        return parseBrowserTaskAction(extractJsonObject(output));
+        return action;
       } catch (error) {
         const classification = classifyGoogleAIPlannerError(error);
         const detail = redactGoogleAISecrets(error instanceof Error ? error.message : String(error), [candidate.key]);
