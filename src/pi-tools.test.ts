@@ -11,12 +11,14 @@ const commandsFile = join(root, "approved.json");
 const previousCommandsFile = process.env.DEVSPACE_APPROVED_SHELL_COMMANDS_FILE;
 const previousStateDir = process.env.DEVSPACE_STATE_DIR;
 const previousComputerPolicy = process.env.DEVSPACE_COMPUTER_USE_POLICY;
+const previousOwnerToken = process.env.DEVSPACE_OAUTH_OWNER_TOKEN;
 
 try {
   await mkdir(join(root, "nested"));
   process.env.DEVSPACE_APPROVED_SHELL_COMMANDS_FILE = commandsFile;
   process.env.DEVSPACE_STATE_DIR = join(root, "state");
   process.env.DEVSPACE_COMPUTER_USE_POLICY = join(root, "computer-use.json");
+  process.env.DEVSPACE_OAUTH_OWNER_TOKEN = "test-owner-token-for-pi-tools";
   initializeComputerUsePolicy(process.env.DEVSPACE_COMPUTER_USE_POLICY);
   await writeFile(commandsFile, JSON.stringify({
     commands: [{
@@ -128,5 +130,7 @@ try {
   else process.env.DEVSPACE_STATE_DIR = previousStateDir;
   if (previousComputerPolicy === undefined) delete process.env.DEVSPACE_COMPUTER_USE_POLICY;
   else process.env.DEVSPACE_COMPUTER_USE_POLICY = previousComputerPolicy;
+  if (previousOwnerToken === undefined) delete process.env.DEVSPACE_OAUTH_OWNER_TOKEN;
+  else process.env.DEVSPACE_OAUTH_OWNER_TOKEN = previousOwnerToken;
   await rm(root, { recursive: true, force: true });
 }

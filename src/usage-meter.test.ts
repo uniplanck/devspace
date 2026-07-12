@@ -5,6 +5,7 @@ import {
   compactDuration,
   compactTokenCount,
   editInputChars,
+  estimateGpt56ApiCost,
   estimateTokensFromChars,
   getExecutionCostSnapshot,
   recordObservedToolUsage,
@@ -17,6 +18,9 @@ assert.equal(compactTokenCount(999), "999");
 assert.equal(compactTokenCount(1_500), "1.5k");
 assert.equal(compactDuration(950), "950ms");
 assert.equal(compactDuration(1_500), "1.5s");
+const priced = estimateGpt56ApiCost(1_000_000, 1_000_000, { usdJpyRate: 160 });
+assert.equal(priced.usd, 35);
+assert.equal(priced.jpy, 5_600);
 assert.equal(editInputChars([{ oldText: "old", newText: "new" }]), 6);
 assert.equal(textContentChars([{ type: "text", text: "hello" }]), 5);
 
@@ -54,6 +58,9 @@ const snapshot = getExecutionCostSnapshot();
 assert.equal(snapshot.calls >= 1, true);
 assert.equal(snapshot.byTool.read.calls >= 1, true);
 assert.equal(snapshot.byTool.read.totalDurationMs >= 125, true);
+assert.equal(snapshot.inputTokens > 0, true);
+assert.equal(snapshot.outputTokens > 0, true);
+assert.equal(snapshot.estimatedJpy > 0, true);
 assert.equal(snapshot.retries >= 1, true);
 
 if (previousHistory === undefined) {

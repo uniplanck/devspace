@@ -74,7 +74,7 @@ export function resolveExecutable(
   fileExists: (path: string) => boolean = existsSync,
 ): string | undefined {
   if (!/^[A-Za-z0-9._+-]+$/.test(command)) return undefined;
-  const info = shellPathInfo(env, platform);
+  const info = shellPathInfo(env, platform, homedir(), fileExists);
   const extensions = platform === "win32"
     ? String(env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD").split(";")
     : [""];

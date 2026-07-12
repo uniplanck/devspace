@@ -226,13 +226,13 @@ export async function startBrowserSession(input: {
   home?: string;
 } = {}): Promise<{ status: "started" | "already-running"; session: BrowserSessionRecord }> {
   const home = input.home ?? homedir();
+  const policy = loadPolicy(input.policyPath, home);
   const existing = readSession(home);
   if (existing && await sessionResponds(existing)) {
     return { status: "already-running", session: existing };
   }
   if (existing) clearSession(home);
 
-  const policy = loadPolicy(input.policyPath, home);
   const browser = findSupportedBrowser();
   if (!browser) throw new Error("Brave, Chrome, or Chromium was not found.");
   const profileDirectory = resolve(policy.browser.profileDirectory);

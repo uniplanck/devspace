@@ -18,6 +18,7 @@ import express from "express";
 import type { Request, Response } from "express";
 import * as z from "zod/v4";
 import { applyPatch } from "./apply-patch.js";
+import { formatChatProgressResult, updateChatProgress } from "./chat-progress.js";
 import { loadConfig, type ServerConfig, type WidgetMode } from "./config.js";
 import {
   logEvent,
@@ -155,6 +156,7 @@ function toolWidgetDescriptorMeta(
 }
 
 const toolNames = {
+  reportProgress: "report_progress",
   openWorkspace: "open_workspace",
   read: "read",
   write: "write",
@@ -178,13 +180,14 @@ interface ToolLogFields {
 }
 
 function serverInstructions(config: ServerConfig): string {
+  const progressInstruction = ` For work expected to take more than two minutes, call ${toolNames.reportProgress} before the first substantive workspace action with a short chatLabel, the current task, overallProgress 0, and an initial estimateMinutes. Update it at meaningful milestones or about every ten minutes, and call it once more with status completed or failed before the final response. Keep raw tool narration out of the user-facing response; report only progress, elapsed time, ETA, result, and risk. Include the returned GPT-5.6 API-conversion yen estimate in the final response and state that it is not ChatGPT billing.`;
   const showChangesInstruction =
     config.widgets === "changes"
       ? " If the turn successfully modifies files by creating, editing, overwriting, deleting, moving, or applying patches, call show_changes exactly once for that workspace after the final related file change and before your final response so the user can inspect the aggregate diff for that turn. Do not call it after every individual file change; do not skip it because individual file-change tools already returned diffs."
       : "";
 
   if (config.toolMode === "codex") {
-    return `Use DevSpace as a local coding workspace. Call ${toolNames.openWorkspace} once per project folder or worktree and reuse its workspaceId. Use ${toolNames.read} for direct file reads, apply_patch for all file modifications, exec_command for inspection, tests, builds, and other commands, and write_stdin to poll or interact with running processes. Follow instructions returned by ${toolNames.openWorkspace}; read applicable instruction and skill files before working in their scope.${showChangesInstruction}`;
+    return `Use DevSpace as a local coding workspace. Call ${toolNames.openWorkspace} once per project folder or worktree and reuse its workspaceId. Use ${toolNames.read} for direct file reads, apply_patch for all file modifications, exec_command for inspection, tests, builds, and other commands, and write_stdin to poll or interact with running processes. Follow instructions returned by ${toolNames.openWorkspace}; read applicable instruction and skill files before working in their scope.${progressInstruction}${showChangesInstruction}`;
   }
 
   const inspection = config.toolMode !== "full"
@@ -199,7 +202,7 @@ function serverInstructions(config: ServerConfig): string {
     ? `Follow instructions returned by ${toolNames.openWorkspace}. It returns bounded instruction excerpts to keep the initial result small; use ${toolNames.read} to read every path listed in agentsFiles before other project work, and read applicable paths in availableAgentsFiles before working in their scope. `
     : `Follow instructions returned by ${toolNames.openWorkspace}. Before working under a path listed in availableAgentsFiles, use ${toolNames.read} to inspect that instruction file and follow it. `;
 
-  return `Use DevSpace as a local coding workspace. Call ${toolNames.openWorkspace} once per project folder or worktree to obtain a workspaceId. Reuse that same workspaceId for all later file, search, edit, write, show-changes, and shell tools in that folder; do not call ${toolNames.openWorkspace} again unless switching folders/worktrees, changing checkout/worktree mode, the workspaceId is rejected as unknown, or the user explicitly asks to reopen. ${agentsMd}${skills}${inspection}Prefer ${toolNames.edit} for targeted modifications, ${toolNames.write} only for new files or complete rewrites, and ${toolNames.shell} for tests, builds, git inspection, package scripts, and commands that are better executed by the shell. Do not create or modify files with ${toolNames.shell}; avoid shell redirection, heredocs, tee, sed -i, perl -i, node/python/ruby scripts, or any command whose purpose is to write project files.${showChangesInstruction}`;
+  return `Use DevSpace as a local coding workspace. Call ${toolNames.openWorkspace} once per project folder or worktree to obtain a workspaceId. Reuse that same workspaceId for all later file, search, edit, write, show-changes, and shell tools in that folder; do not call ${toolNames.openWorkspace} again unless switching folders/worktrees, changing checkout/worktree mode, the workspaceId is rejected as unknown, or the user explicitly asks to reopen. ${agentsMd}${skills}${inspection}Prefer ${toolNames.edit} for targeted modifications, ${toolNames.write} only for new files or complete rewrites, and ${toolNames.shell} for tests, builds, git inspection, package scripts, and commands that are better executed by the shell. Do not create or modify files with ${toolNames.shell}; avoid shell redirection, heredocs, tee, sed -i, perl -i, node/python/ruby scripts, or any command whose purpose is to write project files.${progressInstruction}${showChangesInstruction}`;
 }
 
 function formatVisibleAgent(agent: {
@@ -804,6 +807,74 @@ function createMcpServer(
             },
           },
         ],
+      };
+    },
+  );
+
+  server.registerTool(
+    toolNames.reportProgress,
+    {
+      title: "Report progress",
+      description:
+        "Persist user-facing progress for a long GPT-Agent task so GPT-Agent Tool can show the chat/task label, percentage, current step, elapsed time, ETA, risks, and GPT-5.6 API-conversion cost estimate. Call at task start, meaningful milestones, and completion.",
+      inputSchema: {
+        chatLabel: z.string().min(1).max(160).describe("Short human-readable chat or task label."),
+        workspaceId: z.string().optional().describe("Workspace identifier when one is already open."),
+        overallProgress: z.number().min(0).max(100).describe("Overall task progress percentage."),
+        currentProgress: z.number().min(0).max(100).optional().describe("Current subtask progress percentage."),
+        currentTask: z.string().min(1).max(240).describe("Current user-relevant task."),
+        completed: z.string().max(500).optional().describe("Short summary of what is complete."),
+        next: z.string().max(500).optional().describe("Short summary of the next action."),
+        risk: z.string().max(500).optional().describe("Current blocker or risk, if any."),
+        status: z.enum(["running", "paused", "completed", "failed"]).optional(),
+        estimateMinutes: z.number().min(1).max(1440).optional().describe("Initial completion estimate in minutes."),
+      },
+      outputSchema: {
+        result: z.string(),
+        id: z.string(),
+        overallProgress: z.number(),
+        currentProgress: z.number(),
+        elapsedSeconds: z.number(),
+        remainingSeconds: z.number().optional(),
+        estimatedJpy: z.number(),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async (input, extra) => {
+      const workspace = input.workspaceId
+        ? workspaces.getWorkspace(input.workspaceId)
+        : undefined;
+      const record = updateChatProgress({
+        sessionId: extra.sessionId,
+        chatLabel: input.chatLabel,
+        workspaceId: input.workspaceId,
+        workspaceRoot: workspace?.root,
+        overallProgress: input.overallProgress,
+        currentProgress: input.currentProgress,
+        currentTask: input.currentTask,
+        completed: input.completed,
+        next: input.next,
+        risk: input.risk,
+        status: input.status,
+        estimateMinutes: input.estimateMinutes,
+      });
+      const result = formatChatProgressResult(record);
+      return {
+        content: [textBlock(result)],
+        structuredContent: {
+          result,
+          id: record.id,
+          overallProgress: record.overallProgress,
+          currentProgress: record.currentProgress,
+          elapsedSeconds: record.elapsedSeconds,
+          remainingSeconds: record.remainingSeconds,
+          estimatedJpy: record.sessionEstimatedJpy,
+        },
       };
     },
   );

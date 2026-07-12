@@ -1,0 +1,58 @@
+[Unit]
+Description=GPT-Agent EC2 MCP Runtime
+Documentation=file:/home/ubuntu/GPT-Agent/docs/ec2-gag-runtime.md
+Wants=network-online.target
+After=network-online.target tailscaled.service
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/GPT-Agent
+Environment=PATH=/home/ubuntu/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=NODE_ENV=production
+Environment=DEVSPACE_NODE_ROLE=ec2
+Environment=DEVSPACE_TOOL_MODE=full
+Environment=DEVSPACE_WIDGETS=off
+Environment=DEVSPACE_USAGE_CONTENT=compact
+Environment=DEVSPACE_OPEN_WORKSPACE_PAYLOAD=compact
+Environment=DEVSPACE_COPY_PATH=/home/ubuntu/copy.txt
+Environment=DEVSPACE_SUBAGENTS=false
+ExecStart=/home/ubuntu/.local/bin/node /home/ubuntu/GPT-Agent/dist/cli.js serve
+Restart=on-failure
+RestartSec=5s
+TimeoutStartSec=30s
+TimeoutStopSec=20s
+KillSignal=SIGTERM
+UMask=0077
+
+# Prefer Minecraft when resources become constrained.
+Nice=10
+CPUWeight=20
+IOWeight=20
+MemoryHigh=768M
+MemoryMax=1400M
+OOMScoreAdjust=500
+TasksMax=512
+LimitNOFILE=65536
+
+# Runtime hardening. Only the approved project/state paths remain writable.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/ubuntu/GPT-Agent
+ReadWritePaths=/home/ubuntu/AI-Agent-Core
+ReadWritePaths=/home/ubuntu/.devspace
+ReadWritePaths=/home/ubuntu/.local/share/devspace
+ReadWritePaths=/home/ubuntu/copy.txt
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target
