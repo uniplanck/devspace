@@ -1,7 +1,7 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
-import { compactDuration, compactYen, getExecutionCostSnapshot } from "./usage-meter.js";
+import { compactDuration, compactYenRange, getExecutionCostSnapshot } from "./usage-meter.js";
 
 export type ChatProgressStatus = "running" | "paused" | "completed" | "failed";
 export type EstimateSource = "provided" | "history" | "progress" | "blended" | "none";
@@ -45,6 +45,8 @@ export interface ChatProgressRecord {
   sessionObservedTokens: number;
   sessionEstimatedUsd: number;
   sessionEstimatedJpy: number;
+  sessionEstimatedUsdMax?: number;
+  sessionEstimatedJpyMax?: number;
   pricingModel: "gpt-5.6-sol";
   usdJpyRate: number;
 }
@@ -242,6 +244,8 @@ export function updateChatProgress(input: ChatProgressInput): ChatProgressRecord
     sessionObservedTokens: cost.observedTokens,
     sessionEstimatedUsd: cost.estimatedUsd,
     sessionEstimatedJpy: cost.estimatedJpy,
+    sessionEstimatedUsdMax: cost.estimatedUsdMax,
+    sessionEstimatedJpyMax: cost.estimatedJpyMax,
     pricingModel: cost.pricingModel,
     usdJpyRate: cost.usdJpyRate,
   };
@@ -262,5 +266,5 @@ export function formatChatProgressResult(record: ChatProgressRecord): string {
   const eta = record.remainingSeconds === undefined
     ? "ETA unknown"
     : `ETA ${compactDuration(record.remainingSeconds * 1000)}`;
-  return `Progress synced: ${record.overallProgress}% · elapsed ${elapsed} · ${eta} · ${compactYen(record.sessionEstimatedJpy)} estimated`;
+  return `Progress synced: ${record.overallProgress}% · elapsed ${elapsed} · ${eta} · ${compactYenRange(record.sessionEstimatedJpy, record.sessionEstimatedJpyMax ?? record.sessionEstimatedJpy)} estimated`;
 }

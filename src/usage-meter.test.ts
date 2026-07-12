@@ -4,6 +4,7 @@ import {
   appendUsageToContent,
   compactDuration,
   compactTokenCount,
+  compactYenRange,
   editInputChars,
   estimateGpt56ApiCost,
   estimateTokensFromChars,
@@ -21,6 +22,10 @@ assert.equal(compactDuration(1_500), "1.5s");
 const priced = estimateGpt56ApiCost(1_000_000, 1_000_000, { usdJpyRate: 160 });
 assert.equal(priced.usd, 35);
 assert.equal(priced.jpy, 5_600);
+assert.equal(priced.maxUsd, 55);
+assert.equal(priced.maxJpy, 8_800);
+assert.equal(priced.longContextThresholdTokens, 272_000);
+assert.equal(compactYenRange(priced.jpy, priced.maxJpy), "¥5,600–¥8,800");
 assert.equal(editInputChars([{ oldText: "old", newText: "new" }]), 6);
 assert.equal(textContentChars([{ type: "text", text: "hello" }]), 5);
 
@@ -40,19 +45,26 @@ const usage = recordObservedToolUsage({
 const content = [{ type: "text" as const, text: "result" }];
 
 assert.equal(usage.durationMs, 125);
+assert.equal(usage.inputTokens, 8);
+assert.equal(usage.outputTokens, 3);
+assert.equal(usage.estimatedJpyMax > usage.estimatedJpy, true);
 assert.equal(usage.sessionCalls >= 1, true);
 assert.deepEqual(appendUsageToContent(content, usage, "off"), content);
 const compactContent = appendUsageToContent(content, usage, "compact");
 const compactText = compactContent.at(-1);
 assert.match(
   compactText?.type === "text" ? compactText.text : "",
-  /gag cost:/,
+  /gag cost: in ~8 \/ out ~3 tok/u,
 );
 const fullContent = appendUsageToContent(content, usage, "full");
 const fullText = fullContent.at(-1);
 assert.match(
   fullText?.type === "text" ? fullText.text : "",
-  /実行コスト目安/,
+  /実行コスト目安/u,
+);
+assert.match(
+  fullText?.type === "text" ? fullText.text : "",
+  /GAG返却結果をモデル入力、ツール引数をモデル出力/u,
 );
 const snapshot = getExecutionCostSnapshot();
 assert.equal(snapshot.calls >= 1, true);
@@ -61,6 +73,7 @@ assert.equal(snapshot.byTool.read.totalDurationMs >= 125, true);
 assert.equal(snapshot.inputTokens > 0, true);
 assert.equal(snapshot.outputTokens > 0, true);
 assert.equal(snapshot.estimatedJpy > 0, true);
+assert.equal(snapshot.estimatedJpyMax > snapshot.estimatedJpy, true);
 assert.equal(snapshot.retries >= 1, true);
 
 if (previousHistory === undefined) {

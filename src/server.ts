@@ -837,6 +837,7 @@ function createMcpServer(
         elapsedSeconds: z.number(),
         remainingSeconds: z.number().optional(),
         estimatedJpy: z.number(),
+        estimatedJpyMax: z.number(),
       },
       annotations: {
         readOnlyHint: false,
@@ -874,6 +875,7 @@ function createMcpServer(
           elapsedSeconds: record.elapsedSeconds,
           remainingSeconds: record.remainingSeconds,
           estimatedJpy: record.sessionEstimatedJpy,
+          estimatedJpyMax: record.sessionEstimatedJpyMax ?? record.sessionEstimatedJpy,
         },
       };
     },

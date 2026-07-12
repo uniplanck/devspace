@@ -14,6 +14,8 @@ export interface UsageBucket {
   outputTokens: number;
   estimatedUsd: number;
   estimatedJpy: number;
+  estimatedUsdMax: number;
+  estimatedJpyMax: number;
   calls: number;
   inputChars: number;
   outputChars: number;
@@ -29,9 +31,14 @@ export interface ApiCostEstimate {
   outputTokens: number;
   inputUsdPerMillion: number;
   outputUsdPerMillion: number;
+  longInputUsdPerMillion: number;
+  longOutputUsdPerMillion: number;
+  longContextThresholdTokens: number;
   usdJpyRate: number;
   usd: number;
   jpy: number;
+  maxUsd: number;
+  maxJpy: number;
   note: string;
 }
 
@@ -55,6 +62,8 @@ export interface UsageEntry {
   durationMs: number;
   estimatedUsd: number;
   estimatedJpy: number;
+  estimatedUsdMax: number;
+  estimatedJpyMax: number;
   pricingModel: "gpt-5.6-sol";
   usdJpyRate: number;
   error: boolean;
@@ -65,6 +74,8 @@ export interface UsageEntry {
   sessionOutputTokens: number;
   sessionEstimatedUsd: number;
   sessionEstimatedJpy: number;
+  sessionEstimatedUsdMax: number;
+  sessionEstimatedJpyMax: number;
   sessionDurationMs: number;
   sessionCalls: number;
   sessionErrors: number;
@@ -80,6 +91,8 @@ export interface ExecutionCostSnapshot {
   outputTokens: number;
   estimatedUsd: number;
   estimatedJpy: number;
+  estimatedUsdMax: number;
+  estimatedJpyMax: number;
   pricingModel: "gpt-5.6-sol";
   usdJpyRate: number;
   totalDurationMs: number;
@@ -97,6 +110,8 @@ const session = {
   outputTokens: 0,
   estimatedUsd: 0,
   estimatedJpy: 0,
+  estimatedUsdMax: 0,
+  estimatedJpyMax: 0,
   totalDurationMs: 0,
   calls: 0,
   errors: 0,
@@ -161,7 +176,14 @@ function positiveEnvNumber(name: string, fallback: number): number {
 export function estimateGpt56ApiCost(
   inputTokens: number,
   outputTokens: number,
-  options: { usdJpyRate?: number; inputUsdPerMillion?: number; outputUsdPerMillion?: number } = {},
+  options: {
+    usdJpyRate?: number;
+    inputUsdPerMillion?: number;
+    outputUsdPerMillion?: number;
+    longInputUsdPerMillion?: number;
+    longOutputUsdPerMillion?: number;
+    longContextThresholdTokens?: number;
+  } = {},
 ): ApiCostEstimate {
   const normalizedInput = clampNumber(inputTokens);
   const normalizedOutput = clampNumber(outputTokens);
@@ -169,20 +191,33 @@ export function estimateGpt56ApiCost(
     ?? positiveEnvNumber("DEVSPACE_GPT56_INPUT_USD_PER_MTOK", 5);
   const outputUsdPerMillion = options.outputUsdPerMillion
     ?? positiveEnvNumber("DEVSPACE_GPT56_OUTPUT_USD_PER_MTOK", 30);
+  const longInputUsdPerMillion = options.longInputUsdPerMillion
+    ?? positiveEnvNumber("DEVSPACE_GPT56_LONG_INPUT_USD_PER_MTOK", 10);
+  const longOutputUsdPerMillion = options.longOutputUsdPerMillion
+    ?? positiveEnvNumber("DEVSPACE_GPT56_LONG_OUTPUT_USD_PER_MTOK", 45);
+  const longContextThresholdTokens = options.longContextThresholdTokens
+    ?? positiveEnvNumber("DEVSPACE_GPT56_LONG_CONTEXT_THRESHOLD_TOKENS", 272_000);
   const usdJpyRate = options.usdJpyRate
     ?? positiveEnvNumber("DEVSPACE_USD_JPY_RATE", 160);
   const usd = (normalizedInput / 1_000_000) * inputUsdPerMillion
     + (normalizedOutput / 1_000_000) * outputUsdPerMillion;
+  const maxUsd = (normalizedInput / 1_000_000) * longInputUsdPerMillion
+    + (normalizedOutput / 1_000_000) * longOutputUsdPerMillion;
   return {
     model: "gpt-5.6-sol",
     inputTokens: normalizedInput,
     outputTokens: normalizedOutput,
     inputUsdPerMillion,
     outputUsdPerMillion,
+    longInputUsdPerMillion,
+    longOutputUsdPerMillion,
+    longContextThresholdTokens,
     usdJpyRate,
     usd,
     jpy: usd * usdJpyRate,
-    note: "GPT-5.6 Sol standard short-context API conversion estimate; not ChatGPT billing.",
+    maxUsd,
+    maxJpy: maxUsd * usdJpyRate,
+    note: "GPT-5.6 Sol API conversion range: short-context minimum to long-context maximum; not ChatGPT billing.",
   };
 }
 
@@ -191,6 +226,13 @@ export function compactYen(value: number): string {
   if (value >= 100) return `¥${Math.round(value).toLocaleString("ja-JP")}`;
   if (value >= 1) return `¥${value.toFixed(1)}`;
   return `¥${value.toFixed(2)}`;
+}
+
+export function compactYenRange(minimum: number, maximum: number): string {
+  const min = Math.min(minimum, maximum);
+  const max = Math.max(minimum, maximum);
+  if (Math.abs(max - min) < 0.005) return compactYen(min);
+  return `${compactYen(min)}–${compactYen(max)}`;
 }
 
 function byToolSnapshot(): Record<string, UsageBucket> {
@@ -230,8 +272,12 @@ export function recordObservedToolUsage(input: {
   const savedChars = clampNumber(input.savedChars);
   const observedTokens = estimateTokensFromChars(observedChars);
   const savedTokens = estimateTokensFromChars(savedChars);
-  const inputChars = clampNumber(input.inputChars);
-  const outputChars = clampNumber(input.outputChars);
+  const toolArgumentChars = clampNumber(input.inputChars);
+  const toolResultChars = clampNumber(input.outputChars);
+  // MCP tool results become model input on the next turn. Tool arguments were
+  // generated by the model, so they belong to model output for billing purposes.
+  const inputChars = toolResultChars;
+  const outputChars = toolArgumentChars;
   const inputTokens = estimateTokensFromChars(inputChars);
   const outputTokens = estimateTokensFromChars(outputChars);
   const cost = estimateGpt56ApiCost(inputTokens, outputTokens);
@@ -246,6 +292,8 @@ export function recordObservedToolUsage(input: {
     outputTokens: 0,
     estimatedUsd: 0,
     estimatedJpy: 0,
+    estimatedUsdMax: 0,
+    estimatedJpyMax: 0,
     calls: 0,
     inputChars: 0,
     outputChars: 0,
@@ -261,6 +309,8 @@ export function recordObservedToolUsage(input: {
   current.outputTokens += outputTokens;
   current.estimatedUsd += cost.usd;
   current.estimatedJpy += cost.jpy;
+  current.estimatedUsdMax += cost.maxUsd;
+  current.estimatedJpyMax += cost.maxJpy;
   current.calls += 1;
   current.inputChars += inputChars;
   current.outputChars += outputChars;
@@ -275,6 +325,8 @@ export function recordObservedToolUsage(input: {
   session.outputTokens += outputTokens;
   session.estimatedUsd += cost.usd;
   session.estimatedJpy += cost.jpy;
+  session.estimatedUsdMax += cost.maxUsd;
+  session.estimatedJpyMax += cost.maxJpy;
   session.totalDurationMs += durationMs;
   session.calls += 1;
   session.errors += error ? 1 : 0;
@@ -302,6 +354,8 @@ export function recordObservedToolUsage(input: {
     durationMs,
     estimatedUsd: cost.usd,
     estimatedJpy: cost.jpy,
+    estimatedUsdMax: cost.maxUsd,
+    estimatedJpyMax: cost.maxJpy,
     pricingModel: cost.model,
     usdJpyRate: cost.usdJpyRate,
     error,
@@ -312,12 +366,14 @@ export function recordObservedToolUsage(input: {
     sessionOutputTokens: session.outputTokens,
     sessionEstimatedUsd: session.estimatedUsd,
     sessionEstimatedJpy: session.estimatedJpy,
+    sessionEstimatedUsdMax: session.estimatedUsdMax,
+    sessionEstimatedJpyMax: session.estimatedJpyMax,
     sessionDurationMs: session.totalDurationMs,
     sessionCalls: session.calls,
     sessionErrors: session.errors,
     sessionRetries: session.retries,
     byTool: byToolSnapshot(),
-    note: "GPT-Agent observed text estimate converted at GPT-5.6 Sol API rates. Not ChatGPT billing or actual model usage.",
+    note: "GPT-Agent maps MCP tool results to model input and tool arguments to model output, then shows the GPT-5.6 Sol short-to-long-context API cost range. Not ChatGPT billing or actual model usage.",
   };
   appendHistory(entry);
   return entry;
@@ -332,6 +388,8 @@ export function getExecutionCostSnapshot(): ExecutionCostSnapshot {
     outputTokens: session.outputTokens,
     estimatedUsd: cost.usd,
     estimatedJpy: cost.jpy,
+    estimatedUsdMax: cost.maxUsd,
+    estimatedJpyMax: cost.maxJpy,
     pricingModel: cost.model,
     usdJpyRate: cost.usdJpyRate,
     totalDurationMs: session.totalDurationMs,
@@ -339,7 +397,7 @@ export function getExecutionCostSnapshot(): ExecutionCostSnapshot {
     errors: session.errors,
     retries: session.retries,
     byTool: byToolSnapshot(),
-    note: "Token and GPT-5.6 Sol API cost values are estimates; duration and call/error counts are observed by GPT-Agent.",
+    note: "Model input/output tokens and GPT-5.6 Sol short-to-long-context API costs are estimates; duration and call/error counts are observed by GPT-Agent.",
   };
 }
 
@@ -350,16 +408,17 @@ function fullUsageSummaryText(entry: UsageEntry): string {
 
   return [
     "実行コスト目安:",
-    `今回: 約${compactTokenCount(entry.observedTokens)} token / ${compactYen(entry.estimatedJpy)} / ${compactDuration(entry.durationMs)} / ${entry.error ? "error" : "ok"}`,
-    `セッション: 約${compactTokenCount(entry.sessionObservedTokens)} token / ${compactYen(entry.sessionEstimatedJpy)} / ${compactDuration(entry.sessionDurationMs)} / ${entry.sessionCalls} calls / ${entry.sessionErrors} errors / ${entry.sessionRetries} retries`,
+    `今回: 入力約${compactTokenCount(entry.inputTokens)} / 出力約${compactTokenCount(entry.outputTokens)} token / ${compactYenRange(entry.estimatedJpy, entry.estimatedJpyMax)} / ${compactDuration(entry.durationMs)} / ${entry.error ? "error" : "ok"}`,
+    `セッション: 入力約${compactTokenCount(entry.sessionInputTokens)} / 出力約${compactTokenCount(entry.sessionOutputTokens)} token / ${compactYenRange(entry.sessionEstimatedJpy, entry.sessionEstimatedJpyMax)} / ${compactDuration(entry.sessionDurationMs)} / ${entry.sessionCalls} calls / ${entry.sessionErrors} errors / ${entry.sessionRetries} retries`,
     `内訳: ${byTool || "なし"}`,
     `推定節約token: 約${compactTokenCount(entry.sessionSavedTokens)}`,
-    `料金はGPT-5.6 Sol API（入力$5/M・出力$30/M、USD/JPY=${entry.usdJpyRate}）換算。ChatGPT本体の請求額ではありません。`,
+    `GAG返却結果をモデル入力、ツール引数をモデル出力として換算。短コンテキストは入力$5/M・出力$30/M、272K超の長コンテキストは入力$10/M・出力$45/M（USD/JPY=${entry.usdJpyRate}）。`,
+    "実際の全入力tokenはGAG単独では取得できないため短〜長コンテキストの範囲表示です。ChatGPT本体の請求額ではありません。",
   ].join("\n");
 }
 
 function compactUsageSummaryText(entry: UsageEntry): string {
-  return `gag cost: ~${compactTokenCount(entry.observedTokens)} tok · ${compactYen(entry.estimatedJpy)} · ${compactDuration(entry.durationMs)} | session ~${compactTokenCount(entry.sessionObservedTokens)} tok · ${compactYen(entry.sessionEstimatedJpy)} · ${entry.sessionCalls} calls · ${entry.sessionErrors} errors`;
+  return `gag cost: in ~${compactTokenCount(entry.inputTokens)} / out ~${compactTokenCount(entry.outputTokens)} tok · ${compactYenRange(entry.estimatedJpy, entry.estimatedJpyMax)} · ${compactDuration(entry.durationMs)} | session in ~${compactTokenCount(entry.sessionInputTokens)} / out ~${compactTokenCount(entry.sessionOutputTokens)} tok · ${compactYenRange(entry.sessionEstimatedJpy, entry.sessionEstimatedJpyMax)} · ${entry.sessionCalls} calls · ${entry.sessionErrors} errors`;
 }
 
 export function appendUsageToContent<T extends ToolContent>(
