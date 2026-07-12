@@ -463,14 +463,14 @@ function extractSymbol(line: string): string | undefined {
 }
 
 function displayPath(path: string, root: string): string {
-  const lexicalPath = resolve(path);
-  const lexicalRoot = resolve(root);
+  const lexicalPath = normalizeComparablePath(resolve(path));
+  const lexicalRoot = normalizeComparablePath(resolve(root));
   let comparablePath = lexicalPath;
   let comparableRoot = lexicalRoot;
   if (!isPathInsideRoot(lexicalPath, lexicalRoot)) {
     try {
-      comparablePath = realpathSync(lexicalPath);
-      comparableRoot = realpathSync(lexicalRoot);
+      comparablePath = normalizeComparablePath(realpathSync(lexicalPath));
+      comparableRoot = normalizeComparablePath(realpathSync(lexicalRoot));
     } catch {
       // Keep lexical paths when either side does not exist.
     }
@@ -479,6 +479,12 @@ function displayPath(path: string, root: string): string {
   if (relationship === "" || relationship === ".") return ".";
   if (relationship === ".." || relationship.startsWith(`..${sep}`)) return resolve(path).split(sep).join("/");
   return relationship.split(sep).join("/");
+}
+
+function normalizeComparablePath(path: string): string {
+  if (path.startsWith("\\\\?\\UNC\\")) return `\\\\${path.slice(8)}`;
+  if (path.startsWith("\\\\?\\")) return path.slice(4);
+  return path;
 }
 
 function parseStatusPaths(output: string): string[] {
