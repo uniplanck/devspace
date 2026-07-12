@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+export DEVSPACE_NODE_ROLE=gae
+export DEVSPACE_INSTANCE_NAME=GPT-Agent4EC2
+exec /home/ubuntu/.local/bin/node /home/ubuntu/GPT-Agent/dist/cli.js "$@"
