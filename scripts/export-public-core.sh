@@ -11,8 +11,12 @@ fi
 
 for directory in src skills examples; do
   mkdir -p "$TARGET_ROOT/$directory"
+  excludes=(--exclude '.DS_Store')
+  if [[ "$directory" == "skills" ]]; then
+    excludes+=(--exclude 'gae-routing/')
+  fi
   /usr/bin/rsync -a --delete \
-    --exclude '.DS_Store' \
+    "${excludes[@]}" \
     "$ROOT/$directory/" "$TARGET_ROOT/$directory/"
 done
 
