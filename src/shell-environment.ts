@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
-import { delimiter, join } from "node:path";
+import { posix, win32 } from "node:path";
 
 export interface ShellPathInfo {
   path: string;
@@ -24,8 +24,9 @@ export function shellPathInfo(
   home: string = homedir(),
   directoryExists: (path: string) => boolean = existsSync,
 ): ShellPathInfo {
+  const pathApi = platform === "win32" ? win32 : posix;
   const existingEntries = String(env.PATH ?? "")
-    .split(delimiter)
+    .split(pathApi.delimiter)
     .filter(Boolean);
   const candidates = platform === "win32"
     ? []
@@ -34,8 +35,8 @@ export function shellPathInfo(
         "/opt/homebrew/sbin",
         "/usr/local/bin",
         "/usr/local/sbin",
-        join(home, ".local", "bin"),
-        join(home, "bin"),
+        pathApi.join(home, ".local", "bin"),
+        pathApi.join(home, "bin"),
         "/usr/bin",
         "/bin",
         "/usr/sbin",
@@ -47,7 +48,7 @@ export function shellPathInfo(
   const entries = uniqueEntries([...existingEntries, ...addedEntries]);
 
   return {
-    path: entries.join(delimiter),
+    path: entries.join(pathApi.delimiter),
     entries,
     addedEntries,
   };
@@ -74,6 +75,7 @@ export function resolveExecutable(
   fileExists: (path: string) => boolean = existsSync,
 ): string | undefined {
   if (!/^[A-Za-z0-9._+-]+$/.test(command)) return undefined;
+  const pathApi = platform === "win32" ? win32 : posix;
   const info = shellPathInfo(env, platform, homedir(), fileExists);
   const extensions = platform === "win32"
     ? String(env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD").split(";")
@@ -81,7 +83,7 @@ export function resolveExecutable(
 
   for (const entry of info.entries) {
     for (const extension of extensions) {
-      const candidate = join(entry, `${command}${extension}`);
+      const candidate = pathApi.join(entry, `${command}${extension}`);
       if (fileExists(candidate)) return candidate;
     }
   }
