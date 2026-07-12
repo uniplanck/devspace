@@ -1,0 +1,96 @@
+name: Sync generic core to public fork
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - src/**
+      - skills/**
+      - examples/**
+      - package.json
+      - package-lock.json
+      - tsconfig.json
+      - tsconfig.build.json
+      - vite.config.ts
+      - .env.example
+      - AGENTS.md
+      - scripts/export-public-core.sh
+      - .github/workflows/sync-public-fork.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: devspace-public-core-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check sync secret
+        id: sync-secret
+        env:
+          DEVSPACE_SYNC_SSH_KEY: ${{ secrets.DEVSPACE_SYNC_SSH_KEY }}
+        run: |
+          if [[ -n "$DEVSPACE_SYNC_SSH_KEY" ]]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "DEVSPACE_SYNC_SSH_KEY is not configured; cloud sync is skipped."
+          fi
+
+      - name: Configure public-fork deploy key
+        if: steps.sync-secret.outputs.configured == 'true'
+        env:
+          DEVSPACE_SYNC_SSH_KEY: ${{ secrets.DEVSPACE_SYNC_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$DEVSPACE_SYNC_SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan github.com >> ~/.ssh/known_hosts
+
+      - name: Install private dependencies
+        if: steps.sync-secret.outputs.configured == 'true'
+        run: npm ci
+
+      - name: Validate private core
+        if: steps.sync-secret.outputs.configured == 'true'
+        run: npm run typecheck && npm test && npm run build
+
+      - name: Clone public fork
+        if: steps.sync-secret.outputs.configured == 'true'
+        run: git clone git@github.com:uniplanck/devspace.git public-devspace
+
+      - name: Export generic core
+        if: steps.sync-secret.outputs.configured == 'true'
+        run: zsh scripts/export-public-core.sh "$GITHUB_WORKSPACE/public-devspace"
+
+      - name: Validate public core
+        if: steps.sync-secret.outputs.configured == 'true'
+        working-directory: public-devspace
+        run: npm ci && npm run typecheck && npm test && npm run build
+
+      - name: Create sync branch and fast-forward main
+        if: steps.sync-secret.outputs.configured == 'true'
+        working-directory: public-devspace
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          git config user.name "devspace-sync[bot]"
+          git config user.email "devspace-sync@users.noreply.github.com"
+          branch="sync/gpt-agent-core-${RUN_ID}"
+          git checkout -b "$branch"
+          git add .env.example AGENTS.md LICENSE package.json package-lock.json tsconfig.json tsconfig.build.json vite.config.ts src skills examples scripts/build-app.mjs scripts/clean-dist.mjs scripts/dev-server.mjs scripts/fix-node-pty-permissions.mjs
+          if git diff --cached --quiet; then
+            echo "No public changes."
+            exit 0
+          fi
+          git commit -m "chore: sync generic GPT-Agent core ${SOURCE_SHA::12}"
+          git push origin "$branch"
+          git push origin "$branch:main"
