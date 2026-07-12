@@ -225,7 +225,7 @@ export class GoogleAIKeyPool {
       schemaVersion: 1,
       provider: GOOGLE_AI_PROVIDER,
       model,
-      enabled: config.enabled,
+      enabled: config.enabled && slots.some((slot) => slot.configured),
       activeSlot: status.activeSlot,
       slots,
     };
