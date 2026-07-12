@@ -32,6 +32,7 @@ import {
   type BrowserTaskLoopRuntime,
   type BrowserTaskLoopState,
 } from "./browser-task-loop.js";
+import { loadBrowserPlannerConfig } from "./google-ai-key-pool.js";
 
 export interface StartJobInput {
   workspaceId?: string;
@@ -335,10 +336,26 @@ async function runBrowserLoopJob(
     });
     store.appendEvent(job.id, "info", `Browser downloads: ${downloadDirectory.path}`);
   }
+  const plannerConfig = loadBrowserPlannerConfig();
+  const configuredProvider = plannerConfig.enabled ? plannerConfig.provider : undefined;
+  const configuredModel = plannerConfig.enabled ? plannerConfig.model : undefined;
+  const plannerProvider = input.plannerProvider
+    ?? process.env.DEVSPACE_BROWSER_PLANNER_PROVIDER
+    ?? configuredProvider;
+  const plannerModel = input.plannerModel
+    ?? process.env.DEVSPACE_BROWSER_PLANNER_MODEL
+    ?? configuredModel;
+  if (!injectedRuntime) {
+    store.appendEvent(
+      job.id,
+      "info",
+      `Browser planner: ${plannerProvider ?? "not configured"}${plannerModel ? ` / ${plannerModel}` : ""}.`,
+    );
+  }
   const runtime = injectedRuntime ?? {
     planner: createHermesBrowserTaskPlanner({
-      provider: input.plannerProvider ?? process.env.DEVSPACE_BROWSER_PLANNER_PROVIDER,
-      model: input.plannerModel ?? process.env.DEVSPACE_BROWSER_PLANNER_MODEL,
+      provider: plannerProvider,
+      model: plannerModel,
     }),
     driver: createNativeBrowserTaskDriver(),
   };
