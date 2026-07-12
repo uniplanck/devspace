@@ -2,6 +2,9 @@
 set -euo pipefail
 
 ROOT="${0:A:h:h}"
+for variable in $(git -C "$ROOT" rev-parse --local-env-vars); do
+  unset "$variable"
+done
 PUBLIC_REPO="git@github.com:uniplanck/devspace.git"
 SYNC_KEY="${DEVSPACE_SYNC_KEY:-$HOME/.devspace/sync-key/id_ed25519}"
 STAMP="$(date +%Y%m%d-%H%M%S)"
