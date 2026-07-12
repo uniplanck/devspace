@@ -95,6 +95,27 @@ export interface BrowserScreenshotResult {
   base64: string;
 }
 
+export interface ChatGptConversationSnapshot {
+  targetId: string;
+  url: string;
+  title: string;
+  assistantCount: number;
+  userCount: number;
+  lastAssistantText: string;
+  composerText: string;
+  composerPresent: boolean;
+  generating: boolean;
+  errorText: string;
+}
+
+export interface ChatGptResponseWaitInput {
+  baselineAssistantCount: number;
+  expectedMarker?: string;
+  timeoutMs?: number;
+  pollIntervalMs?: number;
+  shouldStop?: () => boolean;
+}
+
 const SESSION_FILE = "computer-browser-session.json";
 const APPROVALS_FILE = "computer-browser-approvals.json";
 const ARTIFACTS_DIR = "computer-browser-artifacts";
@@ -549,6 +570,78 @@ export async function openBrowserUrl(
   });
 }
 
+export async function openBrowserUrlInNewTab(
+  rawUrl: string,
+  input: { policyPath?: string; home?: string } = {},
+): Promise<{ targetId: string; url: string; title: string }> {
+  const home = input.home ?? homedir();
+  const policy = loadPolicy(input.policyPath, home);
+  const requested = validateBrowserUrl(rawUrl, policy);
+  const session = await requireActiveSession(home);
+  const target = await createBlankTarget(session);
+  if (!target.webSocketDebuggerUrl) throw new Error("Browser target has no CDP WebSocket URL.");
+  saveSession({ ...session, targetId: target.id }, home);
+  const client = await CdpClient.connect(target.webSocketDebuggerUrl);
+  try {
+    await client.send("Page.enable");
+    const navigation = await client.send<{ errorText?: string }>("Page.navigate", { url: requested.toString() });
+    if (navigation.errorText) throw new Error(`Browser navigation failed: ${navigation.errorText}`);
+    await waitForDocument(client);
+    const page = await evaluate<{ url: string; title: string }>(client, `({
+      url: location.href,
+      title: document.title.slice(0, 300)
+    })`);
+    validateBrowserUrl(page.url, policy);
+    return { targetId: target.id, url: page.url, title: page.title };
+  } catch (error) {
+    await closeBrowserTarget(target.id, home).catch(() => undefined);
+    throw error;
+  } finally {
+    client.close();
+  }
+}
+
+export async function closeBrowserTarget(
+  targetId: string,
+  home: string = homedir(),
+): Promise<{ status: "closed" | "not-found"; targetId: string }> {
+  const session = await requireActiveSession(home);
+  const pages = await listTargets(session);
+  if (!pages.some((page) => page.id === targetId)) return { status: "not-found", targetId };
+  const browserClient = await CdpClient.connect(
+    `ws://127.0.0.1:${session.port}${session.browserWebSocketPath}`,
+  );
+  try {
+    await browserClient.send("Target.closeTarget", { targetId });
+  } finally {
+    browserClient.close();
+  }
+  const remaining = (await listTargets(session)).filter((page) => page.id !== targetId);
+  saveSession({ ...session, targetId: remaining[0]?.id }, home);
+  return { status: "closed", targetId };
+}
+
+export async function activateBrowserTarget(
+  targetId: string,
+  home: string = homedir(),
+): Promise<{ status: "activated"; targetId: string }> {
+  const session = await requireActiveSession(home);
+  const pages = await listTargets(session);
+  if (!pages.some((page) => page.id === targetId)) {
+    throw new Error(`Browser target is no longer available: ${targetId}`);
+  }
+  const browserClient = await CdpClient.connect(
+    `ws://127.0.0.1:${session.port}${session.browserWebSocketPath}`,
+  );
+  try {
+    await browserClient.send("Target.activateTarget", { targetId });
+  } finally {
+    browserClient.close();
+  }
+  saveSession({ ...session, targetId }, home);
+  return { status: "activated", targetId };
+}
+
 export async function inspectBrowserPage(home: string = homedir()): Promise<BrowserInspectionResult> {
   return await withPageClient(home, async (client, target) => {
     const result = await evaluate<Omit<BrowserInspectionResult, "targetId">>(client, `(() => {
@@ -556,13 +649,30 @@ export async function inspectBrowserPage(home: string = homedir()): Promise<Brow
       const visible = (el) => {
         const r = el.getBoundingClientRect();
         const style = getComputedStyle(el);
-        return r.width > 1 && r.height > 1 && style.visibility !== "hidden" && style.display !== "none";
+        return r.width > 1
+          && r.height > 1
+          && style.visibility !== "hidden"
+          && style.display !== "none"
+          && r.right >= 0
+          && r.bottom >= 0
+          && r.left <= window.innerWidth
+          && r.top <= window.innerHeight;
       };
-      const selectors = "a,button,input,textarea,select,[role='button'],[role='link'],[tabindex]";
+      const selectors = "a,button,input,textarea,select,[contenteditable]:not([contenteditable='false']),[role='textbox'],[role='button'],[role='link'],[tabindex]";
+      const active = document.activeElement;
+      const editableSelector = "input,textarea,[contenteditable]:not([contenteditable='false']),[role='textbox']";
       const interactive = Array.from(document.querySelectorAll(selectors))
         .filter(visible)
+        .map((el, order) => ({
+          el,
+          order,
+          priority: el === active || (active instanceof Node && el.contains(active))
+            ? 2
+            : el.matches(editableSelector) ? 1 : 0,
+        }))
+        .sort((a, b) => b.priority - a.priority || a.order - b.order)
         .slice(0, ${MAX_INSPECT_ELEMENTS})
-        .map((el, index) => {
+        .map(({ el }, index) => {
           const r = el.getBoundingClientRect();
           return {
             index,
@@ -593,6 +703,115 @@ export async function inspectBrowserPage(home: string = homedir()): Promise<Brow
     })()`);
     return { targetId: target.id, ...result };
   });
+}
+
+export async function inspectChatGptConversation(
+  home: string = homedir(),
+): Promise<ChatGptConversationSnapshot> {
+  return await withPageClient(home, async (client, target) => {
+    const page = await evaluate<Omit<ChatGptConversationSnapshot, "targetId">>(client, `(() => {
+      const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+      const messages = Array.from(document.querySelectorAll("[data-message-author-role]"));
+      const assistants = messages.filter((el) => el.getAttribute("data-message-author-role") === "assistant");
+      const users = messages.filter((el) => el.getAttribute("data-message-author-role") === "user");
+      const composer = document.querySelector(
+        "#prompt-textarea,[data-testid='composer-input'],[contenteditable='true'][role='textbox'],textarea[placeholder]"
+      );
+      const stopButton = document.querySelector(
+        "button[data-testid='stop-button'],button[aria-label*='Stop'],button[aria-label*='停止']"
+      );
+      const error = document.querySelector(
+        "[data-testid='conversation-turn-error'],[role='alert']"
+      );
+      return {
+        url: location.href,
+        title: document.title.slice(0, 300),
+        assistantCount: assistants.length,
+        userCount: users.length,
+        lastAssistantText: clean(assistants.at(-1)?.innerText || assistants.at(-1)?.textContent),
+        composerText: clean(composer?.innerText || composer?.textContent || composer?.value),
+        composerPresent: Boolean(composer),
+        generating: Boolean(stopButton),
+        errorText: clean(error?.innerText || error?.textContent).slice(0, 500),
+      };
+    })()`);
+    return { targetId: target.id, ...page };
+  });
+}
+
+export async function focusChatGptComposer(
+  input: { requireEmpty?: boolean; home?: string } = {},
+): Promise<{ targetId: string; x: number; y: number; existingText: string }> {
+  const home = input.home ?? homedir();
+  return await withPageClient(home, async (client, target) => {
+    const location = await evaluate<string>(client, "location.hostname");
+    if (location !== "chatgpt.com" && !location.endsWith(".chatgpt.com")) {
+      throw new Error(`ChatGPT DOM driver requires chatgpt.com, got ${location || "unknown host"}.`);
+    }
+    const composer = await evaluate<{ x: number; y: number; existingText: string } | undefined>(client, `(() => {
+      const selectors = [
+        "#prompt-textarea",
+        "[data-testid='composer-input']",
+        "[contenteditable='true'][role='textbox']",
+        "textarea[placeholder]"
+      ];
+      const visible = (el) => {
+        const r = el.getBoundingClientRect();
+        const style = getComputedStyle(el);
+        return r.width > 1 && r.height > 1 && style.display !== "none" && style.visibility !== "hidden";
+      };
+      const el = selectors.map((selector) => document.querySelector(selector)).find((candidate) => candidate && visible(candidate));
+      if (!(el instanceof HTMLElement)) return undefined;
+      const r = el.getBoundingClientRect();
+      const existingText = String(el.innerText || el.textContent || el.value || "").trim();
+      el.focus();
+      return {
+        x: Math.round(r.x + r.width / 2),
+        y: Math.round(r.y + r.height / 2),
+        existingText,
+      };
+    })()`);
+    if (!composer) throw new Error("ChatGPT message composer was not found.");
+    if ((input.requireEmpty ?? true) && composer.existingText) {
+      throw new Error("ChatGPT composer contains an existing draft; refusing to overwrite it.");
+    }
+    await dispatchClick(client, composer.x, composer.y);
+    return { targetId: target.id, ...composer };
+  });
+}
+
+export async function waitForChatGptResponse(
+  input: ChatGptResponseWaitInput,
+  home: string = homedir(),
+): Promise<ChatGptConversationSnapshot> {
+  const timeoutMs = Math.min(600_000, Math.max(5_000, input.timeoutMs ?? 180_000));
+  const pollIntervalMs = Math.min(5_000, Math.max(250, input.pollIntervalMs ?? 750));
+  const deadline = Date.now() + timeoutMs;
+  let lastText = "";
+  let stablePolls = 0;
+  let latest = await inspectChatGptConversation(home);
+
+  while (Date.now() < deadline) {
+    if (input.shouldStop?.()) throw new Error("ChatGPT response wait was cancelled.");
+    latest = await inspectChatGptConversation(home);
+    if (latest.errorText && !latest.generating) {
+      throw new Error(`ChatGPT reported an error: ${latest.errorText}`);
+    }
+    const hasNewAssistant = latest.assistantCount > input.baselineAssistantCount;
+    const hasExpectedMarker = !input.expectedMarker || latest.lastAssistantText.includes(input.expectedMarker);
+    if (hasNewAssistant && latest.lastAssistantText && hasExpectedMarker && !latest.generating) {
+      stablePolls = latest.lastAssistantText === lastText ? stablePolls + 1 : 0;
+      lastText = latest.lastAssistantText;
+      if (stablePolls >= 1) return latest;
+    } else {
+      stablePolls = 0;
+      lastText = latest.lastAssistantText;
+    }
+    await sleep(pollIntervalMs);
+  }
+
+  const markerDetail = input.expectedMarker ? ` Expected marker: ${input.expectedMarker}.` : "";
+  throw new Error(`Timed out waiting for a completed ChatGPT response.${markerDetail}`);
 }
 
 export async function captureBrowserScreenshot(home: string = homedir()): Promise<BrowserScreenshotResult> {
@@ -773,15 +992,22 @@ export async function typeBrowserText(
       type: string;
       name: string;
       autocomplete: string;
+      editable: boolean;
       formHasPassword: boolean;
     }>(client, `(() => {
-      const el = document.activeElement;
+      const focused = document.activeElement;
+      const el = focused instanceof HTMLElement
+        ? focused.closest("input,textarea,[contenteditable]:not([contenteditable='false'])")
+        : null;
       const form = el instanceof HTMLElement ? el.closest("form") : null;
       return {
         tag: el instanceof HTMLElement ? el.tagName.toLowerCase() : "",
         type: el instanceof HTMLInputElement ? String(el.type || "").toLowerCase() : "",
         name: el instanceof HTMLElement ? String(el.getAttribute("name") || "").toLowerCase() : "",
         autocomplete: el instanceof HTMLElement ? String(el.getAttribute("autocomplete") || "").toLowerCase() : "",
+        editable: el instanceof HTMLInputElement
+          || el instanceof HTMLTextAreaElement
+          || Boolean(el instanceof HTMLElement && el.isContentEditable),
         formHasPassword: Boolean(form && form.querySelector("input[type='password']")),
       };
     })()`);
@@ -792,8 +1018,8 @@ export async function typeBrowserText(
     if (secretLike) {
       throw new Error("GPT-Agent will not type credentials. Enter login credentials manually in the isolated browser.");
     }
-    if (!new Set(["input", "textarea"]).has(active.tag)) {
-      throw new Error("No editable input or textarea is focused.");
+    if (!active.editable) {
+      throw new Error("No editable input, textarea, or contenteditable element is focused.");
     }
     await client.send("Input.insertText", { text });
     return { status: "typed" as const, targetId: target.id, characters: text.length };

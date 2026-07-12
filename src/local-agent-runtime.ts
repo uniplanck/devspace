@@ -6,6 +6,7 @@ import type {
   SandboxMode,
   ThreadOptions,
 } from "@openai/codex-sdk";
+import { assertLocalAgentProviderAllowed } from "./no-codex.js";
 
 export type LocalAgentWriteMode = "read_only" | "allowed" | "full_access";
 
@@ -95,6 +96,7 @@ export async function createCodexSdkLocalAgentRuntime(
   options?: CodexOptions,
   codexFactory?: CodexFactory,
 ): Promise<CodexSdkLocalAgentRuntime> {
+  if (!codexFactory) assertLocalAgentProviderAllowed("codex");
   const factory = codexFactory ?? (await defaultCodexFactory());
   return new CodexSdkLocalAgentRuntime(factory(options));
 }

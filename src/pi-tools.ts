@@ -30,6 +30,7 @@ import { getExecutionCostSnapshot } from "./usage-meter.js";
 import { loadConfig } from "./config.js";
 import { cancelJob, resumeJob, startJob } from "./job-runner.js";
 import { createJobStore, isJobPreset, JOB_PRESETS } from "./job-store.js";
+import { isCodexAllowed } from "./no-codex.js";
 import {
   computerUsePolicyPath,
   diagnoseComputerUse,
@@ -126,7 +127,8 @@ async function runBuiltinRuntimeCommand(
       "  devspace-runtime costs",
       "  devspace-runtime finder <workspace-relative-path>",
       "  devspace-runtime jobs start <preset> [--title <title>]",
-      "  devspace-runtime jobs start browser-loop --goal <goal> [--max-steps <1-60>] [--provider <provider>] [--model <model>] [--download-group <group>]",
+      "  devspace-runtime jobs start browser-loop --goal <goal> --provider <non-codex-provider> [--max-steps <1-60>] [--model <model>] [--download-group <group>]",
+      "  devspace-runtime jobs start chatgpt-task --prompt <prompt> [--url <chat-url>] [--expect <marker>] [--timeout-seconds <5-600>] [--keep-tab]",
       "  devspace-runtime jobs list",
       "  devspace-runtime jobs show <id> [--events]",
       "  devspace-runtime jobs cancel <id>",
@@ -180,7 +182,10 @@ async function runBuiltinRuntimeCommand(
   }
 
   if (rawCommand === `${runtimeCommandPrefix} computer doctor`) {
-    return jsonResponse(diagnoseComputerUse());
+    return jsonResponse({
+      ...diagnoseComputerUse(),
+      noCodexGuard: isCodexAllowed() ? "override-enabled" : "active",
+    });
   }
 
   if (rawCommand === `${runtimeCommandPrefix} computer policy`) {
@@ -319,7 +324,9 @@ function runRuntimeJobsCommand(rawCommand: string, context: ToolContext): ToolRe
       throw new Error(`Usage: devspace-runtime jobs start <preset>. Presets: ${JOB_PRESETS.join(", ")}`);
     }
     const title = runtimeOption(tokens, "--title");
-    const input = preset === "browser-loop" ? runtimeBrowserLoopInput(tokens) : undefined;
+    const input = preset === "browser-loop"
+      ? runtimeBrowserLoopInput(tokens)
+      : preset === "chatgpt-task" ? runtimeChatGptTaskInput(tokens) : undefined;
     return jsonResponse(startJob(config, {
       workspaceId: context.workspaceId,
       workspaceRoot: context.root,
@@ -377,6 +384,25 @@ function runRuntimeJobsCommand(rawCommand: string, context: ToolContext): ToolRe
   }
 
   throw new Error("Unknown jobs command. Run `devspace-runtime help`.");
+}
+
+function runtimeChatGptTaskInput(tokens: string[]): Record<string, unknown> {
+  const prompt = runtimeOption(tokens, "--prompt");
+  if (!prompt) throw new Error("ChatGPT task jobs require --prompt <prompt>.");
+  const url = runtimeOption(tokens, "--url");
+  const expectedMarker = runtimeOption(tokens, "--expect");
+  const timeoutSecondsValue = runtimeOption(tokens, "--timeout-seconds");
+  const timeoutSeconds = timeoutSecondsValue === undefined ? undefined : Number(timeoutSecondsValue);
+  if (timeoutSeconds !== undefined && (!Number.isFinite(timeoutSeconds) || timeoutSeconds < 5 || timeoutSeconds > 600)) {
+    throw new Error("--timeout-seconds must be from 5 to 600.");
+  }
+  return {
+    prompt,
+    ...(url ? { url } : {}),
+    ...(expectedMarker ? { expectedMarker } : {}),
+    ...(timeoutSeconds === undefined ? {} : { timeoutMs: Math.round(timeoutSeconds * 1000) }),
+    closeWhenDone: !tokens.includes("--keep-tab"),
+  };
 }
 
 function runtimeBrowserLoopInput(tokens: string[]): Record<string, unknown> {

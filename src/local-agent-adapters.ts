@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { Readable, Writable } from "node:stream";
 import type { EffortLevel } from "@anthropic-ai/claude-agent-sdk";
 import type { LocalAgentProvider } from "./local-agent-profiles.js";
+import { assertLocalAgentProviderAllowed } from "./no-codex.js";
 import { removeDevspaceNodeModulesBinFromPath } from "./local-agent-path.js";
 import {
   createCodexSdkLocalAgentRuntime,
@@ -25,6 +26,7 @@ export async function runLocalAgentProvider(
   provider: LocalAgentProvider,
   input: LocalAgentRunInput,
 ): Promise<LocalAgentRunResult> {
+  assertLocalAgentProviderAllowed(provider);
   return createLocalAgentAdapter(provider).run(input);
 }
 

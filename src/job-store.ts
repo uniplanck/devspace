@@ -10,6 +10,7 @@ export const JOB_PRESETS = [
   "git-status",
   "runtime-smoke",
   "browser-loop",
+  "chatgpt-task",
 ] as const;
 
 export type JobPreset = (typeof JOB_PRESETS)[number];
@@ -344,6 +345,7 @@ export function defaultJobTitle(preset: JobPreset): string {
     case "git-status": return "Git status inspection";
     case "runtime-smoke": return "GPT-Agent runtime smoke";
     case "browser-loop": return "Browser Computer task";
+    case "chatgpt-task": return "ChatGPT deterministic task";
   }
 }
 

@@ -17,7 +17,13 @@ import {
   cancelBrowserApproval,
   configureBrowserDownloadDirectory,
   listBrowserApprovals,
+  startBrowserSession,
 } from "./browser-computer.js";
+import {
+  runChatGptTask,
+  type ChatGptTaskInput,
+  type ChatGptTaskState,
+} from "./chatgpt-task.js";
 import {
   createHermesBrowserTaskPlanner,
   createNativeBrowserTaskDriver,
@@ -101,6 +107,9 @@ export async function runJobWorker(
     }
     if (job.preset === "browser-loop") {
       return await runBrowserLoopJob(store, job, options.browserLoopRuntime);
+    }
+    if (job.preset === "chatgpt-task") {
+      return await runChatGptTaskJob(store, job);
     }
 
     const command = await resolvePresetCommand(job.preset, job.workspaceRoot);
@@ -318,6 +327,8 @@ async function runBrowserLoopJob(
 ): Promise<JobRecord> {
   const input = readBrowserLoopInput(job.input);
   if (!injectedRuntime) {
+    const browser = await startBrowserSession();
+    store.appendEvent(job.id, "info", `Browser session: ${browser.status}.`);
     const downloadDirectory = await configureBrowserDownloadDirectory({
       group: input.downloadGroup ?? "browser",
       taskId: `${job.title}-${job.id}`,
@@ -387,10 +398,80 @@ async function runBrowserLoopJob(
   return failed;
 }
 
+async function runChatGptTaskJob(store: JobStore, job: JobRecord): Promise<JobRecord> {
+  const input = readChatGptTaskInput(job.input);
+  store.appendEvent(
+    job.id,
+    "info",
+    "Execution engine: deterministic ChatGPT DOM; Hermes calls: 0; Codex planner calls: 0.",
+  );
+  const result = await runChatGptTask(
+    input,
+    job.state as Partial<ChatGptTaskState> | undefined,
+    {
+      onPhase: (phase, state) => {
+        const progress = phase === "opening" ? 15 : phase === "waiting-approval" ? 35 : phase === "waiting-response" ? 55 : 95;
+        store.update(job.id, {
+          state: state as unknown as Record<string, unknown>,
+          progress: Math.max(requireJob(store, job.id).progress, progress),
+          currentStep: phase === "opening"
+            ? "Opening isolated ChatGPT tab"
+            : phase === "waiting-approval"
+              ? "Waiting for local submit approval"
+              : phase === "waiting-response"
+                ? "Waiting locally for ChatGPT response"
+                : "Response captured",
+        });
+      },
+      shouldStop: () => {
+        const current = store.get(job.id);
+        return current?.status === "cancelling" || current?.status === "cancelled";
+      },
+    },
+  );
+
+  if (result.status === "waiting-approval") {
+    const waiting = store.update(job.id, {
+      status: "waiting_approval",
+      state: result.state as unknown as Record<string, unknown>,
+      currentStep: "Waiting for local submit approval",
+      workerPid: undefined,
+      processPid: undefined,
+    });
+    store.appendEvent(job.id, "warning", `Local approval required: ${result.approval.id} (submit).`);
+    return waiting;
+  }
+
+  const completed = store.update(job.id, {
+    status: "succeeded",
+    progress: 100,
+    state: result.state as unknown as Record<string, unknown>,
+    currentStep: "Completed without planner LLM",
+    exitCode: 0,
+    processPid: undefined,
+    workerPid: undefined,
+    finishedAt: new Date().toISOString(),
+  });
+  store.appendEvent(job.id, "info", `ChatGPT response captured (${result.responseText.length} characters).`);
+  store.appendEvent(job.id, "info", `Resume URL: ${result.conversationUrl}`);
+  if (result.state.tabClosed) store.appendEvent(job.id, "info", "Unused child tab closed after result capture.");
+  return completed;
+}
+
 function readPendingApprovalId(value: Record<string, unknown> | undefined): string | undefined {
   return typeof value?.pendingApprovalId === "string" && value.pendingApprovalId.trim()
     ? value.pendingApprovalId.trim()
     : undefined;
+}
+
+function readChatGptTaskInput(value: Record<string, unknown> | undefined): ChatGptTaskInput {
+  const prompt = typeof value?.prompt === "string" ? value.prompt : "";
+  if (!prompt.trim()) throw new Error("ChatGPT task requires an input.prompt string.");
+  const url = typeof value?.url === "string" ? value.url : undefined;
+  const expectedMarker = typeof value?.expectedMarker === "string" ? value.expectedMarker : undefined;
+  const timeoutMs = typeof value?.timeoutMs === "number" ? value.timeoutMs : undefined;
+  const closeWhenDone = typeof value?.closeWhenDone === "boolean" ? value.closeWhenDone : undefined;
+  return { prompt, url, expectedMarker, timeoutMs, closeWhenDone };
 }
 
 function readBrowserLoopInput(value: Record<string, unknown> | undefined): BrowserTaskLoopInput {
@@ -433,7 +514,7 @@ async function runRuntimeSmokeJob(store: JobStore, job: JobRecord): Promise<JobR
 }
 
 async function resolvePresetCommand(
-  preset: Exclude<JobPreset, "runtime-smoke" | "browser-loop">,
+  preset: Exclude<JobPreset, "runtime-smoke" | "browser-loop" | "chatgpt-task">,
   workspaceRoot: string,
 ): Promise<{ executable: string; args: string[]; label: string }> {
   if (preset === "git-status") {

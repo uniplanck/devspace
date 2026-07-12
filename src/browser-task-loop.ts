@@ -11,6 +11,7 @@ import {
   type BrowserApprovalRecord,
   type BrowserInspectionResult,
 } from "./browser-computer.js";
+import { assertNonCodexProvider } from "./no-codex.js";
 import { resolveExecutable, shellPathInfo } from "./shell-environment.js";
 
 export type BrowserTaskAction =
@@ -188,6 +189,8 @@ export function createHermesBrowserTaskPlanner(options: {
   executable?: string;
   env?: NodeJS.ProcessEnv;
 } = {}): BrowserTaskPlanner {
+  const env = options.env ?? process.env;
+  assertNonCodexProvider(options.provider, "Hermes browser planner", env);
   return async (input) => {
     const executable = options.executable ?? resolveExecutable("hermes");
     if (!executable) throw new Error("Hermes executable was not found on the augmented PATH.");
@@ -199,7 +202,7 @@ export function createHermesBrowserTaskPlanner(options: {
       executable,
       args,
       options.timeoutMs ?? 120_000,
-      options.env ?? process.env,
+      env,
     );
     return parseBrowserTaskAction(extractJsonObject(output));
   };

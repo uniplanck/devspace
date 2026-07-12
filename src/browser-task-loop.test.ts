@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import {
+  createHermesBrowserTaskPlanner,
   parseBrowserTaskAction,
   runBrowserTaskLoop,
   type BrowserTaskAction,
@@ -104,6 +105,16 @@ assert.throws(
   () => parseBrowserTaskAction({ kind: "click", elementIndex: -1 }),
   /elementIndex/u,
 );
+
+assert.throws(
+  () => createHermesBrowserTaskPlanner({ env: {} }),
+  /explicit non-Codex provider/u,
+);
+assert.throws(
+  () => createHermesBrowserTaskPlanner({ provider: "openai-codex", env: {} }),
+  /No-Codex mode/u,
+);
+assert.doesNotThrow(() => createHermesBrowserTaskPlanner({ provider: "google", env: {} }));
 assert.throws(
   () => parseBrowserTaskAction({ kind: "key", key: "F5" }),
   /Unsupported/u,

@@ -28,6 +28,7 @@ import {
   resolveLocalAgentTarget,
 } from "./local-agent-targets.js";
 import { createLocalAgentStore, type LocalAgentRecord } from "./local-agent-store.js";
+import { isCodexAllowed } from "./no-codex.js";
 import type { LocalAgentRunResult } from "./local-agent-runtime.js";
 import { cancelJob, resumeJob, runJobWorker, startJob } from "./job-runner.js";
 import { createJobStore, isJobPreset, JOB_PRESETS, type JobRecord } from "./job-store.js";
@@ -370,6 +371,7 @@ async function runComputerCommand(args: string[]): Promise<void> {
         `Browser downloads: ${result.browser.downloadDirectory}`,
         `Desktop: ${result.desktop.ready ? "ready" : "not ready"}`,
         `Confirmations: ${result.safety.confirmationsRequired.join(", ") || "none"}`,
+        `No-Codex guard: ${isCodexAllowed() ? "override enabled" : "active"}`,
         ...result.missingRequirements.map((item) => `Missing: ${item}`),
         ...result.diagnostics.map((item) => `Note: ${item}`),
       ].join("\n"));
@@ -602,7 +604,9 @@ async function runJobsStart(args: string[]): Promise<void> {
     throw new Error(`Usage: devspace jobs start <preset>. Presets: ${JOB_PRESETS.join(", ")}`);
   }
   const title = readJobsOption(args, "--title");
-  const input = presetValue === "browser-loop" ? readBrowserLoopJobInput(args) : undefined;
+  const input = presetValue === "browser-loop"
+    ? readBrowserLoopJobInput(args)
+    : presetValue === "chatgpt-task" ? readChatGptTaskJobInput(args) : undefined;
   const config = loadConfig();
   const record = startJob(config, {
     workspaceId: process.env.DEVSPACE_WORKSPACE_ID || undefined,
@@ -676,6 +680,25 @@ function runJobsResume(args: string[]): void {
   console.log(formatJobLine(record));
 }
 
+function readChatGptTaskJobInput(args: string[]): Record<string, unknown> {
+  const prompt = readJobsOption(args, "--prompt");
+  if (!prompt) throw new Error("ChatGPT task jobs require --prompt <prompt>.");
+  const url = readJobsOption(args, "--url");
+  const expectedMarker = readJobsOption(args, "--expect");
+  const timeoutSecondsValue = readJobsOption(args, "--timeout-seconds");
+  const timeoutSeconds = timeoutSecondsValue === undefined ? undefined : Number(timeoutSecondsValue);
+  if (timeoutSeconds !== undefined && (!Number.isFinite(timeoutSeconds) || timeoutSeconds < 5 || timeoutSeconds > 600)) {
+    throw new Error("--timeout-seconds must be from 5 to 600.");
+  }
+  return {
+    prompt,
+    ...(url ? { url } : {}),
+    ...(expectedMarker ? { expectedMarker } : {}),
+    ...(timeoutSeconds === undefined ? {} : { timeoutMs: Math.round(timeoutSeconds * 1000) }),
+    closeWhenDone: !args.includes("--keep-tab"),
+  };
+}
+
 function readBrowserLoopJobInput(args: string[]): Record<string, unknown> {
   const goal = readJobsOption(args, "--goal");
   if (!goal) {
@@ -725,7 +748,8 @@ function printJobsHelp(): void {
     "",
     "Usage:",
     "  devspace jobs start <preset> [--title <title>]",
-    "  devspace jobs start browser-loop --goal <goal> [--max-steps <1-60>] [--provider <provider>] [--model <model>] [--download-group <group>]",
+    "  devspace jobs start browser-loop --goal <goal> --provider <non-codex-provider> [--max-steps <1-60>] [--model <model>] [--download-group <group>]",
+    "  devspace jobs start chatgpt-task --prompt <prompt> [--url <chat-url>] [--expect <marker>] [--timeout-seconds <5-600>] [--keep-tab]",
     "  devspace jobs ls [--all] [--json]",
     "  devspace jobs show <id> [--events] [--json]",
     "  devspace jobs cancel <id>",
