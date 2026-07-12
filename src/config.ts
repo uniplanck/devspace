@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { expandHomePath } from "./roots.js";
@@ -221,6 +222,25 @@ function parseOptionalSecret(value: string | undefined, name: string): string | 
   return secret;
 }
 
+function loadInternalMcpSecret(env: NodeJS.ProcessEnv): string | null {
+  const direct = parseOptionalSecret(
+    env.DEVSPACE_INTERNAL_MCP_SECRET,
+    "DEVSPACE_INTERNAL_MCP_SECRET",
+  );
+  if (direct) return direct;
+
+  const filePath = env.DEVSPACE_INTERNAL_MCP_SECRET_FILE?.trim();
+  if (!filePath) return null;
+  let value: string;
+  try {
+    value = readFileSync(resolve(expandHomePath(filePath)), "utf8");
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new Error(`Unable to read DEVSPACE_INTERNAL_MCP_SECRET_FILE: ${reason}`);
+  }
+  return parseOptionalSecret(value, "DEVSPACE_INTERNAL_MCP_SECRET_FILE");
+}
+
 function parseOAuthConfig(env: NodeJS.ProcessEnv, ownerToken: string | undefined): OAuthConfig {
   return {
     ownerToken: parseRequiredSecret(env.DEVSPACE_OAUTH_OWNER_TOKEN ?? ownerToken, "DEVSPACE_OAUTH_OWNER_TOKEN"),
@@ -276,10 +296,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     host,
     port,
     oauth: parseOAuthConfig(env, files.auth.ownerToken),
-    internalMcpSecret: parseOptionalSecret(
-      env.DEVSPACE_INTERNAL_MCP_SECRET,
-      "DEVSPACE_INTERNAL_MCP_SECRET",
-    ),
+    internalMcpSecret: loadInternalMcpSecret(env),
     allowedRoots: parseAllowedRoots(env.DEVSPACE_ALLOWED_ROOTS ?? files.config.allowedRoots),
     allowedHosts: parseAllowedHosts(env.DEVSPACE_ALLOWED_HOSTS, derivedAllowedHosts),
     publicBaseUrl,

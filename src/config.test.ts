@@ -176,6 +176,15 @@ assert.throws(
   () => loadConfig({ ...baseEnv, DEVSPACE_INTERNAL_MCP_SECRET: "too-short" }),
   /DEVSPACE_INTERNAL_MCP_SECRET must be at least 32 characters long/,
 );
+const internalSecretPath = join(emptyConfigDir, "internal-mcp-secret");
+writeFileSync(internalSecretPath, "internal-file-secret-that-is-long-enough\n");
+assert.equal(
+  loadConfig({
+    ...baseEnv,
+    DEVSPACE_INTERNAL_MCP_SECRET_FILE: internalSecretPath,
+  }).internalMcpSecret,
+  "internal-file-secret-that-is-long-enough",
+);
 
 assert.equal(loadConfig(baseEnv).oauth.ownerToken, "test-owner-token-that-is-long-enough");
 assert.deepEqual(loadConfig(baseEnv).oauth.scopes, ["devspace"]);
