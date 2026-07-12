@@ -28,6 +28,13 @@ import {
   resolveLocalAgentTarget,
 } from "./local-agent-targets.js";
 import { createLocalAgentStore, type LocalAgentRecord } from "./local-agent-store.js";
+import {
+  DEFAULT_GOOGLE_AI_MODEL,
+  GoogleAIKeyPool,
+  GOOGLE_AI_KEY_SLOTS,
+  loadBrowserPlannerConfig,
+  testGoogleAIKeySlot,
+} from "./google-ai-key-pool.js";
 import { isCodexAllowed } from "./no-codex.js";
 import type { LocalAgentRunResult } from "./local-agent-runtime.js";
 import { cancelJob, resumeJob, runJobWorker, startJob } from "./job-runner.js";
@@ -414,6 +421,9 @@ async function runComputerCommand(args: string[]): Promise<void> {
     case "browser":
       await runBrowserComputerCommand(rest);
       return;
+    case "planner":
+      await runComputerPlannerCommand(rest);
+      return;
     case undefined:
     case "help":
     case "--help":
@@ -512,6 +522,42 @@ async function runBrowserComputerCommand(args: string[]): Promise<void> {
   }
 }
 
+async function runComputerPlannerCommand(args: string[]): Promise<void> {
+  const [subcommand, ...rest] = args;
+  const config = loadBrowserPlannerConfig();
+  const pool = new GoogleAIKeyPool();
+  switch (subcommand) {
+    case "status":
+      console.log(JSON.stringify({ config, pool: pool.snapshot(config.model) }, null, 2));
+      return;
+    case "test": {
+      const slot = Number(rest[0]);
+      if (!GOOGLE_AI_KEY_SLOTS.includes(slot as (typeof GOOGLE_AI_KEY_SLOTS)[number])) {
+        throw new Error("Usage: devspace computer planner test <1|2|3>");
+      }
+      const result = await testGoogleAIKeySlot({
+        slot: slot as (typeof GOOGLE_AI_KEY_SLOTS)[number],
+        model: config.model || DEFAULT_GOOGLE_AI_MODEL,
+      });
+      console.log(JSON.stringify(result, null, 2));
+      if (!result.ok) process.exitCode = 1;
+      return;
+    }
+    case "reset":
+      pool.reset();
+      console.log(JSON.stringify({ reset: true, pool: pool.snapshot(config.model) }, null, 2));
+      return;
+    case undefined:
+    case "help":
+    case "--help":
+    case "-h":
+      printComputerHelp();
+      return;
+    default:
+      throw new Error(`Unknown Computer Use planner command: ${subcommand}`);
+  }
+}
+
 function confirmBrowserApprovalWithMacOS(id: string): void {
   if (process.platform !== "darwin") {
     throw new Error("Local Browser Computer approval currently requires macOS.");
@@ -548,6 +594,9 @@ function printComputerHelp(): void {
     "  devspace computer init",
     "  devspace computer enable-chatgpt",
     "  devspace computer policy [--json]",
+    "  devspace computer planner status",
+    "  devspace computer planner test <1|2|3>",
+    "  devspace computer planner reset",
     "  devspace computer browser login [url]",
     "  devspace computer browser start|status|stop",
     "  devspace computer browser open <url>",

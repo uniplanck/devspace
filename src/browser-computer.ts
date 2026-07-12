@@ -114,6 +114,7 @@ export interface ChatGptResponseWaitInput {
   timeoutMs?: number;
   pollIntervalMs?: number;
   shouldStop?: () => boolean;
+  targetId?: string;
 }
 
 const SESSION_FILE = "computer-browser-session.json";
@@ -487,8 +488,15 @@ async function createBlankTarget(session: BrowserSessionRecord): Promise<Browser
 async function getTarget(
   session: BrowserSessionRecord,
   home: string = homedir(),
+  requestedTargetId?: string,
 ): Promise<BrowserTargetInfo> {
   const pages = await listTargets(session);
+  if (requestedTargetId) {
+    const requested = pages.find((page) => page.id === requestedTargetId);
+    if (!requested) throw new Error(`Browser target is no longer available: ${requestedTargetId}`);
+    if (!requested.webSocketDebuggerUrl) throw new Error("Browser target has no CDP WebSocket URL.");
+    return requested;
+  }
   let target = session.targetId ? pages.find((page) => page.id === session.targetId) : undefined;
   target ??= pages[0];
   target ??= await createBlankTarget(session);
@@ -502,9 +510,10 @@ async function getTarget(
 async function withPageClient<T>(
   home: string,
   fn: (client: CdpClient, target: BrowserTargetInfo, session: BrowserSessionRecord) => Promise<T>,
+  targetId?: string,
 ): Promise<T> {
   const session = await requireActiveSession(home);
-  const target = await getTarget(session, home);
+  const target = await getTarget(session, home, targetId);
   const client = await CdpClient.connect(target.webSocketDebuggerUrl!);
   try {
     return await fn(client, target, session);
@@ -707,6 +716,7 @@ export async function inspectBrowserPage(home: string = homedir()): Promise<Brow
 
 export async function inspectChatGptConversation(
   home: string = homedir(),
+  targetId?: string,
 ): Promise<ChatGptConversationSnapshot> {
   return await withPageClient(home, async (client, target) => {
     const page = await evaluate<Omit<ChatGptConversationSnapshot, "targetId">>(client, `(() => {
@@ -736,11 +746,11 @@ export async function inspectChatGptConversation(
       };
     })()`);
     return { targetId: target.id, ...page };
-  });
+  }, targetId);
 }
 
 export async function focusChatGptComposer(
-  input: { requireEmpty?: boolean; home?: string } = {},
+  input: { requireEmpty?: boolean; home?: string; targetId?: string } = {},
 ): Promise<{ targetId: string; x: number; y: number; existingText: string }> {
   const home = input.home ?? homedir();
   return await withPageClient(home, async (client, target) => {
@@ -777,7 +787,7 @@ export async function focusChatGptComposer(
     }
     await dispatchClick(client, composer.x, composer.y);
     return { targetId: target.id, ...composer };
-  });
+  }, input.targetId);
 }
 
 export async function waitForChatGptResponse(
@@ -789,11 +799,13 @@ export async function waitForChatGptResponse(
   const deadline = Date.now() + timeoutMs;
   let lastText = "";
   let stablePolls = 0;
-  let latest = await inspectChatGptConversation(home);
+  let incompleteStablePolls = 0;
+  let hydrationAttempts = 0;
+  let latest = await inspectChatGptConversation(home, input.targetId);
 
   while (Date.now() < deadline) {
     if (input.shouldStop?.()) throw new Error("ChatGPT response wait was cancelled.");
-    latest = await inspectChatGptConversation(home);
+    latest = await inspectChatGptConversation(home, input.targetId);
     if (latest.errorText && !latest.generating) {
       throw new Error(`ChatGPT reported an error: ${latest.errorText}`);
     }
@@ -801,11 +813,24 @@ export async function waitForChatGptResponse(
     const hasExpectedMarker = !input.expectedMarker || latest.lastAssistantText.includes(input.expectedMarker);
     if (hasNewAssistant && latest.lastAssistantText && hasExpectedMarker && !latest.generating) {
       stablePolls = latest.lastAssistantText === lastText ? stablePolls + 1 : 0;
+      incompleteStablePolls = 0;
       lastText = latest.lastAssistantText;
       if (stablePolls >= 1) return latest;
     } else {
       stablePolls = 0;
+      const incompleteAndStable = hasNewAssistant
+        && Boolean(latest.lastAssistantText)
+        && !hasExpectedMarker
+        && !latest.generating
+        && latest.lastAssistantText === lastText;
+      incompleteStablePolls = incompleteAndStable ? incompleteStablePolls + 1 : 0;
       lastText = latest.lastAssistantText;
+      if (input.targetId && incompleteStablePolls >= 3 && hydrationAttempts < 2) {
+        await activateBrowserTarget(input.targetId, home);
+        hydrationAttempts += 1;
+        incompleteStablePolls = 0;
+        await sleep(500);
+      }
     }
     await sleep(pollIntervalMs);
   }
@@ -984,6 +1009,7 @@ export async function clickBrowserPoint(
 export async function typeBrowserText(
   text: string,
   home: string = homedir(),
+  targetId?: string,
 ): Promise<{ status: "typed"; targetId: string; characters: number }> {
   if (!text || text.length > 4_000) throw new Error("Browser text must contain 1 to 4000 characters.");
   return await withPageClient(home, async (client, target) => {
@@ -1023,7 +1049,7 @@ export async function typeBrowserText(
     }
     await client.send("Input.insertText", { text });
     return { status: "typed" as const, targetId: target.id, characters: text.length };
-  });
+  }, targetId);
 }
 
 const allowedKeys = new Map<string, { key: string; code: string; windowsVirtualKeyCode: number }>([
@@ -1046,7 +1072,7 @@ async function dispatchKey(client: CdpClient, key: string): Promise<void> {
 
 export async function pressBrowserKey(
   key: string,
-  input: { policyPath?: string; home?: string } = {},
+  input: { policyPath?: string; home?: string; targetId?: string } = {},
 ): Promise<
   | { status: "pressed"; targetId: string; key: string }
   | { status: "approval-required"; approval: BrowserApprovalRecord }
@@ -1067,7 +1093,7 @@ export async function pressBrowserKey(
     }
     await dispatchKey(client, key);
     return { status: "pressed" as const, targetId: target.id, key };
-  });
+  }, input.targetId);
 }
 
 export async function scrollBrowserPage(

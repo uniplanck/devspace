@@ -11,6 +11,12 @@ import {
   type BrowserApprovalRecord,
   type BrowserInspectionResult,
 } from "./browser-computer.js";
+import {
+  classifyGoogleAIPlannerError,
+  GoogleAIKeyPool,
+  isGoogleAIProvider,
+  redactGoogleAISecrets,
+} from "./google-ai-key-pool.js";
 import { assertNonCodexProvider } from "./no-codex.js";
 import { resolveExecutable, shellPathInfo } from "./shell-environment.js";
 
@@ -188,9 +194,11 @@ export function createHermesBrowserTaskPlanner(options: {
   timeoutMs?: number;
   executable?: string;
   env?: NodeJS.ProcessEnv;
+  googleAIKeyPool?: GoogleAIKeyPool;
 } = {}): BrowserTaskPlanner {
   const env = options.env ?? process.env;
   assertNonCodexProvider(options.provider, "Hermes browser planner", env);
+  const googleAIKeyPool = options.googleAIKeyPool ?? new GoogleAIKeyPool({ env });
   return async (input) => {
     const executable = options.executable ?? resolveExecutable("hermes");
     if (!executable) throw new Error("Hermes executable was not found on the augmented PATH.");
@@ -198,13 +206,53 @@ export function createHermesBrowserTaskPlanner(options: {
     const args = ["chat", "-Q", "--max-turns", "1", "--source", "tool", "-q", prompt, "--image", input.screenshotPath];
     if (options.provider) args.push("--provider", options.provider);
     if (options.model) args.push("-m", options.model);
-    const output = await runPlannerProcess(
-      executable,
-      args,
-      options.timeoutMs ?? 120_000,
-      env,
-    );
-    return parseBrowserTaskAction(extractJsonObject(output));
+
+    if (!isGoogleAIProvider(options.provider)) {
+      const output = await runPlannerProcess(
+        executable,
+        args,
+        options.timeoutMs ?? 120_000,
+        env,
+      );
+      return parseBrowserTaskAction(extractJsonObject(output));
+    }
+
+    const candidates = googleAIKeyPool.availableCandidates();
+    if (candidates.length === 0) {
+      throw new Error("Google AI planner has no available API key. Configure slot 1-3 in GPT-Agent Tool or reset cooldowns.");
+    }
+    const failures: string[] = [];
+    for (const candidate of candidates) {
+      try {
+        const output = await runPlannerProcess(
+          executable,
+          args,
+          options.timeoutMs ?? 120_000,
+          {
+            ...env,
+            GOOGLE_API_KEY: candidate.key,
+            GEMINI_API_KEY: candidate.key,
+          },
+        );
+        let action: BrowserTaskAction;
+        try {
+          action = parseBrowserTaskAction(extractJsonObject(output));
+        } catch (parseError) {
+          const safeOutput = redactGoogleAISecrets(output.slice(-2_000), [candidate.key]);
+          const parseDetail = parseError instanceof Error ? parseError.message : String(parseError);
+          throw new Error(`${parseDetail}${safeOutput ? `; Hermes output: ${safeOutput}` : ""}`);
+        }
+        googleAIKeyPool.markSuccess(candidate.slot);
+        return action;
+      } catch (error) {
+        const classification = classifyGoogleAIPlannerError(error);
+        const detail = redactGoogleAISecrets(error instanceof Error ? error.message : String(error), [candidate.key]);
+        failures.push(`slot ${candidate.slot}: ${detail}`);
+        if (!classification.rotate) throw new Error(detail);
+        googleAIKeyPool.markFailure(candidate.slot, classification);
+      }
+    }
+    throw new Error(`All configured Google AI keys failed. ${failures.join(" | ")}`);
   };
 }
 

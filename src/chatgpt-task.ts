@@ -1,3 +1,6 @@
+import { mkdirSync, rmSync, statSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import {
   activateBrowserTarget,
   closeBrowserTarget,
@@ -53,8 +56,6 @@ export async function runChatGptTask(
   const state = normalizeState(initialState);
   await startBrowserSession();
 
-  if (state.targetId) await activateBrowserTarget(state.targetId);
-
   if (state.pendingApprovalId) {
     const approval = listBrowserApprovals().find((candidate) => candidate.id === state.pendingApprovalId);
     if (!approval) throw new Error(`ChatGPT task approval was not found: ${state.pendingApprovalId}`);
@@ -72,16 +73,23 @@ export async function runChatGptTask(
   if (!state.targetId) {
     state.phase = "opening";
     runtime.onPhase?.(state.phase, cloneState(state));
-    const opened = await openBrowserUrlInNewTab(input.url ?? DEFAULT_URL);
-    state.targetId = opened.targetId;
-    state.conversationUrl = opened.url;
-
-    const before = await waitForComposer(runtime.shouldStop);
-    state.baselineAssistantCount = before.assistantCount;
-    state.conversationUrl = before.url;
-    await focusChatGptComposer({ requireEmpty: true });
-    await typeBrowserText(input.prompt);
-    const submission = await pressBrowserKey("Enter");
+    const interaction = await withBrowserInputLock(async () => {
+      const opened = await openBrowserUrlInNewTab(input.url ?? DEFAULT_URL);
+      state.targetId = opened.targetId;
+      state.conversationUrl = opened.url;
+      await activateBrowserTarget(state.targetId);
+      const before = await waitForComposer(state.targetId, runtime.shouldStop);
+      await focusChatGptComposer({ requireEmpty: true, targetId: state.targetId });
+      await typeBrowserText(input.prompt, undefined, state.targetId);
+      const submission = await pressBrowserKey("Enter", { targetId: state.targetId });
+      const submitted = submission.status === "pressed"
+        ? await waitForSubmittedMessage(state.targetId, before.userCount, runtime.shouldStop)
+        : before;
+      return { before, submission, submitted };
+    }, runtime.shouldStop);
+    state.baselineAssistantCount = interaction.before.assistantCount;
+    state.conversationUrl = interaction.submitted.url;
+    const submission = interaction.submission;
     state.phase = submission.status === "approval-required" ? "waiting-approval" : "waiting-response";
     if (submission.status === "approval-required") {
       state.pendingApprovalId = submission.approval.id;
@@ -100,6 +108,7 @@ export async function runChatGptTask(
     expectedMarker: input.expectedMarker,
     timeoutMs: input.timeoutMs,
     shouldStop: runtime.shouldStop,
+    targetId: state.targetId,
   });
   state.phase = "completed";
   state.responseText = completed.lastAssistantText;
@@ -119,12 +128,28 @@ export async function runChatGptTask(
   };
 }
 
-async function waitForComposer(shouldStop?: () => boolean) {
-  const deadline = Date.now() + 30_000;
-  let latest = await inspectChatGptConversation();
+async function waitForSubmittedMessage(
+  targetId: string,
+  baselineUserCount: number,
+  shouldStop?: () => boolean,
+) {
+  const deadline = Date.now() + 15_000;
+  let latest = await inspectChatGptConversation(undefined, targetId);
   while (Date.now() < deadline) {
     if (shouldStop?.()) throw new Error("ChatGPT task was cancelled.");
-    latest = await inspectChatGptConversation();
+    latest = await inspectChatGptConversation(undefined, targetId);
+    if (latest.userCount > baselineUserCount) return latest;
+    await sleep(150);
+  }
+  throw new Error(`ChatGPT did not acknowledge the submitted message at ${latest.url}.`);
+}
+
+async function waitForComposer(targetId: string, shouldStop?: () => boolean) {
+  const deadline = Date.now() + 30_000;
+  let latest = await inspectChatGptConversation(undefined, targetId);
+  while (Date.now() < deadline) {
+    if (shouldStop?.()) throw new Error("ChatGPT task was cancelled.");
+    latest = await inspectChatGptConversation(undefined, targetId);
     if (latest.composerPresent) return latest;
     await sleep(500);
   }
@@ -172,6 +197,40 @@ function normalizeState(value?: Partial<ChatGptTaskState>): ChatGptTaskState {
 
 function cloneState(state: ChatGptTaskState): ChatGptTaskState {
   return JSON.parse(JSON.stringify(state)) as ChatGptTaskState;
+}
+
+async function withBrowserInputLock<T>(
+  operation: () => Promise<T>,
+  shouldStop?: () => boolean,
+): Promise<T> {
+  const lockPath = join(homedir(), ".devspace", "computer-browser-input.lock");
+  const deadline = Date.now() + 45_000;
+  while (true) {
+    if (shouldStop?.()) throw new Error("ChatGPT task was cancelled.");
+    try {
+      mkdirSync(lockPath);
+      break;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "EEXIST") throw error;
+      try {
+        const ageMs = Date.now() - statSync(lockPath).mtimeMs;
+        if (ageMs > 60_000) {
+          rmSync(lockPath, { recursive: true, force: true });
+          continue;
+        }
+      } catch {}
+      if (Date.now() >= deadline) {
+        throw new Error("Timed out waiting for the shared Browser Computer input lock.");
+      }
+      await sleep(100);
+    }
+  }
+  try {
+    return await operation();
+  } finally {
+    rmSync(lockPath, { recursive: true, force: true });
+  }
 }
 
 async function sleep(ms: number): Promise<void> {
