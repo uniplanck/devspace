@@ -123,6 +123,7 @@ export async function runJobWorker(
       cwd: job.workspaceRoot,
       env: { ...process.env, PATH: pathInfo.path },
       detached: false,
+      shell: command.shell,
       stdio: ["ignore", "pipe", "pipe"],
     });
 
@@ -535,7 +536,7 @@ async function runRuntimeSmokeJob(store: JobStore, job: JobRecord): Promise<JobR
 async function resolvePresetCommand(
   preset: Exclude<JobPreset, "runtime-smoke" | "browser-loop" | "chatgpt-task">,
   workspaceRoot: string,
-): Promise<{ executable: string; args: string[]; label: string }> {
+): Promise<{ executable: string; args: string[]; label: string; shell?: boolean }> {
   if (preset === "git-status") {
     const git = resolveExecutable("git");
     if (!git) throw new Error("git executable not found on the augmented PATH.");
@@ -559,6 +560,7 @@ async function resolvePresetCommand(
     executable: npm,
     args: ["run", preset],
     label: `Running npm ${preset}`,
+    shell: process.platform === "win32",
   };
 }
 
