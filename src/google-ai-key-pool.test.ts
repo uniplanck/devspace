@@ -18,7 +18,7 @@ assert.deepEqual(defaultBrowserPlannerConfig(), {
   schemaVersion: 1,
   enabled: false,
   provider: "gemini",
-  model: "gemma-4-26b-a4b-it",
+  model: "gemini-3.1-flash-lite",
   failover: "priority",
 });
 
@@ -26,14 +26,14 @@ writeBrowserPlannerConfig({
   schemaVersion: 1,
   enabled: true,
   provider: "gemini",
-  model: "gemma-4-31b-it",
+  model: "gemini-3.5-flash",
   failover: "priority",
 }, home);
 assert.deepEqual(loadBrowserPlannerConfig(home), {
   schemaVersion: 1,
   enabled: true,
   provider: "gemini",
-  model: "gemma-4-31b-it",
+  model: "gemini-3.5-flash",
   failover: "priority",
 });
 
@@ -79,7 +79,7 @@ writeBrowserPlannerConfig({
   schemaVersion: 1,
   enabled: true,
   provider: "gemini",
-  model: "gemma-4-26b-a4b-it",
+  model: "gemini-3.1-flash-lite",
   failover: "priority",
 }, testHome);
 const success = await testGoogleAIKeySlot({

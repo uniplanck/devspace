@@ -12,7 +12,7 @@ import { dirname, join, resolve } from "node:path";
 
 export const GOOGLE_AI_KEYCHAIN_SERVICE = "com.uniplanck.gpt-agent.google-ai";
 export const GOOGLE_AI_PROVIDER = "gemini";
-export const DEFAULT_GOOGLE_AI_MODEL = "gemma-4-26b-a4b-it";
+export const DEFAULT_GOOGLE_AI_MODEL = "gemini-3.1-flash-lite";
 export const GOOGLE_AI_KEY_SLOTS = [1, 2, 3] as const;
 
 export type GoogleAIKeySlot = (typeof GOOGLE_AI_KEY_SLOTS)[number];
@@ -109,9 +109,12 @@ export function loadBrowserPlannerConfig(home: string = homedir()): BrowserPlann
     const provider = typeof raw.provider === "string" && raw.provider.trim()
       ? raw.provider.trim().toLowerCase()
       : fallback.provider;
-    const model = typeof raw.model === "string" && raw.model.trim()
+    const requestedModel = typeof raw.model === "string" && raw.model.trim()
       ? raw.model.trim()
       : fallback.model;
+    const model = requestedModel.startsWith("gemma-4-")
+      ? fallback.model
+      : requestedModel;
     return {
       schemaVersion: 1,
       enabled: raw.enabled === true,
