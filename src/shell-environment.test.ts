@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
-import { delimiter } from "node:path";
+import { posix } from "node:path";
 import {
   commandWithAugmentedPath,
   resolveExecutable,
   shellPathInfo,
 } from "./shell-environment.js";
 
-const existing = ["/usr/bin", "/bin"].join(delimiter);
+const existing = ["/usr/bin", "/bin"].join(posix.delimiter);
 const existingDirs = new Set([
   "/opt/homebrew/bin",
   "/usr/local/bin",
