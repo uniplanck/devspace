@@ -12,7 +12,9 @@ ConditionPathExists=/etc/gae-tunnel/internal-secret
 Type=simple
 User=ubuntu
 Group=ubuntu
-ExecStart=/usr/local/bin/tunnel-client run --profile-file /etc/gae-tunnel/profile.yaml --mcp.extra-headers "X-Devspace-Internal-Key: file:/etc/gae-tunnel/internal-secret" --mcp.discovery-extra-headers "X-Devspace-Internal-Key: file:/etc/gae-tunnel/internal-secret"
+LoadCredential=runtime-api-key:/etc/gae-tunnel/runtime-api-key
+LoadCredential=internal-secret:/etc/gae-tunnel/internal-secret
+ExecStart=/usr/local/bin/tunnel-client run --profile-file /etc/gae-tunnel/profile.yaml --control-plane.api-key file:%d/runtime-api-key --mcp.extra-headers "X-Devspace-Internal-Key: file:%d/internal-secret" --mcp.discovery-extra-headers "X-Devspace-Internal-Key: file:%d/internal-secret"
 Restart=always
 RestartSec=5s
 TimeoutStartSec=45s
@@ -30,7 +32,7 @@ OOMScoreAdjust=700
 TasksMax=128
 LimitNOFILE=8192
 
-# The daemon needs outbound HTTPS and read-only access to its configuration.
+# The daemon only needs outbound HTTPS and read-only access to its profile.
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
@@ -42,7 +44,7 @@ RestrictSUIDSGID=true
 LockPersonality=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 SystemCallArchitectures=native
-ReadOnlyPaths=/etc/gae-tunnel
+ReadOnlyPaths=/etc/gae-tunnel/profile.yaml
 
 [Install]
 WantedBy=multi-user.target
