@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { access, realpath } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
@@ -1972,6 +1972,33 @@ function createMcpServer(
   return server;
 }
 
+function privateUsageSessionKey(req: Request, fallback?: string): string | undefined {
+  const meta = req.body?.params?._meta as Record<string, unknown> | undefined;
+  const conversationCandidates = [
+    meta?.["openai/conversation_id"],
+    meta?.["openai/conversationId"],
+    meta?.["openai/chat_id"],
+    meta?.["openai/chatId"],
+    meta?.conversation_id,
+    meta?.conversationId,
+    meta?.chat_id,
+    meta?.chatId,
+  ];
+  const conversationId = conversationCandidates.find(
+    (value): value is string => typeof value === "string" && value.trim().length > 0,
+  );
+  const privateValue = conversationId
+    ? `conversation:${conversationId.trim()}`
+    : req.auth?.token
+      ? `oauth:${req.auth.token}`
+      : fallback
+        ? `transport:${fallback}`
+        : undefined;
+  return privateValue
+    ? createHash("sha256").update(privateValue).digest("hex").slice(0, 32)
+    : undefined;
+}
+
 
 export function createServer(config = loadConfig()): RunningServer {
   const allowedHosts = config.allowedHosts.includes("*")
@@ -2135,7 +2162,7 @@ export function createServer(config = loadConfig()): RunningServer {
       }
 
       await runWithUsageSession(
-        sessionId ?? transport.sessionId,
+        privateUsageSessionKey(req, sessionId ?? transport.sessionId),
         () => transport.handleRequest(req, res, req.body),
       );
     } catch (error) {
