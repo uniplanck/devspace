@@ -647,7 +647,7 @@ struct DevSpaceToolView: View {
         switch item {
         case .overview: return japanese ? "状態・token・費用を俯瞰" : "Runtime, tokens, and cost at a glance"
         case .analytics: return japanese ? "期間・日別・フォルダ別の利用分析" : "Usage by period, day, and folder"
-        case .runtime: return japanese ? "ローカルGPT-Agentの制御" : "Control the local GPT-Agent runtime"
+        case .runtime: return japanese ? "ローカルDevSpaceの制御" : "Control the local DevSpace runtime"
         case .folders: return japanese ? "許可されたワークスペース" : "Approved workspace roots"
         case .settings: return japanese ? "集計基準・料金・表示・動作" : "Period, pricing, appearance, and behavior"
         }
