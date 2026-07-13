@@ -1,56 +1,85 @@
 # Repository topology
 
-## Source of truth
+## Canonical repositories and branches
 
-`uniplanck/gpt-agent` is the private functional source of truth for GPT-Agent.
+`uniplanck/gpt-agent` is the private functional repository.
 
-The normal development checkout is:
+| Target | Canonical ref | Local clone |
+| --- | --- | --- |
+| Mac GAG | `uniplanck/gpt-agent:main` | `/Users/naomac/MyWorkspace2/GPT-Agent` |
+| EC2 GAE | `uniplanck/gpt-agent:gae` | `/home/ubuntu/GPT-Agent` |
+| Public DevSpace | `uniplanck/devspace:main` | Public derivative |
+| GPT-Agent Tool | `uniplanck/gpt-agent-tool:main` | `/Users/naomac/MyWorkspace2/DevSpaceControl` |
+
+The EC2 snapshot captured before the dedicated release channel was created is preserved at:
+
+```text
+uniplanck/gpt-agent:archive/gae-ec2-20260713
+```
+
+## Finder-first GAG development
+
+The normal GAG development checkout is:
 
 ```text
 /Users/naomac/MyWorkspace2/GPT-Agent
 ```
 
-Feature work is completed and verified in this checkout, committed to the private repository, and then exported to other targets.
+When this Finder checkout contains a newer implementation than GitHub, preserve its work on a branch, rebase or cherry-pick it onto the latest private `main`, run typecheck, tests, and build, and then update `uniplanck/gpt-agent:main`.
 
-## Public fork
+Do not replace a newer Finder implementation with an older GitHub copy merely to make the branch clean.
 
-`uniplanck/devspace` is a generic public derivative, not an independent implementation branch.
+## Public DevSpace derivative
 
-The private repository exports only the shareable DevSpace core through:
+`uniplanck/devspace` is not an independent implementation source. It is generated from private GAG `main` by:
 
 ```text
 scripts/export-public-core.sh
+scripts/sanitize-public-core.mjs
 ```
 
-The export includes the generic macOS `DevSpace Tool` extension and excludes private runtime skills, machine paths, credentials, and environment-specific configuration. Public synchronization must originate from `uniplanck/gpt-agent`; the Tool repository must not update the public fork directly.
+The export keeps generic DevSpace functionality and removes private-only GEX blocks, GAE routing data, machine paths, credentials, and private runtime configuration. Public synchronization originates only from `uniplanck/gpt-agent:main`.
 
-## GPT-Agent Tool
+## GPT-Agent Tool flow
 
-`uniplanck/gpt-agent-tool` is the private source of truth for the branded macOS control application.
+`uniplanck/gpt-agent-tool` is the private source for the branded macOS control application.
 
-Its generic `Public/DevSpaceTool` output is first copied into:
+Its generic `Public/DevSpaceTool` output is first copied into the private GAG repository under:
 
 ```text
-/Users/naomac/MyWorkspace2/GPT-Agent/extensions/devspace-tool
+extensions/devspace-tool
 ```
 
-That change is committed to `uniplanck/gpt-agent`. The GPT-Agent canonical publisher then updates both the private repository and the generic public fork. This keeps the Tool extension and the core on one commit lineage.
+The private GAG publisher then exports the generic version to `uniplanck/devspace`. The Tool repository must not push directly to the public fork or to GAE.
 
-## Runtime clones
+## Dedicated GAE release channel
 
-Mac and EC2 installations are deployment clones, not source repositories.
+`uniplanck/gpt-agent:gae` is the source of truth for GPT-Agent4EC2.
 
-| Runtime | Clone | Source | Runtime profile |
-| --- | --- | --- | --- |
-| Mac GAG | `/Users/naomac/MyWorkspace2/GPT-Agent` | `uniplanck/gpt-agent` | Mac-local GPT-Agent |
-| EC2 GAE | `/home/ubuntu/GPT-Agent` | `uniplanck/gpt-agent` | `DEVSPACE_NODE_ROLE=gae`, EC2 service configuration |
-| Public users | Their DevSpace clone/package | `uniplanck/devspace` | Generic DevSpace |
+GAE starts from reviewed GAG `main` commits and adds EC2 release-channel policy. A push to `main` checks whether a promotion pull request already exists. PR creation uses the authenticated Mac checkout because this repository does not grant GitHub Actions permission to create pull requests:
 
-Runtime-specific values belong in `~/.devspace`, systemd environment files, service units, or other deployment configuration. They must not be maintained as long-lived edits to shared tracked source files.
+```bash
+zsh scripts/propose-gae-sync-local.sh
+```
 
-## GAE update procedure
+The resulting pull request uses:
 
-GAE updates use the private canonical repository and validate a candidate commit in a temporary worktree before changing the active checkout.
+```text
+base: gae
+head: main
+```
+
+That pull request is review-only. It is not auto-merged and does not update EC2.
+
+Before merging GAG changes into `gae`, verify:
+
+1. Typecheck, tests, and build pass.
+2. GAE systemd, memory limits, Tailscale behavior, and Minecraft priority remain valid.
+3. Private Mac-only behavior does not become an active EC2 dependency.
+
+## Manual GAE update
+
+The active EC2 clone must track the private `gae` branch. Updates are manual:
 
 ```bash
 cd /home/ubuntu/GPT-Agent
@@ -58,22 +87,23 @@ bash scripts/gae-update-from-private.sh check
 bash scripts/gae-update-from-private.sh apply
 ```
 
-`gae-update-from-private.sh apply` performs a fast-forward-only update, installs dependencies, runs typecheck, tests, and build, but does not restart `gpt-agent-ec2.service`. Service activation remains a separate explicit operation after verification.
+The updater validates a candidate in a temporary worktree, performs a fast-forward-only source update, installs dependencies, and builds. It does not restart `gpt-agent-ec2.service`.
 
-The updater refuses to run when the GAE checkout is dirty, on a non-main branch, or contains commits absent from private `main`. Existing GAE-specific source changes must therefore be reconciled into the private canonical repository or moved into external runtime configuration before automated updates are enabled.
+Do not configure cron, systemd timers, GitHub webhooks, unattended pulls, or automatic service restarts for GAE.
 
 ## Required flow
 
 ```text
-GPT-Agent feature change
-  -> private uniplanck/gpt-agent
-  -> sanitized export to uniplanck/devspace
-  -> Mac/GAE runtime clones pull the appropriate canonical version
+Finder GAG evolution
+  -> verify against latest private main
+  -> uniplanck/gpt-agent:main
+  -> sanitized generic export to uniplanck/devspace:main
+  -> review PR from main to gae when GAE should receive the change
+  -> uniplanck/gpt-agent:gae
+  -> manual EC2 update only
 
-GPT-Agent Tool change
-  -> private uniplanck/gpt-agent-tool
-  -> generic DevSpace Tool copied into private uniplanck/gpt-agent
-  -> sanitized export to uniplanck/devspace
+GPT-Agent Tool evolution
+  -> uniplanck/gpt-agent-tool:main
+  -> generic Tool copied into uniplanck/gpt-agent:main
+  -> public export and optional reviewed GAE promotion
 ```
-
-Direct Tool-to-public or Tool-to-GAE synchronization is prohibited because it bypasses the functional source of truth.

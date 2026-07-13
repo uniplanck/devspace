@@ -1,0 +1,51 @@
+name: Propose GAG updates to GAE
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: propose-gag-to-gae
+  cancel-in-progress: true
+
+jobs:
+  propose:
+    if: github.repository == 'uniplanck/gpt-agent'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Inspect GAE release branch
+        id: diff
+        run: |
+          git fetch origin gae
+          count="$(git rev-list --count origin/gae..HEAD)"
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+          echo "GAG commits pending for GAE: $count"
+
+      - name: Find existing promotion pull request
+        if: steps.diff.outputs.count != '0'
+        id: existing
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          number="$(gh pr list --base gae --head main --state open --json number --jq '.[0].number // empty')"
+          echo "number=$number" >> "$GITHUB_OUTPUT"
+
+      - name: Report manual promotion required
+        if: steps.diff.outputs.count != '0' && steps.existing.outputs.number == ''
+        run: |
+          echo "::warning::GAG main is ahead of GAE and no promotion PR is open."
+          echo "Run zsh scripts/propose-gae-sync-local.sh from an authenticated Mac checkout to create the review PR."
+
+      - name: Report existing promotion pull request
+        if: steps.diff.outputs.count != '0' && steps.existing.outputs.number != ''
+        run: |
+          echo "Promotion pull request number ${{ steps.existing.outputs.number }} is already open and now includes the latest main commits."
