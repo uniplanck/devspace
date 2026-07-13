@@ -36,6 +36,11 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Validate shell scripts
+        if: runner.os != 'Windows'
+        shell: bash
+        run: bash -n scripts/quickstart-tailscale.sh scripts/devspace-control.sh
+
       - name: Typecheck
         run: npm run typecheck
 
@@ -44,6 +49,14 @@ jobs:
 
       - name: Build
         run: npm run build
+
+      - name: Typecheck DevSpace Tool
+        if: runner.os == 'macOS'
+        run: |
+          swiftc -parse-as-library -typecheck -framework SwiftUI -framework AppKit \
+            extensions/devspace-tool/UsageCore.swift \
+            extensions/devspace-tool/DevSpaceToolView.swift \
+            extensions/devspace-tool/DevSpaceTool.swift
 
       - name: Doctor
         run: node dist/cli.js doctor
