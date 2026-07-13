@@ -6,245 +6,359 @@
 
 <h1 align="center">DevSpace</h1>
 
-<p align="center">Bring a Codex-style coding workflow to ChatGPT.</p>
+<p align="center">ChatGPTから、自分のMac・Linux環境にある開発フォルダを安全に操作するためのセルフホストMCPサーバー。</p>
 
 <p align="center">
-  <a href="https://www.npmjs.com/package/@waishnav/devspace"><img alt="npm" src="https://img.shields.io/npm/v/%40waishnav%2Fdevspace?style=flat-square" /></a>
-  <a href="https://github.com/Waishnav/devspace/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/Waishnav/devspace/ci.yml?style=flat-square&branch=main" /></a>
-  <a href="https://github.com/Waishnav/devspace/blob/main/LICENSE"><img alt="License" src="https://img.shields.io/npm/l/%40waishnav%2Fdevspace?style=flat-square" /></a>
+  <strong>日本語</strong> ｜ <a href="README.en.md">English</a>
 </p>
 
-[![DevSpace connected to ChatGPT](https://raw.githubusercontent.com/Waishnav/devspace/main/docs/assets/devspace-screenshot.png)](https://raw.githubusercontent.com/Waishnav/devspace/main/docs/assets/devspace-screenshot.png)
+> [!IMPORTANT]
+> DevSpaceは、許可したローカルフォルダに対してファイル編集・検索・Terminal実行を行える強力なツールです。最初は作業対象のプロジェクトフォルダだけを許可し、ホームディレクトリ全体や秘密情報を含むフォルダを登録しないでください。
 
-**Give ChatGPT a secure connection to your own machine and Turn ChatGPT into Codex**
+## できること
 
-DevSpace is a self-hosted MCP server that lets ChatGPT read, edit, search, and run code in your real local projects — your files, your tools, your terminal — without uploading anything to a third party. You run it on your machine, expose it through a tunnel you control, and approve the connection with a password only you have.
+DevSpaceを接続すると、ChatGPTは許可された範囲内で次を実行できます。
 
-## Sponsors and Special Thanks
+- ファイルの読み取り・新規作成・部分編集
+- コード検索、ディレクトリ確認
+- テスト、build、Git確認などのTerminalコマンド
+- 並列作業用のGit worktree
+- `AGENTS.md` / `CLAUDE.md` のプロジェクトルール読込
+- ローカルskills・subagent連携
+- 利用token・概算API費用・フォルダ別利用状況の表示
 
-<table>
-  <thead>
-    <tr>
-      <th>Sponsor</th>
-      <th>About</th>
-    </tr>
-  </thead>
-  <tbody>
-    <tr>
-      <td align="center" width="220">
-        <a href="https://rebates.ai/">
-          <img
-            src="https://app.rebates.ai/brand/rebates-lockup.svg"
-            alt="Rebates"
-            width="170"
-          >
-        </a>
-      </td>
-      <td>
-        <strong>The ads in your terminal pay you.</strong><br><br>
-        <a href="https://rebates.ai/">Rebates</a> adds one optional
-        sponsored footer to your coding agent and pays you cash back for every
-        session in which it is shown. Turn it off at any time.
-      </td>
-    </tr>
-  </tbody>
-</table>
+macOS向けの **DevSpace Tool** では、次の汎用UIを利用できます。
 
-<p>
-  DevSpace is open to new sponsors.
-  <a href="https://x.com/wshxnv">Get in touch to become one.</a>
-</p>
+- 日本語 / English / OS言語への自動切替
+- Overview / Analytics / Runtime / Folders / Settings
+- DevSpaceのONLINE/OFFLINE確認と起動・停止
+- 許可フォルダ一覧
+- token・呼出回数・概算API費用の期間別集計
+- Aurora / Monochrome / Minimalテーマ
+- MCP URL、診断コマンド、安全なOwner Password取得コマンドのコピー
 
-## Installation
+## 最短セットアップ：macOS + Tailscale Funnel
 
-DevSpace requires Node `>=22.19 <27`.
+この方法では、DevSpaceを `127.0.0.1:7676` だけで待ち受けさせ、Tailscale FunnelでHTTPS公開します。
 
-Install the DevSpace CLI:
+ChatGPT Webはインターネット側からMCPサーバーへ接続するため、tailnet内だけに公開する **Tailscale ServeではなくFunnel** を使用します。FunnelのURLは公開URLですが、DevSpace側でOwner Password承認が必要です。
+
+### 0. 必要なもの
+
+- macOS 14以降、またはLinux
+- Git
+- Node.js `22.19以上、27未満`
+- npm
+- Tailscaleアカウント
+- ChatGPTでDeveloper modeとカスタムAppを利用できる環境
+
+確認：
 
 ```bash
-npm install -g @waishnav/devspace
+node -v && npm -v && git --version
 ```
 
-Then initialize and start the server:
+Node.jsがない場合のmacOS例：
 
 ```bash
-devspace init
-devspace serve
+brew install node@22 && brew link --overwrite --force node@22
 ```
 
-Or run it without a global install:
+### 1. Tailscaleを導入してログイン
+
+macOSでは、Tailscale公式のStandalone版またはCLIを利用できる構成を推奨します。
+
+Homebrew例：
 
 ```bash
-npx @waishnav/devspace init
-npx @waishnav/devspace serve
+brew install --cask tailscale-app && open -a Tailscale
 ```
 
-During setup, DevSpace asks for:
+ログイン後、Terminalで確認します。
 
-- the local project folders ChatGPT is allowed to open through DevSpace
-- the local port, usually `7676`
-- your public HTTPS base URL from Cloudflare Tunnel, ngrok, Pinggy, Tailscale Funnel, or
-  another reverse proxy
-
-Use the public origin without `/mcp` during setup:
-
-```text
-https://your-tunnel-host.example.com
+```bash
+tailscale status
 ```
 
-You will configure your MCP client with the public `/mcp` URL after setup.
+`tailscale: command not found` の場合は、Tailscaleアプリが提供するCLIの場所を確認するか、公式ドキュメントのCLI対応版を導入してください。
 
-When the client connects, DevSpace opens an Owner password approval page. Enter
-the Owner password printed by `devspace init`. It is also stored in:
+### 2. DevSpaceをcloneして自動セットアップ
 
-```text
-~/.devspace/auth.json
+`~/Projects` の部分を、ChatGPTに操作を許可するフォルダへ変更してください。
+
+```bash
+git clone https://github.com/uniplanck/devspace.git ~/devspace && cd ~/devspace && bash ./scripts/quickstart-tailscale.sh ~/Projects
 ```
 
-Keep that password private.
+このスクリプトは次を順番に実行します。
 
-## Connect Your MCP Client
-
-The default local endpoint is:
-
-```text
-http://127.0.0.1:7676/mcp
-```
-
-Most users should connect through a public HTTPS tunnel:
-
-```text
-https://your-tunnel-host.example.com/mcp
-```
+1. Node.js・Git・Tailscaleを確認
+2. `npm ci`、typecheck、test、build
+3. `npm link` で `devspace` コマンドを登録
+4. Tailscale Funnelを `7676` へ接続
+5. `~/.devspace/config.json`、`auth.json`、`tool.json`を権限`600`で作成
+6. DevSpaceをFull tool modeでバックグラウンド起動
+7. `https://<端末名>.<tailnet>.ts.net/mcp` を表示
+8. macOSではMCP URLをクリップボードへコピー
 
 > [!NOTE]
-> Using DevSpace as an MCP connector isn't against OpenAI's Usage Policies — it's
-> a standard custom App/connector setup, and writing or running code isn't a
-> restricted use case. But your account is governed by your usage, not by
-> DevSpace. Don't point it at anything that would violate your provider's terms.
-> Used normally, you're fine. (Based on OpenAI's Usage Policies and Service Terms
-> as of June 2026.)
+> 初回の `tailscale funnel` 実行時は、ブラウザでFunnel有効化の承認画面が開く場合があります。
 
-## What ChatGPT Can Do
-
-Once connected, ChatGPT can open one of your approved project folders as a
-workspace. From there, it can inspect the repo, make scoped edits, run commands,
-and show you what changed.
-
-DevSpace gives ChatGPT tools to:
-
-- read, write, and edit files inside the opened workspace
-- search code and inspect directories
-- run shell commands for tests, builds, git, and package scripts
-- use isolated Git worktrees for parallel coding sessions
-- follow project instructions from `AGENTS.md` and `CLAUDE.md`
-- discover local agent skills from your skill folders
-- show tool cards and optional change summaries in ChatGPT Apps-compatible hosts
-
-## Mental Model
-
-DevSpace is remote access to selected local folders.
-
-You decide which roots are allowed. The MCP client still has powerful local
-capabilities inside an opened workspace, including shell execution. Treat a
-connected client like a trusted coding partner with access to your machine.
-
-For a normal ChatGPT coding session:
-
-1. Start your tunnel.
-2. Run `devspace serve`.
-3. Connect the MCP client to your public `/mcp` URL.
-4. Approve the connection with the Owner password.
-5. Ask ChatGPT to open a project inside one of your allowed roots.
-
-## Platform Support
-
-DevSpace supports Linux, macOS, and Windows environments with a Bash-compatible
-shell.
-
-| Platform                                          | Status            | Notes                                          |
-| ------------------------------------------------- | ----------------- | ---------------------------------------------- |
-| Linux                                             | Supported         | Requires Node, npm, Git, and Bash.             |
-| macOS                                             | Supported         | Requires Node, npm, Git, and Bash.             |
-| Windows with Git Bash, WSL, MSYS2, or Cygwin Bash | Supported         | Git Bash is the simplest native Windows setup. |
-| Windows PowerShell or `cmd.exe` only              | Not supported yet | Install Git Bash or use WSL.                   |
-
-Run this to inspect your local setup:
+### 3. 状態確認
 
 ```bash
+cd ~/devspace && bash ./scripts/devspace-control.sh status
+```
+
+正常時の目安：
+
+- DevSpace runtime: `ONLINE`
+- Local MCP: `http://127.0.0.1:7676/mcp`
+- Public MCP: `https://xxxx.ts.net/mcp`
+- `devspace doctor` に重大なエラーがない
+
+### 4. ChatGPTへ接続
+
+OpenAIの現在の案内では、次の順番です。画面名はChatGPTの更新により多少変わる場合があります。
+
+1. ChatGPTの **Settings → Security and login** を開く
+2. **Developer mode** を有効化
+3. **Settings → Plugins**、Apps、またはConnectors画面を開く
+4. `+` からdeveloper-mode Appを作成
+5. Server URLへ、スクリプトが表示したURLを登録
+
+```text
+https://<端末名>.<tailnet>.ts.net/mcp
+```
+
+6. 接続時にDevSpaceの承認画面が出たらOwner Passwordを入力
+
+Owner PasswordそのものをREADMEやチャットへ貼らず、Terminalからクリップボードへ入れてください。
+
+macOS：
+
+```bash
+python3 -c 'import json,pathlib; print(json.loads((pathlib.Path.home()/".devspace/auth.json").read_text())["ownerToken"], end="")' | pbcopy
+```
+
+Linuxで表示する場合：
+
+```bash
+python3 -c 'import json,pathlib; print(json.loads((pathlib.Path.home()/".devspace/auth.json").read_text())["ownerToken"])'
+```
+
+### 5. 接続テスト
+
+ChatGPTで次のように依頼します。
+
+```text
+DevSpaceを使い、許可されたworkspace候補だけを一覧表示してください。ファイル変更やTerminal実行はしないでください。
+```
+
+次に、特定のプロジェクトを読み取り専用で確認します。
+
+```text
+<プロジェクトの絶対パス> をworkspaceとして開き、git branch、git status --short、最新commitだけ報告してください。変更・commit・pushは行わないでください。
+```
+
+## 日常操作
+
+### 起動
+
+```bash
+cd ~/devspace && bash ./scripts/devspace-control.sh start
+```
+
+### 停止
+
+```bash
+cd ~/devspace && bash ./scripts/devspace-control.sh stop
+```
+
+Funnelも停止する場合：
+
+```bash
+cd ~/devspace && bash ./scripts/devspace-control.sh stop --with-funnel
+```
+
+### 再起動
+
+```bash
+cd ~/devspace && bash ./scripts/devspace-control.sh restart
+```
+
+### 状態確認
+
+```bash
+cd ~/devspace && bash ./scripts/devspace-control.sh status
+```
+
+### ログ
+
+```bash
+cd ~/devspace && bash ./scripts/devspace-control.sh logs
+```
+
+### MCP URLをコピー
+
+```bash
+cd ~/devspace && bash ./scripts/devspace-control.sh url
+```
+
+### Owner Password取得コマンドをコピー
+
+Owner Password本体ではなく、安全な取得コマンドをクリップボードへ入れます。
+
+```bash
+cd ~/devspace && bash ./scripts/devspace-control.sh owner-cmd
+```
+
+## DevSpace Tool（macOS GUI）
+
+```bash
+cd ~/devspace/extensions/devspace-tool && bash ./build-macos.sh && open ".build/DevSpace Tool.app"
+```
+
+アプリ内の **Settings → Language** から、`Automatic / English / 日本語` を即時切替できます。
+
+メニューバーの **DevSpace** から以下を実行できます。
+
+- MCP URLをコピー
+- 診断コマンドをコピー
+- Owner Passwordそのものではなく取得コマンドをコピー
+- 設定フォルダを開く
+- 日本語 / Englishセットアップガイドを開く
+
+Runtimeの起動・停止を有効にする場合、`~/.devspace/tool.json` を設定します。自動セットアップでは作成済みです。
+
+```json
+{
+  "host": "127.0.0.1",
+  "port": 7676,
+  "runtimeCommand": "DEVSPACE_TOOL_MODE=full devspace serve",
+  "runtimeProcessMatch": "devspace.*serve",
+  "usdJpyRate": 160
+}
+```
+
+## 手動セットアップ
+
+自動スクリプトを使わない場合：
+
+```bash
+git clone https://github.com/uniplanck/devspace.git ~/devspace
+cd ~/devspace
+npm ci
+npm run typecheck
+npm test
+npm run build
+npm link
+devspace init
+tailscale funnel --bg 7676
+DEVSPACE_TOOL_MODE=full devspace serve
+```
+
+`devspace init` では次を入力します。
+
+- 許可するプロジェクトフォルダ
+- Port: 通常 `7676`
+- Public base URL: `https://xxxx.ts.net`（`/mcp`を付けない）
+
+ChatGPTへ登録するURLでは、末尾に `/mcp` を付けます。
+
+## 更新
+
+```bash
+cd ~/devspace && git pull --ff-only && npm ci && npm run typecheck && npm test && npm run build && npm link
+```
+
+その後、再起動します。
+
+```bash
+bash ./scripts/devspace-control.sh stop && bash ./scripts/devspace-control.sh start
+```
+
+## セキュリティ
+
+- `allowedRoots` は必要なプロジェクトだけに限定する
+- `~/.devspace/auth.json` をGitへcommitしない
+- Owner Password、token、cookie、秘密鍵をチャットへ貼らない
+- 最初は読み取り専用の依頼で接続テストする
+- main push、本番deploy、課金操作などはプロジェクトの`AGENTS.md`で禁止・承認制にする
+- 不要時はDevSpaceとFunnelを停止する
+- 信頼できないMCPサーバーや不明なtool定義へ接続しない
+- 停止スクリプトは記録済みPIDがDevSpaceプロセスであることを確認し、未知のプロセスをkillしない
+
+## トラブルシューティング
+
+### ChatGPTから接続できない
+
+```bash
+cd ~/devspace
+bash ./scripts/devspace-control.sh status
+tailscale funnel status
 devspace doctor
 ```
 
-## Documentation
+確認項目：
 
-- [Setup Guide](https://github.com/Waishnav/devspace/blob/main/docs/setup.md)
-- [ChatGPT Coding Workflow](https://github.com/Waishnav/devspace/blob/main/docs/chatgpt-coding-workflow.md)
-- [Configuration Reference](https://github.com/Waishnav/devspace/blob/main/docs/configuration.md)
-- [Security Model](https://github.com/Waishnav/devspace/blob/main/docs/security.md)
-- [Troubleshooting Gotchas](https://github.com/Waishnav/devspace/blob/main/docs/gotchas.md)
+- DevSpaceが `127.0.0.1:7676` で起動している
+- Public URLが `https://` である
+- ChatGPT登録URLの末尾が `/mcp`
+- Tailscale Funnelが有効
+- MagicDNS・HTTPS・Funnel権限が有効
+- DNS反映待ちではない（初回は数分かかる場合あり）
 
-## Philosophy
+### `401` が返る
 
-Every piece of software is becoming conversational. Natural language is
-redefining how we interact with tools, workflows, and systems.
+未承認状態では正常です。ChatGPTの接続画面からOwner Password承認を完了してください。
 
-My bet is that ChatGPT becomes the operating system for everything. Once we
-reach AGI, we will simply talk to ChatGPT, and it will prompt, coordinate, and
-orchestrate sub-agents that set up the right loops for us.
-
-We are not there yet.
-
-DevSpace is one attempt to fast-forward that future: a way for MCP-capable
-hosts like ChatGPT and Claude to work directly with local project files through
-explicit, inspectable tools.
-
-## Built by Waishnav
-
-I'm Waishnav, I like building opinionated products and tools, and DevSpace is one example of that.
-This year, I started my journey to build a single-person and multiple-agents company doing multiple millions in
-revenue. If you want to watch the failures, wins, lessons, and everything in
-between, come hang out with me on [X](https://x.com/wshxnv).
-
-## More from me
-
-<table>
-  <thead>
-    <tr>
-      <th>Project</th>
-      <th>About</th>
-    </tr>
-  </thead>
-  <tbody>
-    <tr>
-      <td align="center" width="220">
-        <a href="https://gitcms.dev/">
-          <img
-            src="https://gitcms.dev/brand/gitcms-logo.svg"
-            alt="GitCMS"
-            width="48"
-          /><br />
-          <strong>GitCMS</strong>
-        </a>
-      </td>
-      <td>
-        <strong>Modern CMS and tooling for markdown based content sites — built for agents and humans.</strong><br><br>
-        Visual editing, editorial workflow, and ChatGPT/Claude content agents, with
-        every post and page stored as files in your repo.
-        <a href="https://gitcms.dev/">Learn more</a>.
-      </td>
-    </tr>
-  </tbody>
-</table>
-
-## Local Development
-
-For working on DevSpace itself:
+### Node.jsのnative dependency error
 
 ```bash
-npm install --include=dev
-npm run dev
+cd ~/devspace && npm rebuild better-sqlite3 && npm run build && devspace doctor
+```
+
+### 設定をやり直す
+
+```bash
+devspace init --force
+```
+
+## 主なCLI
+
+```text
+devspace serve
+devspace init
+devspace init --force
+devspace doctor
+devspace config get
+devspace config set publicBaseUrl <url|null>
+devspace agents ls
+devspace jobs ls
+devspace computer doctor
+```
+
+## 対応環境
+
+| 環境 | 状態 | 備考 |
+|---|---|---|
+| macOS | 対応 | GUIのDevSpace Toolあり |
+| Linux | 対応 | Bash、Node.js、Gitが必要 |
+| Windows + WSL / Git Bash | 対応 | PowerShell単体は未対応 |
+
+## 開発
+
+```bash
+npm ci
 npm run typecheck
 npm test
 npm run build
 npm run start
 ```
+
+## クレジット
+
+DevSpaceは [Waishnav/devspace](https://github.com/Waishnav/devspace) を基盤とするforkです。原作者とコントリビューターに感謝します。
+
+ライセンス: MIT
