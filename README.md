@@ -80,14 +80,14 @@ brew install --cask tailscale-app && open -a Tailscale
 tailscale status
 ```
 
-`t​​ailscale: command not found` の場合は、Tailscaleアプリが提供するCLIの場所を確認するか、公式ドキュメントのCLI対応版を導入してください。
+`tailscale: command not found` の場合は、Tailscaleアプリが提供するCLIの場所を確認するか、公式ドキュメントのCLI対応版を導入してください。
 
 ### 2. DevSpaceをcloneして自動セットアップ
 
 `~/Projects` の部分を、ChatGPTに操作を許可するフォルダへ変更してください。
 
 ```bash
-git clone https://github.com/uniplanck/devspace.git ~/devspace && cd ~/devspace && ./scripts/quickstart-tailscale.sh ~/Projects
+git clone https://github.com/uniplanck/devspace.git ~/devspace && cd ~/devspace && bash ./scripts/quickstart-tailscale.sh ~/Projects
 ```
 
 このスクリプトは次を順番に実行します。
@@ -96,7 +96,7 @@ git clone https://github.com/uniplanck/devspace.git ~/devspace && cd ~/devspace 
 2. `npm ci`、typecheck、test、build
 3. `npm link` で `devspace` コマンドを登録
 4. Tailscale Funnelを `7676` へ接続
-5. `~/.devspace/config.json` と `auth.json` を権限`600`で作成
+5. `~/.devspace/config.json`、`auth.json`、`tool.json`を権限`600`で作成
 6. DevSpaceをFull tool modeでバックグラウンド起動
 7. `https://<端末名>.<tailnet>.ts.net/mcp` を表示
 8. macOSではMCP URLをクリップボードへコピー
@@ -107,7 +107,7 @@ git clone https://github.com/uniplanck/devspace.git ~/devspace && cd ~/devspace 
 ### 3. 状態確認
 
 ```bash
-cd ~/devspace && ./scripts/devspace-control.sh status
+cd ~/devspace && bash ./scripts/devspace-control.sh status
 ```
 
 正常時の目安：
@@ -119,11 +119,11 @@ cd ~/devspace && ./scripts/devspace-control.sh status
 
 ### 4. ChatGPTへ接続
 
-OpenAIの現在の案内では、次の順番です。
+OpenAIの現在の案内では、次の順番です。画面名はChatGPTの更新により多少変わる場合があります。
 
 1. ChatGPTの **Settings → Security and login** を開く
 2. **Developer mode** を有効化
-3. **Settings → Plugins** またはPlugins画面を開く
+3. **Settings → Plugins**、Apps、またはConnectors画面を開く
 4. `+` からdeveloper-mode Appを作成
 5. Server URLへ、スクリプトが表示したURLを登録
 
@@ -166,37 +166,43 @@ DevSpaceを使い、許可されたworkspace候補だけを一覧表示してく
 ### 起動
 
 ```bash
-cd ~/devspace && ./scripts/devspace-control.sh start
+cd ~/devspace && bash ./scripts/devspace-control.sh start
 ```
 
 ### 停止
 
 ```bash
-cd ~/devspace && ./scripts/devspace-control.sh stop
+cd ~/devspace && bash ./scripts/devspace-control.sh stop
 ```
 
 Funnelも停止する場合：
 
 ```bash
-cd ~/devspace && ./scripts/devspace-control.sh stop --with-funnel
+cd ~/devspace && bash ./scripts/devspace-control.sh stop --with-funnel
+```
+
+### 再起動
+
+```bash
+cd ~/devspace && bash ./scripts/devspace-control.sh restart
 ```
 
 ### 状態確認
 
 ```bash
-cd ~/devspace && ./scripts/devspace-control.sh status
+cd ~/devspace && bash ./scripts/devspace-control.sh status
 ```
 
 ### ログ
 
 ```bash
-cd ~/devspace && ./scripts/devspace-control.sh logs
+cd ~/devspace && bash ./scripts/devspace-control.sh logs
 ```
 
 ### MCP URLをコピー
 
 ```bash
-cd ~/devspace && ./scripts/devspace-control.sh url
+cd ~/devspace && bash ./scripts/devspace-control.sh url
 ```
 
 ### Owner Password取得コマンドをコピー
@@ -204,18 +210,26 @@ cd ~/devspace && ./scripts/devspace-control.sh url
 Owner Password本体ではなく、安全な取得コマンドをクリップボードへ入れます。
 
 ```bash
-cd ~/devspace && ./scripts/devspace-control.sh owner-cmd
+cd ~/devspace && bash ./scripts/devspace-control.sh owner-cmd
 ```
 
 ## DevSpace Tool（macOS GUI）
 
 ```bash
-cd ~/devspace/extensions/devspace-tool && ./build-macos.sh && open ".build/DevSpace Tool.app"
+cd ~/devspace/extensions/devspace-tool && bash ./build-macos.sh && open ".build/DevSpace Tool.app"
 ```
 
 アプリ内の **Settings → Language** から、`Automatic / English / 日本語` を即時切替できます。
 
-Runtimeの起動・停止を有効にする場合、`~/.devspace/tool.json` を設定します。
+メニューバーの **DevSpace** から以下を実行できます。
+
+- MCP URLをコピー
+- 診断コマンドをコピー
+- Owner Passwordそのものではなく取得コマンドをコピー
+- 設定フォルダを開く
+- 日本語 / Englishセットアップガイドを開く
+
+Runtimeの起動・停止を有効にする場合、`~/.devspace/tool.json` を設定します。自動セットアップでは作成済みです。
 
 ```json
 {
@@ -261,7 +275,7 @@ cd ~/devspace && git pull --ff-only && npm ci && npm run typecheck && npm test &
 その後、再起動します。
 
 ```bash
-./scripts/devspace-control.sh stop && ./scripts/devspace-control.sh start
+bash ./scripts/devspace-control.sh stop && bash ./scripts/devspace-control.sh start
 ```
 
 ## セキュリティ
@@ -273,13 +287,15 @@ cd ~/devspace && git pull --ff-only && npm ci && npm run typecheck && npm test &
 - main push、本番deploy、課金操作などはプロジェクトの`AGENTS.md`で禁止・承認制にする
 - 不要時はDevSpaceとFunnelを停止する
 - 信頼できないMCPサーバーや不明なtool定義へ接続しない
+- 停止スクリプトは記録済みPIDがDevSpaceプロセスであることを確認し、未知のプロセスをkillしない
 
 ## トラブルシューティング
 
 ### ChatGPTから接続できない
 
 ```bash
-./scripts/devspace-control.sh status
+cd ~/devspace
+bash ./scripts/devspace-control.sh status
 tailscale funnel status
 devspace doctor
 ```
