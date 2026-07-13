@@ -504,7 +504,18 @@ function fullUsageSummaryText(entry: UsageEntry): string {
 
 function compactUsageSummaryText(entry: UsageEntry): string {
   const label = runtimeUsageLabel();
-  return `${label} · GPT-5.6推定 | 今回 in ~${compactTokenCount(entry.inputTokens)} / out ~${compactTokenCount(entry.outputTokens)} tok · ${compactYenRange(entry.estimatedJpy, entry.estimatedJpyMax)} · ${compactDuration(entry.durationMs)} | このChat累計 in ~${compactTokenCount(entry.sessionInputTokens)} / out ~${compactTokenCount(entry.sessionOutputTokens)} tok · ${compactYenRange(entry.sessionEstimatedJpy, entry.sessionEstimatedJpyMax)} · ${entry.sessionCalls} calls · ${entry.sessionErrors} errors`;
+  return [
+    `**${label} · GPT-5.6推定**`,
+    "",
+    "| 指標 | 今回 | このChat累計 |",
+    "|---|---:|---:|",
+    `| 入力 | 約${compactTokenCount(entry.inputTokens)} tok | 約${compactTokenCount(entry.sessionInputTokens)} tok |`,
+    `| 出力 | 約${compactTokenCount(entry.outputTokens)} tok | 約${compactTokenCount(entry.sessionOutputTokens)} tok |`,
+    `| 推定料金 | ${compactYenRange(entry.estimatedJpy, entry.estimatedJpyMax)} | ${compactYenRange(entry.sessionEstimatedJpy, entry.sessionEstimatedJpyMax)} |`,
+    `| 処理時間 | ${compactDuration(entry.durationMs)} | ${compactDuration(entry.sessionDurationMs)} |`,
+    `| 呼出 | 1 | ${entry.sessionCalls} |`,
+    `| エラー | ${entry.error ? 1 : 0} | ${entry.sessionErrors} |`,
+  ].join("\n");
 }
 
 export function appendUsageToContent<T extends ToolContent>(
