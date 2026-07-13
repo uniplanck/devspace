@@ -47,4 +47,5 @@ jobs:
 
       - name: Report existing promotion pull request
         if: steps.diff.outputs.count != '0' && steps.existing.outputs.number != ''
-        run: echo "Promotion pull request #${{ steps.existing.outputs.number }} is already open and now includes the latest main commits."
+        run: |
+          echo "Promotion pull request number ${{ steps.existing.outputs.number }} is already open and now includes the latest main commits."
