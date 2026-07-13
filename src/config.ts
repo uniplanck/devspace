@@ -253,6 +253,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     env.DEVSPACE_PUBLIC_BASE_URL ?? files.config.publicBaseUrl ?? localPublicBaseUrl(host, port),
   );
   const openWorkspacePayload = parseOpenWorkspacePayloadMode(env.DEVSPACE_OPEN_WORKSPACE_PAYLOAD);
+  const stateDir = resolve(expandHomePath(env.DEVSPACE_STATE_DIR ?? files.config.stateDir ?? defaultStateDir()));
   const derivedAllowedHosts = [
     "localhost",
     "127.0.0.1",
@@ -287,7 +288,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
       env.DEVSPACE_DESIGN_AUDIT_ALLOWED_HOSTS,
       ["localhost", "127.0.0.1", "::1"],
     ),
-    stateDir: resolve(expandHomePath(env.DEVSPACE_STATE_DIR ?? files.config.stateDir ?? defaultStateDir())),
+    stateDir,
     worktreeRoot: resolve(expandHomePath(env.DEVSPACE_WORKTREE_ROOT ?? files.config.worktreeRoot ?? defaultWorktreeRoot())),
     skillsEnabled: env.DEVSPACE_SKILLS === undefined ? true : parseBoolean(env.DEVSPACE_SKILLS),
     skillPaths: parsePathList(env.DEVSPACE_SKILL_PATHS),

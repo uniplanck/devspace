@@ -1925,6 +1925,7 @@ function createMcpServer(
   return server;
 }
 
+
 export function createServer(config = loadConfig()): RunningServer {
   const allowedHosts = config.allowedHosts.includes("*")
     ? undefined
@@ -1976,6 +1977,7 @@ export function createServer(config = loadConfig()): RunningServer {
 
     next();
   });
+
 
   app.use(
     mcpAuthRouter({
