@@ -94,25 +94,31 @@ start_runtime() {
 }
 
 stop_runtime() {
-  local port pid
+  local port pid process_command
   port="$(read_config port)" || port="7676"
 
   if [[ -f "$PID_PATH" ]]; then
     pid="$(cat "$PID_PATH")"
-    if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+    [[ "$pid" =~ ^[0-9]+$ ]] || fail "Invalid PID file: $PID_PATH"
+
+    if kill -0 "$pid" 2>/dev/null; then
+      process_command="$(ps -p "$pid" -o command= 2>/dev/null || true)"
+      [[ "$process_command" == *devspace*serve* ]] || fail "PID $pid is not a DevSpace serve process. Refusing to terminate it."
+
       kill "$pid"
       for _ in 1 2 3 4 5; do
         kill -0 "$pid" 2>/dev/null || break
         sleep 1
       done
       if kill -0 "$pid" 2>/dev/null; then
-        printf 'Runtime did not exit after SIGTERM. PID: %s\n' "$pid" >&2
-        return 1
+        fail "Runtime did not exit after SIGTERM. PID: $pid"
       fi
     fi
     rm -f "$PID_PATH"
-  elif port_is_open "$port"; then
-    fail "Port $port is open, but no DevSpace PID file exists. Stop the process that owns the port manually; this script will not kill an unknown process."
+  fi
+
+  if port_is_open "$port"; then
+    fail "Port $port is still open, but no verified DevSpace PID is available. Stop the owning process manually; this script will not kill an unknown process."
   fi
 
   printf 'DevSpace stopped.\n'
