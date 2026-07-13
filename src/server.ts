@@ -338,12 +338,15 @@ function logFailedToolResponse(
   fields: Omit<ToolLogFields, "success" | "durationMs" | "error">,
   content: ToolContent[],
   startedAt: number,
-): void {
+  usageContext: { usageSessionId?: string; workspaceRoot?: string } = {},
+): ToolContent[] {
   const durationMs = Math.round(performance.now() - startedAt);
   const outputChars = textContentChars(content);
-  recordObservedToolUsage({
+  const usage = recordObservedToolUsage({
     tool: fields.tool,
+    usageSessionId: usageContext.usageSessionId,
     workspaceId: fields.workspaceId,
+    workspaceRoot: usageContext.workspaceRoot,
     path: fields.path,
     observedChars: outputChars,
     savedChars: 0,
@@ -357,6 +360,7 @@ function logFailedToolResponse(
     durationMs,
     error: toolErrorPreview(content),
   });
+  return appendUsageToContent(content, usage, config.usageContent);
 }
 
 function textBlock(text: string): ToolContent {
@@ -940,7 +944,7 @@ function createMcpServer(
       ...toolWidgetDescriptorMeta(config, "workspace"),
       annotations: { readOnlyHint: true },
     },
-    async ({ path, mode, baseRef }) => {
+    async ({ path, mode, baseRef }, extra) => {
       const startedAt = performance.now();
       const compact = config.openWorkspacePayload === "compact";
       const { workspace, agentsFiles, availableAgentsFiles } = await workspaces.openWorkspace({ path, mode, baseRef });
@@ -1075,6 +1079,20 @@ function createMcpServer(
         },
       };
       structuredContent.metrics.payloadCharacters = JSON.stringify(structuredContent).length;
+      const usage = recordObservedToolUsage({
+        tool: "open_workspace",
+        usageSessionId: extra.sessionId,
+        workspaceId: workspace.id,
+        workspaceRoot: workspace.root,
+        path: workspace.root,
+        observedChars: structuredContent.metrics.payloadCharacters + textContentChars(resultContent),
+        savedChars: Math.max(0, fullInstructionCharacters - returnedInstructionCharacters),
+        inputChars: String(path).length + String(mode ?? "checkout").length + String(baseRef ?? "").length,
+        outputChars: structuredContent.metrics.payloadCharacters + textContentChars(resultContent),
+        payloadChars: structuredContent.metrics.payloadCharacters,
+        durationMs: serverDurationMs,
+      });
+      const content = appendUsageToContent(resultContent, usage, config.usageContent);
 
       logToolCall(config, {
         tool: "open_workspace",
@@ -1085,7 +1103,7 @@ function createMcpServer(
       });
 
       return {
-        content: resultContent,
+        content,
         _meta: {
           tool: "open_workspace",
           card: {
@@ -1155,7 +1173,7 @@ function createMcpServer(
       ...toolWidgetDescriptorMeta(config, "read"),
       annotations: { readOnlyHint: true },
     },
-    async ({ workspaceId, ...input }) => {
+    async ({ workspaceId, ...input }, extra) => {
       const startedAt = performance.now();
       const workspace = workspaces.getWorkspace(workspaceId);
       const readPath = workspaces.resolveReadPath(workspace, input.path);
@@ -1169,12 +1187,15 @@ function createMcpServer(
       );
 
       if (response.isError) {
-        logFailedToolResponse(config, {
+        const content = logFailedToolResponse(config, {
           tool: toolNames.read,
           workspaceId,
           path: input.path,
-        }, response.content, startedAt);
-        return response;
+        }, response.content, startedAt, {
+          usageSessionId: extra.sessionId,
+          workspaceRoot: workspace.root,
+        });
+        return { ...response, content };
       }
       workspaces.markReadPathLoaded(workspace, readPath);
 
@@ -1189,6 +1210,7 @@ function createMcpServer(
         : 0;
       const usage = recordObservedToolUsage({
         tool: toolNames.read,
+        usageSessionId: extra.sessionId,
         workspaceId,
         workspaceRoot: workspace.root,
         path: input.path,
@@ -1247,7 +1269,7 @@ function createMcpServer(
       ...toolWidgetDescriptorMeta(config, "write"),
       annotations: WRITE_TOOL_ANNOTATIONS,
     },
-    async ({ workspaceId, ...input }) => {
+    async ({ workspaceId, ...input }, extra) => {
       const startedAt = performance.now();
       const workspace = workspaces.getWorkspace(workspaceId);
       workspaces.resolvePath(workspace, input.path);
@@ -1257,12 +1279,15 @@ function createMcpServer(
       });
 
       if (response.isError) {
-        logFailedToolResponse(config, {
+        const content = logFailedToolResponse(config, {
           tool: toolNames.write,
           workspaceId,
           path: input.path,
-        }, response.content, startedAt);
-        return response;
+        }, response.content, startedAt, {
+          usageSessionId: extra.sessionId,
+          workspaceRoot: workspace.root,
+        });
+        return { ...response, content };
       }
 
       const patch = newFilePatch(input.path, input.content);
@@ -1274,6 +1299,7 @@ function createMcpServer(
       };
       const usage = recordObservedToolUsage({
         tool: toolNames.write,
+        usageSessionId: extra.sessionId,
         workspaceId,
         workspaceRoot: workspace.root,
         path: input.path,
@@ -1347,7 +1373,7 @@ function createMcpServer(
       ...toolWidgetDescriptorMeta(config, "edit"),
       annotations: EDIT_TOOL_ANNOTATIONS,
     },
-    async ({ workspaceId, ...input }) => {
+    async ({ workspaceId, ...input }, extra) => {
       const startedAt = performance.now();
       const workspace = workspaces.getWorkspace(workspaceId);
       const targetPath = workspaces.resolvePath(workspace, input.path);
@@ -1357,12 +1383,15 @@ function createMcpServer(
       });
 
       if (response.isError) {
-        logFailedToolResponse(config, {
+        const content = logFailedToolResponse(config, {
           tool: toolNames.edit,
           workspaceId,
           path: input.path,
-        }, response.content, startedAt);
-        return response;
+        }, response.content, startedAt, {
+          usageSessionId: extra.sessionId,
+          workspaceRoot: workspace.root,
+        });
+        return { ...response, content };
       }
 
       const stats = countDiffStats(
@@ -1378,6 +1407,7 @@ function createMcpServer(
       const savedChars = Math.max(0, estimateFileChars(targetPath) * 2 - observedChars);
       const usage = recordObservedToolUsage({
         tool: toolNames.edit,
+        usageSessionId: extra.sessionId,
         workspaceId,
         workspaceRoot: workspace.root,
         path: input.path,
@@ -1574,7 +1604,7 @@ function createMcpServer(
         ...toolWidgetDescriptorMeta(config, "search"),
         annotations: { readOnlyHint: true },
       },
-      async ({ workspaceId, ...input }) => {
+      async ({ workspaceId, ...input }, extra) => {
         const startedAt = performance.now();
         const workspace = workspaces.getWorkspace(workspaceId);
         if (input.path) workspaces.resolvePath(workspace, input.path);
@@ -1584,12 +1614,15 @@ function createMcpServer(
         });
 
         if (response.isError) {
-          logFailedToolResponse(config, {
+          const content = logFailedToolResponse(config, {
             tool: toolNames.grep,
             workspaceId,
             path: input.path,
-          }, response.content, startedAt);
-          return response;
+          }, response.content, startedAt, {
+            usageSessionId: extra.sessionId,
+            workspaceRoot: workspace.root,
+          });
+          return { ...response, content };
         }
 
         const summary = {
@@ -1599,6 +1632,7 @@ function createMcpServer(
         };
         const usage = recordObservedToolUsage({
           tool: toolNames.grep,
+          usageSessionId: extra.sessionId,
           workspaceId,
           workspaceRoot: workspace.root,
           path: input.path,
@@ -1664,7 +1698,7 @@ function createMcpServer(
         ...toolWidgetDescriptorMeta(config, "search"),
         annotations: { readOnlyHint: true },
       },
-      async ({ workspaceId, ...input }) => {
+      async ({ workspaceId, ...input }, extra) => {
         const startedAt = performance.now();
         const workspace = workspaces.getWorkspace(workspaceId);
         if (input.path) workspaces.resolvePath(workspace, input.path);
@@ -1674,12 +1708,15 @@ function createMcpServer(
         });
 
         if (response.isError) {
-          logFailedToolResponse(config, {
+          const content = logFailedToolResponse(config, {
             tool: toolNames.glob,
             workspaceId,
             path: input.path,
-          }, response.content, startedAt);
-          return response;
+          }, response.content, startedAt, {
+            usageSessionId: extra.sessionId,
+            workspaceRoot: workspace.root,
+          });
+          return { ...response, content };
         }
 
         const summary = {
@@ -1689,6 +1726,7 @@ function createMcpServer(
         };
         const usage = recordObservedToolUsage({
           tool: toolNames.glob,
+          usageSessionId: extra.sessionId,
           workspaceId,
           workspaceRoot: workspace.root,
           path: input.path,
@@ -1750,7 +1788,7 @@ function createMcpServer(
         ...toolWidgetDescriptorMeta(config, "directory"),
         annotations: { readOnlyHint: true },
       },
-      async ({ workspaceId, ...input }) => {
+      async ({ workspaceId, ...input }, extra) => {
         const startedAt = performance.now();
         const workspace = workspaces.getWorkspace(workspaceId);
         workspaces.resolvePath(workspace, input.path);
@@ -1760,17 +1798,21 @@ function createMcpServer(
         });
 
         if (response.isError) {
-          logFailedToolResponse(config, {
+          const content = logFailedToolResponse(config, {
             tool: toolNames.ls,
             workspaceId,
             path: input.path,
-          }, response.content, startedAt);
-          return response;
+          }, response.content, startedAt, {
+            usageSessionId: extra.sessionId,
+            workspaceRoot: workspace.root,
+          });
+          return { ...response, content };
         }
 
         const summary = textSummary(response.content);
         const usage = recordObservedToolUsage({
           tool: toolNames.ls,
+          usageSessionId: extra.sessionId,
           workspaceId,
           workspaceRoot: workspace.root,
           path: input.path,
@@ -1844,7 +1886,7 @@ function createMcpServer(
       ...toolWidgetDescriptorMeta(config, "shell"),
       annotations: SHELL_TOOL_ANNOTATIONS,
     },
-    async ({ workspaceId, workingDirectory, ...input }) => {
+    async ({ workspaceId, workingDirectory, ...input }, extra) => {
       const startedAt = performance.now();
       const workspace = workspaces.getWorkspace(workspaceId);
       const cwd = workspaces.resolveWorkingDirectory(
@@ -1859,14 +1901,17 @@ function createMcpServer(
 
       const loggedCommand = redactSensitiveShellCommand(input.command);
       if (response.isError) {
-        logFailedToolResponse(config, {
+        const content = logFailedToolResponse(config, {
           tool: toolNames.shell,
           workspaceId,
           workingDirectory: workingDirectory ?? ".",
           command: loggedCommand,
           commandLength: input.command.length,
-        }, response.content, startedAt);
-        return response;
+        }, response.content, startedAt, {
+          usageSessionId: extra.sessionId,
+          workspaceRoot: workspace.root,
+        });
+        return { ...response, content };
       }
 
       const summary = {
@@ -1876,6 +1921,7 @@ function createMcpServer(
       };
       const usage = recordObservedToolUsage({
         tool: toolNames.shell,
+        usageSessionId: extra.sessionId,
         workspaceId,
         workspaceRoot: workspace.root,
         path: workingDirectory ?? ".",

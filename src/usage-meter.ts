@@ -103,22 +103,58 @@ export interface ExecutionCostSnapshot {
   note: string;
 }
 
-const session = {
-  observedTokens: 0,
-  savedTokens: 0,
-  inputTokens: 0,
-  outputTokens: 0,
-  estimatedUsd: 0,
-  estimatedJpy: 0,
-  estimatedUsdMax: 0,
-  estimatedJpyMax: 0,
-  totalDurationMs: 0,
-  calls: 0,
-  errors: 0,
-  retries: 0,
-  byTool: new Map<string, UsageBucket>(),
-};
+interface UsageState {
+  observedTokens: number;
+  savedTokens: number;
+  inputTokens: number;
+  outputTokens: number;
+  estimatedUsd: number;
+  estimatedJpy: number;
+  estimatedUsdMax: number;
+  estimatedJpyMax: number;
+  totalDurationMs: number;
+  calls: number;
+  errors: number;
+  retries: number;
+  byTool: Map<string, UsageBucket>;
+}
+
+function createUsageState(): UsageState {
+  return {
+    observedTokens: 0,
+    savedTokens: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    estimatedUsd: 0,
+    estimatedJpy: 0,
+    estimatedUsdMax: 0,
+    estimatedJpyMax: 0,
+    totalDurationMs: 0,
+    calls: 0,
+    errors: 0,
+    retries: 0,
+    byTool: new Map<string, UsageBucket>(),
+  };
+}
+
+const processUsage = createUsageState();
+const chatUsage = new Map<string, UsageState>();
 let historyWrite = Promise.resolve();
+
+function chatUsageState(sessionId?: string): UsageState {
+  const key = String(sessionId || "process").trim() || "process";
+  const existing = chatUsage.get(key);
+  if (existing) return existing;
+  const created = createUsageState();
+  chatUsage.set(key, created);
+  return created;
+}
+
+function runtimeUsageLabel(): string {
+  const role = String(process.env.DEVSPACE_NODE_ROLE || "").toLowerCase();
+  const instance = String(process.env.DEVSPACE_INSTANCE_NAME || "").toLowerCase();
+  return role === "gae" || role === "ec2" || instance.includes("4ec2") ? "GAE" : "DevSpace";
+}
 
 function historyPath(): string {
   return process.env.DEVSPACE_USAGE_HISTORY
@@ -235,9 +271,9 @@ export function compactYenRange(minimum: number, maximum: number): string {
   return `${compactYen(min)}–${compactYen(max)}`;
 }
 
-function byToolSnapshot(): Record<string, UsageBucket> {
+function byToolSnapshot(state: UsageState): Record<string, UsageBucket> {
   return Object.fromEntries(
-    Array.from(session.byTool.entries())
+    Array.from(state.byTool.entries())
       .sort(([a], [b]) => a.localeCompare(b))
       .map(([tool, bucket]) => [tool, { ...bucket }]),
   );
@@ -255,6 +291,7 @@ function appendHistory(entry: UsageEntry): void {
 
 export function recordObservedToolUsage(input: {
   tool?: string;
+  usageSessionId?: string;
   workspaceId?: string;
   workspaceRoot?: string;
   path?: string;
@@ -268,6 +305,7 @@ export function recordObservedToolUsage(input: {
   retries?: number;
 }): UsageEntry {
   const tool = input.tool ?? "unknown";
+  const session = chatUsageState(input.usageSessionId);
   const observedChars = clampNumber(input.observedChars);
   const savedChars = clampNumber(input.savedChars);
   const observedTokens = estimateTokensFromChars(observedChars);
@@ -319,18 +357,55 @@ export function recordObservedToolUsage(input: {
   current.errorCalls += error ? 1 : 0;
   current.retries += retries;
   session.byTool.set(tool, current);
-  session.observedTokens += observedTokens;
-  session.savedTokens += savedTokens;
-  session.inputTokens += inputTokens;
-  session.outputTokens += outputTokens;
-  session.estimatedUsd += cost.usd;
-  session.estimatedJpy += cost.jpy;
-  session.estimatedUsdMax += cost.maxUsd;
-  session.estimatedJpyMax += cost.maxJpy;
-  session.totalDurationMs += durationMs;
-  session.calls += 1;
-  session.errors += error ? 1 : 0;
-  session.retries += retries;
+  for (const state of [session, processUsage]) {
+    state.observedTokens += observedTokens;
+    state.savedTokens += savedTokens;
+    state.inputTokens += inputTokens;
+    state.outputTokens += outputTokens;
+    state.estimatedUsd += cost.usd;
+    state.estimatedJpy += cost.jpy;
+    state.estimatedUsdMax += cost.maxUsd;
+    state.estimatedJpyMax += cost.maxJpy;
+    state.totalDurationMs += durationMs;
+    state.calls += 1;
+    state.errors += error ? 1 : 0;
+    state.retries += retries;
+  }
+  if (session !== processUsage) {
+    const aggregate = processUsage.byTool.get(tool) ?? {
+      observedTokens: 0,
+      savedTokens: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      estimatedUsd: 0,
+      estimatedJpy: 0,
+      estimatedUsdMax: 0,
+      estimatedJpyMax: 0,
+      calls: 0,
+      inputChars: 0,
+      outputChars: 0,
+      payloadChars: 0,
+      totalDurationMs: 0,
+      errorCalls: 0,
+      retries: 0,
+    };
+    aggregate.observedTokens += observedTokens;
+    aggregate.savedTokens += savedTokens;
+    aggregate.inputTokens += inputTokens;
+    aggregate.outputTokens += outputTokens;
+    aggregate.estimatedUsd += cost.usd;
+    aggregate.estimatedJpy += cost.jpy;
+    aggregate.estimatedUsdMax += cost.maxUsd;
+    aggregate.estimatedJpyMax += cost.maxJpy;
+    aggregate.calls += 1;
+    aggregate.inputChars += inputChars;
+    aggregate.outputChars += outputChars;
+    aggregate.payloadChars += payloadChars;
+    aggregate.totalDurationMs += durationMs;
+    aggregate.errorCalls += error ? 1 : 0;
+    aggregate.retries += retries;
+    processUsage.byTool.set(tool, aggregate);
+  }
 
   const entry: UsageEntry = {
     ts: new Date().toISOString(),
@@ -372,7 +447,7 @@ export function recordObservedToolUsage(input: {
     sessionCalls: session.calls,
     sessionErrors: session.errors,
     sessionRetries: session.retries,
-    byTool: byToolSnapshot(),
+    byTool: byToolSnapshot(session),
     note: "GPT-Agent maps MCP tool results to model input and tool arguments to model output, then shows the GPT-5.6 Sol short-to-long-context API cost range. Not ChatGPT billing or actual model usage.",
   };
   appendHistory(entry);
@@ -380,23 +455,23 @@ export function recordObservedToolUsage(input: {
 }
 
 export function getExecutionCostSnapshot(): ExecutionCostSnapshot {
-  const cost = estimateGpt56ApiCost(session.inputTokens, session.outputTokens);
+  const cost = estimateGpt56ApiCost(processUsage.inputTokens, processUsage.outputTokens);
   return {
-    observedTokens: session.observedTokens,
-    savedTokens: session.savedTokens,
-    inputTokens: session.inputTokens,
-    outputTokens: session.outputTokens,
+    observedTokens: processUsage.observedTokens,
+    savedTokens: processUsage.savedTokens,
+    inputTokens: processUsage.inputTokens,
+    outputTokens: processUsage.outputTokens,
     estimatedUsd: cost.usd,
     estimatedJpy: cost.jpy,
     estimatedUsdMax: cost.maxUsd,
     estimatedJpyMax: cost.maxJpy,
     pricingModel: cost.model,
     usdJpyRate: cost.usdJpyRate,
-    totalDurationMs: session.totalDurationMs,
-    calls: session.calls,
-    errors: session.errors,
-    retries: session.retries,
-    byTool: byToolSnapshot(),
+    totalDurationMs: processUsage.totalDurationMs,
+    calls: processUsage.calls,
+    errors: processUsage.errors,
+    retries: processUsage.retries,
+    byTool: byToolSnapshot(processUsage),
     note: "Model input/output tokens and GPT-5.6 Sol short-to-long-context API costs are estimates; duration and call/error counts are observed by GPT-Agent.",
   };
 }
@@ -406,19 +481,21 @@ function fullUsageSummaryText(entry: UsageEntry): string {
     .map(([tool, value]) => `${tool} ${value.calls}回/${compactDuration(value.totalDurationMs)}`)
     .join(" / ");
 
+  const label = runtimeUsageLabel();
   return [
-    "実行コスト目安:",
+    `${label} · GPT-5.6推定コスト:`,
     `今回: 入力約${compactTokenCount(entry.inputTokens)} / 出力約${compactTokenCount(entry.outputTokens)} token / ${compactYenRange(entry.estimatedJpy, entry.estimatedJpyMax)} / ${compactDuration(entry.durationMs)} / ${entry.error ? "error" : "ok"}`,
-    `セッション: 入力約${compactTokenCount(entry.sessionInputTokens)} / 出力約${compactTokenCount(entry.sessionOutputTokens)} token / ${compactYenRange(entry.sessionEstimatedJpy, entry.sessionEstimatedJpyMax)} / ${compactDuration(entry.sessionDurationMs)} / ${entry.sessionCalls} calls / ${entry.sessionErrors} errors / ${entry.sessionRetries} retries`,
+    `このChat累計: 入力約${compactTokenCount(entry.sessionInputTokens)} / 出力約${compactTokenCount(entry.sessionOutputTokens)} token / ${compactYenRange(entry.sessionEstimatedJpy, entry.sessionEstimatedJpyMax)} / ${compactDuration(entry.sessionDurationMs)} / ${entry.sessionCalls} calls / ${entry.sessionErrors} errors / ${entry.sessionRetries} retries`,
     `内訳: ${byTool || "なし"}`,
     `推定節約token: 約${compactTokenCount(entry.sessionSavedTokens)}`,
-    `GAG返却結果をモデル入力、ツール引数をモデル出力として換算。短コンテキストは入力$5/M・出力$30/M、272K超の長コンテキストは入力$10/M・出力$45/M（USD/JPY=${entry.usdJpyRate}）。`,
-    "実際の全入力tokenはGAG単独では取得できないため短〜長コンテキストの範囲表示です。ChatGPT本体の請求額ではありません。",
+    `${label}返却結果をモデル入力、ツール引数をモデル出力として換算。短コンテキストは入力$5/M・出力$30/M、272K超の長コンテキストは入力$10/M・出力$45/M（USD/JPY=${entry.usdJpyRate}）。`,
+    `実際の全入力tokenは${label}単独では取得できないため短〜長コンテキストの範囲表示です。ChatGPT本体の請求額ではありません。`,
   ].join("\n");
 }
 
 function compactUsageSummaryText(entry: UsageEntry): string {
-  return `gag cost: in ~${compactTokenCount(entry.inputTokens)} / out ~${compactTokenCount(entry.outputTokens)} tok · ${compactYenRange(entry.estimatedJpy, entry.estimatedJpyMax)} · ${compactDuration(entry.durationMs)} | session in ~${compactTokenCount(entry.sessionInputTokens)} / out ~${compactTokenCount(entry.sessionOutputTokens)} tok · ${compactYenRange(entry.sessionEstimatedJpy, entry.sessionEstimatedJpyMax)} · ${entry.sessionCalls} calls · ${entry.sessionErrors} errors`;
+  const label = runtimeUsageLabel();
+  return `${label} · GPT-5.6推定 | 今回 in ~${compactTokenCount(entry.inputTokens)} / out ~${compactTokenCount(entry.outputTokens)} tok · ${compactYenRange(entry.estimatedJpy, entry.estimatedJpyMax)} · ${compactDuration(entry.durationMs)} | このChat累計 in ~${compactTokenCount(entry.sessionInputTokens)} / out ~${compactTokenCount(entry.sessionOutputTokens)} tok · ${compactYenRange(entry.sessionEstimatedJpy, entry.sessionEstimatedJpyMax)} · ${entry.sessionCalls} calls · ${entry.sessionErrors} errors`;
 }
 
 export function appendUsageToContent<T extends ToolContent>(
