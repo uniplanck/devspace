@@ -85,7 +85,7 @@ tailscale status
 Replace `~/Projects` with the folder ChatGPT is allowed to access.
 
 ```bash
-git clone https://github.com/uniplanck/devspace.git ~/devspace && cd ~/devspace && ./scripts/quickstart-tailscale.sh ~/Projects
+git clone https://github.com/uniplanck/devspace.git ~/devspace && cd ~/devspace && bash ./scripts/quickstart-tailscale.sh ~/Projects
 ```
 
 The script:
@@ -94,7 +94,7 @@ The script:
 2. runs `npm ci`, typecheck, tests, and build
 3. registers the `devspace` command with `npm link`
 4. maps Tailscale Funnel to port `7676`
-5. creates `~/.devspace/config.json` and `auth.json` with mode `600`
+5. creates `~/.devspace/config.json`, `auth.json`, and `tool.json` with mode `600`
 6. starts DevSpace in Full tool mode in the background
 7. prints the public `https://<device>.<tailnet>.ts.net/mcp` URL
 8. copies the MCP URL on macOS
@@ -104,7 +104,7 @@ The first Funnel command may open a browser approval page.
 ### 3. Verify the runtime
 
 ```bash
-cd ~/devspace && ./scripts/devspace-control.sh status
+cd ~/devspace && bash ./scripts/devspace-control.sh status
 ```
 
 Expected state:
@@ -116,11 +116,11 @@ Expected state:
 
 ### 4. Connect ChatGPT
 
-Current OpenAI setup flow:
+Current OpenAI setup flow follows the steps below. Labels can change slightly as ChatGPT is updated.
 
 1. Open **Settings → Security and login**.
 2. Enable **Developer mode**.
-3. Open **Settings → Plugins** or the Plugins page.
+3. Open **Settings → Plugins**, Apps, or Connectors.
 4. Select `+` and create a developer-mode App.
 5. Enter the MCP server URL printed by the script:
 
@@ -161,54 +161,68 @@ Open <absolute-project-path> as a workspace and report git branch, git status --
 Start:
 
 ```bash
-cd ~/devspace && ./scripts/devspace-control.sh start
+cd ~/devspace && bash ./scripts/devspace-control.sh start
 ```
 
 Stop DevSpace:
 
 ```bash
-cd ~/devspace && ./scripts/devspace-control.sh stop
+cd ~/devspace && bash ./scripts/devspace-control.sh stop
 ```
 
 Stop DevSpace and reset Funnel:
 
 ```bash
-cd ~/devspace && ./scripts/devspace-control.sh stop --with-funnel
+cd ~/devspace && bash ./scripts/devspace-control.sh stop --with-funnel
+```
+
+Restart:
+
+```bash
+cd ~/devspace && bash ./scripts/devspace-control.sh restart
 ```
 
 Status:
 
 ```bash
-cd ~/devspace && ./scripts/devspace-control.sh status
+cd ~/devspace && bash ./scripts/devspace-control.sh status
 ```
 
 Logs:
 
 ```bash
-cd ~/devspace && ./scripts/devspace-control.sh logs
+cd ~/devspace && bash ./scripts/devspace-control.sh logs
 ```
 
 Copy the MCP URL:
 
 ```bash
-cd ~/devspace && ./scripts/devspace-control.sh url
+cd ~/devspace && bash ./scripts/devspace-control.sh url
 ```
 
 Copy the safe Owner Password retrieval command:
 
 ```bash
-cd ~/devspace && ./scripts/devspace-control.sh owner-cmd
+cd ~/devspace && bash ./scripts/devspace-control.sh owner-cmd
 ```
 
 ## DevSpace Tool for macOS
 
 ```bash
-cd ~/devspace/extensions/devspace-tool && ./build-macos.sh && open ".build/DevSpace Tool.app"
+cd ~/devspace/extensions/devspace-tool && bash ./build-macos.sh && open ".build/DevSpace Tool.app"
 ```
 
 Use **Settings → Language** to switch between `Automatic / English / 日本語` immediately.
 
-Optional runtime configuration in `~/.devspace/tool.json`:
+The **DevSpace** menu provides:
+
+- Copy MCP URL
+- Copy diagnostics command
+- Copy the local Owner Password retrieval command, not the password itself
+- Open configuration folder
+- Open the Japanese or English setup guide
+
+Optional runtime configuration in `~/.devspace/tool.json` is created by the guided setup:
 
 ```json
 {
@@ -247,7 +261,7 @@ Register the same URL with `/mcp` appended in ChatGPT.
 
 ```bash
 cd ~/devspace && git pull --ff-only && npm ci && npm run typecheck && npm test && npm run build && npm link
-./scripts/devspace-control.sh stop && ./scripts/devspace-control.sh start
+bash ./scripts/devspace-control.sh stop && bash ./scripts/devspace-control.sh start
 ```
 
 ## Security rules
@@ -259,13 +273,15 @@ cd ~/devspace && git pull --ff-only && npm ci && npm run typecheck && npm test &
 - use `AGENTS.md` to require approval for main pushes, production deploys, billing actions, destructive database operations, and external messages
 - stop DevSpace and Funnel when they are not needed
 - connect only to MCP servers you have reviewed and trust
+- the stop script verifies that a recorded PID belongs to a DevSpace serve process and refuses to kill unknown processes
 
 ## Troubleshooting
 
 Connection failure:
 
 ```bash
-./scripts/devspace-control.sh status
+cd ~/devspace
+bash ./scripts/devspace-control.sh status
 tailscale funnel status
 devspace doctor
 ```
