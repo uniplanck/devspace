@@ -1978,7 +1978,6 @@ function createMcpServer(
   return server;
 }
 
-// PRIVATE_GEX_START
 function privateUsageSessionKey(req: Request, fallback?: string): string | undefined {
   const meta = req.body?.params?._meta as Record<string, unknown> | undefined;
   const conversationCandidates = [
@@ -2006,6 +2005,7 @@ function privateUsageSessionKey(req: Request, fallback?: string): string | undef
     : undefined;
 }
 
+// PRIVATE_GEX_START
 function rawRequestHostname(req: Request): string {
   const host = String(req.headers.host || "").trim();
   if (!host) return "";
