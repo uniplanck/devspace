@@ -151,6 +151,8 @@ function chatUsageState(sessionId?: string): UsageState {
 }
 
 function runtimeUsageLabel(): string {
+  const explicit = String(process.env.DEVSPACE_USAGE_LABEL || "").trim();
+  if (explicit) return explicit;
   const role = String(process.env.DEVSPACE_NODE_ROLE || "").toLowerCase();
   const instance = String(process.env.DEVSPACE_INSTANCE_NAME || "").toLowerCase();
   return role === "gae" || role === "ec2" || instance.includes("4ec2") ? "GAE" : "GAG";
