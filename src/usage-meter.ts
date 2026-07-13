@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { statSync } from "node:fs";
 import { appendFile, mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -139,7 +140,13 @@ function createUsageState(): UsageState {
 
 const processUsage = createUsageState();
 const chatUsage = new Map<string, UsageState>();
+const usageSessionStorage = new AsyncLocalStorage<string>();
 let historyWrite = Promise.resolve();
+
+export function runWithUsageSession<T>(sessionId: string | undefined, callback: () => T): T {
+  const normalized = String(sessionId || "").trim();
+  return normalized ? usageSessionStorage.run(normalized, callback) : callback();
+}
 
 function chatUsageState(sessionId?: string): UsageState {
   const key = String(sessionId || "process").trim() || "process";
@@ -307,7 +314,7 @@ export function recordObservedToolUsage(input: {
   retries?: number;
 }): UsageEntry {
   const tool = input.tool ?? "unknown";
-  const session = chatUsageState(input.usageSessionId);
+  const session = chatUsageState(usageSessionStorage.getStore() ?? input.usageSessionId);
   const observedChars = clampNumber(input.observedChars);
   const savedChars = clampNumber(input.savedChars);
   const observedTokens = estimateTokensFromChars(observedChars);

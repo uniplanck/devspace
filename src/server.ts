@@ -41,6 +41,7 @@ import {
   editInputChars,
   estimateFileChars,
   recordObservedToolUsage,
+  runWithUsageSession,
   textContentChars,
 } from "./usage-meter.js";
 import { SingleUserOAuthProvider } from "./oauth-provider.js";
@@ -2194,7 +2195,10 @@ export function createServer(config = loadConfig()): RunningServer {
         return;
       }
 
-      await transport.handleRequest(req, res, req.body);
+      await runWithUsageSession(
+        sessionId ?? transport.sessionId,
+        () => transport.handleRequest(req, res, req.body),
+      );
     } catch (error) {
       logEvent(config.logging, "error", "mcp_request_error", {
         requestId,
