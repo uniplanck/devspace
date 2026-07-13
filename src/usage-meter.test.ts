@@ -60,11 +60,19 @@ const compactContent = appendUsageToContent(content, usage, "compact");
 const compactText = compactContent.at(-1);
 assert.match(
   compactText?.type === "text" ? compactText.text : "",
-  /DevSpace · GPT-5\.6推定 \| 今回 in ~8 \/ out ~3 tok/u,
+  /\*\*DevSpace · GPT-5\.6推定\*\*/u,
 );
 assert.match(
   compactText?.type === "text" ? compactText.text : "",
-  /このChat累計/u,
+  /\| 指標 \| 今回 \| このChat累計 \|/u,
+);
+assert.match(
+  compactText?.type === "text" ? compactText.text : "",
+  /\| 入力 \| 約8 tok \|/u,
+);
+assert.match(
+  compactText?.type === "text" ? compactText.text : "",
+  /\| 出力 \| 約3 tok \|/u,
 );
 const fullContent = appendUsageToContent(content, usage, "full");
 const fullText = fullContent.at(-1);
@@ -114,10 +122,10 @@ assert.equal(stableFirst.sessionCalls, 1);
 assert.equal(stableSecond.sessionCalls, 2);
 process.env.DEVSPACE_NODE_ROLE = "gae";
 const gaeText = appendUsageToContent(content, otherChat, "compact").at(-1);
-assert.match(gaeText?.type === "text" ? gaeText.text : "", /^GAE · GPT-5\.6推定/u);
+assert.match(gaeText?.type === "text" ? gaeText.text : "", /^\*\*GAE · GPT-5\.6推定\*\*/u);
 process.env.DEVSPACE_USAGE_LABEL = "CUSTOM";
 const customText = appendUsageToContent(content, otherChat, "compact").at(-1);
-assert.match(customText?.type === "text" ? customText.text : "", /^CUSTOM · GPT-5\.6推定/u);
+assert.match(customText?.type === "text" ? customText.text : "", /^\*\*CUSTOM · GPT-5\.6推定\*\*/u);
 delete process.env.DEVSPACE_USAGE_LABEL;
 const snapshot = getExecutionCostSnapshot();
 assert.equal(snapshot.calls >= 1, true);
