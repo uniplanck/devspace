@@ -8,6 +8,8 @@ export type EstimateSource = "provided" | "history" | "progress" | "blended" | "
 
 export interface ChatProgressInput {
   sessionId?: string;
+  conversationId?: string;
+  conversationUrl?: string;
   chatLabel: string;
   workspaceId?: string;
   workspaceRoot?: string;
@@ -24,6 +26,8 @@ export interface ChatProgressInput {
 export interface ChatProgressRecord {
   id: string;
   sessionId: string;
+  conversationId?: string;
+  conversationUrl?: string;
   chatLabel: string;
   workspaceId?: string;
   workspaceRoot?: string;
@@ -116,6 +120,10 @@ function normalizeKey(value: string): string {
 }
 
 function recordId(input: ChatProgressInput): string {
+  const conversation = sanitizeText(input.conversationId, 160);
+  if (conversation) {
+    return `chat_${conversation.replace(/[^A-Za-z0-9_-]/gu, "_").slice(0, 120)}`;
+  }
   const session = sanitizeText(input.sessionId, 120);
   if (session) return `chat_${session.replace(/[^A-Za-z0-9_-]/gu, "_").slice(0, 96)}`;
   const fallback = `${input.workspaceId ?? "global"}:${normalizeKey(input.chatLabel)}`;
@@ -220,7 +228,9 @@ export function updateChatProgress(input: ChatProgressInput): ChatProgressRecord
     : undefined;
   const record: ChatProgressRecord = {
     id,
-    sessionId: sanitizeText(input.sessionId, 120, "local"),
+    sessionId: sanitizeText(input.sessionId, 120, existing?.sessionId ?? "local"),
+    conversationId: sanitizeText(input.conversationId, 160) || existing?.conversationId,
+    conversationUrl: sanitizeText(input.conversationUrl, 500) || existing?.conversationUrl,
     chatLabel: sanitizeText(input.chatLabel, 160, "GPT-Agent task"),
     workspaceId: sanitizeText(input.workspaceId, 160) || existing?.workspaceId,
     workspaceRoot: input.workspaceRoot || existing?.workspaceRoot,
