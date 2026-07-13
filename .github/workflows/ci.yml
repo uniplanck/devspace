@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - gae
   pull_request:
 
 jobs:

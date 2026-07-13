@@ -5,7 +5,7 @@ MODE="${1:-check}"
 GAG_ROOT="${GAG_ROOT:-/home/ubuntu/GPT-Agent}"
 REMOTE_NAME="${GAG_PRIVATE_REMOTE_NAME:-private}"
 REMOTE_URL="${GAG_PRIVATE_REPO:-git@github.com:uniplanck/gpt-agent.git}"
-TARGET_BRANCH="${GAG_TARGET_BRANCH:-main}"
+TARGET_BRANCH="${GAG_TARGET_BRANCH:-gae}"
 
 fail() {
   printf 'ERROR: %s\n' "$*" >&2
@@ -51,7 +51,7 @@ behind="${counts##*$'\t'}"
 info "Root: $GAG_ROOT"
 info "Branch: ${current_branch:-detached}"
 info "Local: ${local_head:0:12}"
-info "Private: ${remote_head:0:12}"
+info "GAE release: ${remote_head:0:12}"
 info "Ahead: $ahead / Behind: $behind"
 
 if [[ -n "$status" ]]; then
@@ -68,7 +68,7 @@ fi
 
 [[ "$current_branch" == "$TARGET_BRANCH" ]] || fail "Switch to $TARGET_BRANCH before applying an update."
 [[ -z "$status" ]] || fail "Commit or move GAE-specific changes out of the repository before updating."
-[[ "$ahead" == "0" ]] || fail "Local GAE contains commits not present in private/$TARGET_BRANCH. Reconcile them first."
+[[ "$ahead" == "0" ]] || fail "Local GAE contains commits not present in private/$TARGET_BRANCH. Reconcile them into the GAE release branch first."
 
 if [[ "$behind" == "0" ]]; then
   info "Already current. No update applied."
