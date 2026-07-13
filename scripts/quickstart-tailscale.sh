@@ -57,7 +57,7 @@ command -v node >/dev/null 2>&1 || fail "Node.js is required. Install Node.js 22
 
 node -e '
   const [major, minor] = process.versions.node.split(".").map(Number);
-  const ok = major > 22 && major < 27 || major === 22 && minor >= 19;
+  const ok = (major > 22 && major < 27) || (major === 22 && minor >= 19);
   if (!ok) {
     console.error(`Node.js ${process.versions.node} is unsupported. Required: >=22.19 <27.`);
     process.exit(1);
@@ -72,7 +72,7 @@ if ! "$TS_BIN" status >/dev/null 2>&1; then
 fi
 "$TS_BIN" status >/dev/null 2>&1 || fail "Tailscale is not connected. Complete sign-in and run this script again."
 
-TAILSCALE_HOST="$($TS_BIN status --json | node -e '
+TAILSCALE_HOST="$("$TS_BIN" status --json | node -e '
   let raw="";
   process.stdin.on("data", chunk => raw += chunk);
   process.stdin.on("end", () => {
@@ -100,6 +100,7 @@ info "Configure Tailscale Funnel"
 if ! "$TS_BIN" funnel --bg "$PORT"; then
   fail "Tailscale Funnel could not be enabled. Approve Funnel in the browser/admin console, then rerun this script."
 fi
+"$TS_BIN" funnel status || fail "Tailscale Funnel was requested but its status could not be verified."
 
 info "Create DevSpace configuration"
 mkdir -p "$CONFIG_DIR"
@@ -119,29 +120,37 @@ PROJECT_ROOT="$PROJECT_ROOT" PORT="$PORT" PUBLIC_BASE_URL="$PUBLIC_BASE_URL" CON
   const port = Number(process.env.PORT);
   const publicBaseUrl = process.env.PUBLIC_BASE_URL;
 
-  let existingAuth = {};
-  try { existingAuth = JSON.parse(fs.readFileSync(authPath, "utf8")); } catch {}
+  const readJson = (filePath) => {
+    try { return JSON.parse(fs.readFileSync(filePath, "utf8")); }
+    catch { return {}; }
+  };
+
+  const existingConfig = readJson(configPath);
+  const existingAuth = readJson(authPath);
+  const existingTool = readJson(toolPath);
   const ownerToken = typeof existingAuth.ownerToken === "string" && existingAuth.ownerToken.length >= 16
     ? existingAuth.ownerToken
     : crypto.randomBytes(32).toString("base64url");
 
   const config = {
+    ...existingConfig,
     host: "127.0.0.1",
     port,
     allowedRoots: [projectRoot],
     publicBaseUrl,
-    subagents: false
+    subagents: existingConfig.subagents === true
   };
   const tool = {
+    ...existingTool,
     host: "127.0.0.1",
     port,
     runtimeCommand: "DEVSPACE_TOOL_MODE=full devspace serve",
     runtimeProcessMatch: "devspace.*serve",
-    usdJpyRate: 160
+    usdJpyRate: Number(existingTool.usdJpyRate) > 0 ? Number(existingTool.usdJpyRate) : 160
   };
 
   fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n", {mode: 0o600});
-  fs.writeFileSync(authPath, JSON.stringify({ownerToken}, null, 2) + "\n", {mode: 0o600});
+  fs.writeFileSync(authPath, JSON.stringify({...existingAuth, ownerToken}, null, 2) + "\n", {mode: 0o600});
   fs.writeFileSync(toolPath, JSON.stringify(tool, null, 2) + "\n", {mode: 0o600});
   fs.chmodSync(configPath, 0o600);
   fs.chmodSync(authPath, 0o600);
