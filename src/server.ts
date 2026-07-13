@@ -56,8 +56,10 @@ import {
   type LocalAgentProviderAvailability,
 } from "./local-agent-availability.js";
 import { registerV11Tools } from "./register-v11-tools.js";
+import { GexLearningStore, type GexLearningSyncPayload } from "./gex-learning-store.js";
 
 type Transport = StreamableHTTPServerTransport;
+const GEX_LEARNING_BRIDGE_HEADER = "gex-learning-v1";
 const WORKSPACE_APP_URI = "ui://devspace/workspace-app.html";
 const WORKSPACE_APP_MANIFEST_ENTRY = "workspace-app.html";
 const WRITE_TOOL_ANNOTATIONS = {
@@ -1925,6 +1927,26 @@ function createMcpServer(
   return server;
 }
 
+function rawRequestHostname(req: Request): string {
+  const host = String(req.headers.host || "").trim();
+  if (!host) return "";
+  try {
+    return new URL(`http://${host}`).hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
+function isAuthorizedGexLearningRequest(req: Request): boolean {
+  const hostname = rawRequestHostname(req);
+  const loopbackHost = hostname === "127.0.0.1" || hostname === "localhost" || hostname === "::1";
+  return loopbackHost && req.header("x-gex-bridge") === GEX_LEARNING_BRIDGE_HEADER;
+}
+
+function denyGexLearningRequest(res: Response): void {
+  res.status(403).json({ ok: false, error: "GEX learning bridge is local-only." });
+}
+
 export function createServer(config = loadConfig()): RunningServer {
   const allowedHosts = config.allowedHosts.includes("*")
     ? undefined
@@ -1949,6 +1971,7 @@ export function createServer(config = loadConfig()): RunningServer {
   const localAgentProviders = config.subagents
     ? getLocalAgentProviderAvailabilitySnapshot()
     : [];
+  const gexLearningStore = new GexLearningStore(config.gexLearningDir);
 
   if (config.logging.trustProxy) {
     app.set("trust proxy", true);
@@ -1976,6 +1999,36 @@ export function createServer(config = loadConfig()): RunningServer {
 
     next();
   });
+
+  app.get("/gex-learning/health", (req, res) => {
+    res.setHeader("cache-control", "no-store");
+    if (!isAuthorizedGexLearningRequest(req)) {
+      denyGexLearningRequest(res);
+      return;
+    }
+    res.json({ ok: true, name: "gex-learning-bridge" });
+  });
+
+  app.post(
+    "/gex-learning/sync",
+    express.json({ limit: "2mb" }),
+    async (req, res) => {
+      res.setHeader("cache-control", "no-store");
+      if (!isAuthorizedGexLearningRequest(req)) {
+        denyGexLearningRequest(res);
+        return;
+      }
+      try {
+        const result = await gexLearningStore.sync((req.body || {}) as GexLearningSyncPayload);
+        res.json({ ok: true, ...result });
+      } catch (error) {
+        logEvent(config.logging, "error", "gex_learning_sync_error", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+        res.status(500).json({ ok: false, error: "GEX learning data could not be saved." });
+      }
+    },
+  );
 
   app.use(
     mcpAuthRouter({
