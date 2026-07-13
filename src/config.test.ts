@@ -55,11 +55,13 @@ assert.equal(loadConfig(baseEnv).skillsEnabled, true);
 assert.equal(loadConfig(baseEnv).devspaceSkillsDir, join(emptyConfigDir, "skills"));
 assert.equal(loadConfig(baseEnv).devspaceAgentsDir, join(emptyConfigDir, "agents"));
 assert.equal(loadConfig(baseEnv).subagents, false);
+// PRIVATE_GEX_START
 assert.equal(loadConfig(baseEnv).gexLearningDir, join(loadConfig(baseEnv).stateDir, "gex-learning"));
 assert.equal(
   loadConfig({ ...baseEnv, DEVSPACE_GEX_LEARNING_DIR: join(emptyConfigDir, "custom-gex-learning") }).gexLearningDir,
   join(emptyConfigDir, "custom-gex-learning"),
 );
+// PRIVATE_GEX_END
 assert.equal(loadConfig({ ...baseEnv, DEVSPACE_SKILLS: "0" }).skillsEnabled, false);
 assert.equal(loadConfig({ ...baseEnv, DEVSPACE_SKILLS: "1" }).skillsEnabled, true);
 assert.equal(

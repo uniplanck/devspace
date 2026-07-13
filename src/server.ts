@@ -56,10 +56,14 @@ import {
   type LocalAgentProviderAvailability,
 } from "./local-agent-availability.js";
 import { registerV11Tools } from "./register-v11-tools.js";
+// PRIVATE_GEX_START
 import { GexLearningStore, type GexLearningSyncPayload } from "./gex-learning-store.js";
+// PRIVATE_GEX_END
 
 type Transport = StreamableHTTPServerTransport;
+// PRIVATE_GEX_START
 const GEX_LEARNING_BRIDGE_HEADER = "gex-learning-v1";
+// PRIVATE_GEX_END
 const WORKSPACE_APP_URI = "ui://devspace/workspace-app.html";
 const WORKSPACE_APP_MANIFEST_ENTRY = "workspace-app.html";
 const WRITE_TOOL_ANNOTATIONS = {
@@ -1927,6 +1931,7 @@ function createMcpServer(
   return server;
 }
 
+// PRIVATE_GEX_START
 function rawRequestHostname(req: Request): string {
   const host = String(req.headers.host || "").trim();
   if (!host) return "";
@@ -1946,6 +1951,7 @@ function isAuthorizedGexLearningRequest(req: Request): boolean {
 function denyGexLearningRequest(res: Response): void {
   res.status(403).json({ ok: false, error: "GEX learning bridge is local-only." });
 }
+// PRIVATE_GEX_END
 
 export function createServer(config = loadConfig()): RunningServer {
   const allowedHosts = config.allowedHosts.includes("*")
@@ -1971,7 +1977,9 @@ export function createServer(config = loadConfig()): RunningServer {
   const localAgentProviders = config.subagents
     ? getLocalAgentProviderAvailabilitySnapshot()
     : [];
+  // PRIVATE_GEX_START
   const gexLearningStore = new GexLearningStore(config.gexLearningDir);
+  // PRIVATE_GEX_END
 
   if (config.logging.trustProxy) {
     app.set("trust proxy", true);
@@ -2000,6 +2008,7 @@ export function createServer(config = loadConfig()): RunningServer {
     next();
   });
 
+  // PRIVATE_GEX_START
   app.get("/gex-learning/health", (req, res) => {
     res.setHeader("cache-control", "no-store");
     if (!isAuthorizedGexLearningRequest(req)) {
@@ -2029,6 +2038,7 @@ export function createServer(config = loadConfig()): RunningServer {
       }
     },
   );
+  // PRIVATE_GEX_END
 
   app.use(
     mcpAuthRouter({

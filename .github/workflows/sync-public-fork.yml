@@ -16,6 +16,7 @@ on:
       - .env.example
       - AGENTS.md
       - scripts/export-public-core.sh
+      - scripts/sanitize-public-core.mjs
       - .github/workflows/sync-public-fork.yml
   workflow_dispatch:
 

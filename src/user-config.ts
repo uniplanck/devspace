@@ -16,7 +16,9 @@ export interface DevspaceUserConfig {
   publicBaseUrl?: string | null;
   allowedHosts?: string[];
   stateDir?: string;
+  // PRIVATE_GEX_START
   gexLearningDir?: string;
+  // PRIVATE_GEX_END
   worktreeRoot?: string;
   agentDir?: string;
   subagents?: boolean;

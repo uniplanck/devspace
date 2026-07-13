@@ -47,6 +47,8 @@ for file in \
   /bin/cp "$ROOT/$file" "$TARGET_ROOT/$file"
 done
 
+/usr/bin/env node "$ROOT/scripts/sanitize-public-core.mjs" "$TARGET_ROOT"
+
 if /usr/bin/grep -RInE \
   '/Users/naomac|tail9d68b1|planckworld@gmail.com|naoyamao\.world' \
   "$TARGET_ROOT/src" \

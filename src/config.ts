@@ -30,7 +30,9 @@ export interface ServerConfig {
   designAudit: boolean;
   designAuditAllowedHosts: string[];
   stateDir: string;
+  // PRIVATE_GEX_START
   gexLearningDir: string;
+  // PRIVATE_GEX_END
   worktreeRoot: string;
   skillsEnabled: boolean;
   skillPaths: string[];
@@ -255,11 +257,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
   );
   const openWorkspacePayload = parseOpenWorkspacePayloadMode(env.DEVSPACE_OPEN_WORKSPACE_PAYLOAD);
   const stateDir = resolve(expandHomePath(env.DEVSPACE_STATE_DIR ?? files.config.stateDir ?? defaultStateDir()));
+  // PRIVATE_GEX_START
   const gexLearningDir = resolve(expandHomePath(
     env.DEVSPACE_GEX_LEARNING_DIR
       ?? files.config.gexLearningDir
       ?? join(stateDir, "gex-learning"),
   ));
+  // PRIVATE_GEX_END
   const derivedAllowedHosts = [
     "localhost",
     "127.0.0.1",
@@ -295,7 +299,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
       ["localhost", "127.0.0.1", "::1"],
     ),
     stateDir,
+    // PRIVATE_GEX_START
     gexLearningDir,
+    // PRIVATE_GEX_END
     worktreeRoot: resolve(expandHomePath(env.DEVSPACE_WORKTREE_ROOT ?? files.config.worktreeRoot ?? defaultWorktreeRoot())),
     skillsEnabled: env.DEVSPACE_SKILLS === undefined ? true : parseBoolean(env.DEVSPACE_SKILLS),
     skillPaths: parsePathList(env.DEVSPACE_SKILL_PATHS),
