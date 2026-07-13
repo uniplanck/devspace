@@ -178,6 +178,7 @@ devspace doctor
 ## Documentation
 
 - [Setup Guide](https://github.com/Waishnav/devspace/blob/main/docs/setup.md)
+- [Private repository and runtime topology](docs/repository-topology.md)
 - [ChatGPT Coding Workflow](https://github.com/Waishnav/devspace/blob/main/docs/chatgpt-coding-workflow.md)
 - [Configuration Reference](https://github.com/Waishnav/devspace/blob/main/docs/configuration.md)
 - [Security Model](https://github.com/Waishnav/devspace/blob/main/docs/security.md)

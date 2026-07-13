@@ -20,6 +20,12 @@ for directory in src skills examples; do
     "$ROOT/$directory/" "$TARGET_ROOT/$directory/"
 done
 
+mkdir -p "$TARGET_ROOT/extensions/devspace-tool"
+/usr/bin/rsync -a --delete \
+  --exclude '.build/' \
+  --exclude '.DS_Store' \
+  "$ROOT/extensions/devspace-tool/" "$TARGET_ROOT/extensions/devspace-tool/"
+
 for file in \
   .env.example \
   AGENTS.md \
@@ -46,6 +52,7 @@ if /usr/bin/grep -RInE \
   "$TARGET_ROOT/src" \
   "$TARGET_ROOT/skills" \
   "$TARGET_ROOT/examples" \
+  "$TARGET_ROOT/extensions/devspace-tool" \
   "$TARGET_ROOT/package.json" \
   "$TARGET_ROOT/package-lock.json" \
   "$TARGET_ROOT/.env.example"; then

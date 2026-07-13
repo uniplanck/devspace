@@ -7,6 +7,7 @@ on:
       - src/**
       - skills/**
       - examples/**
+      - extensions/devspace-tool/**
       - package.json
       - package-lock.json
       - tsconfig.json
@@ -73,7 +74,15 @@ jobs:
       - name: Validate public core
         if: steps.sync-secret.outputs.configured == 'true'
         working-directory: public-devspace
-        run: npm ci && npm run typecheck && npm test && npm run build
+        run: |
+          npm ci
+          npm run typecheck
+          npm test
+          npm run build
+          swiftc -parse-as-library -typecheck -framework SwiftUI -framework AppKit \
+            extensions/devspace-tool/UsageCore.swift \
+            extensions/devspace-tool/DevSpaceToolView.swift \
+            extensions/devspace-tool/DevSpaceTool.swift
 
       - name: Create sync branch and fast-forward main
         if: steps.sync-secret.outputs.configured == 'true'
@@ -84,13 +93,13 @@ jobs:
         run: |
           git config user.name "devspace-sync[bot]"
           git config user.email "devspace-sync@users.noreply.github.com"
-          branch="sync/gpt-agent-core-${RUN_ID}"
+          branch="sync/devspace-core-${RUN_ID}"
           git checkout -b "$branch"
-          git add .env.example AGENTS.md LICENSE package.json package-lock.json tsconfig.json tsconfig.build.json vite.config.ts src skills examples scripts/build-app.mjs scripts/clean-dist.mjs scripts/dev-server.mjs scripts/fix-node-pty-permissions.mjs
+          git add .env.example AGENTS.md LICENSE package.json package-lock.json tsconfig.json tsconfig.build.json vite.config.ts src skills examples extensions/devspace-tool scripts/build-app.mjs scripts/clean-dist.mjs scripts/dev-server.mjs scripts/fix-node-pty-permissions.mjs
           if git diff --cached --quiet; then
             echo "No public changes."
             exit 0
           fi
-          git commit -m "chore: sync generic GPT-Agent core ${SOURCE_SHA::12}"
+          git commit -m "chore: sync generic DevSpace core ${SOURCE_SHA::12}"
           git push origin "$branch"
           git push origin "$branch:main"

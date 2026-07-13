@@ -54,10 +54,14 @@ npm --prefix "$TEMP_ROOT/devspace" ci
 npm --prefix "$TEMP_ROOT/devspace" run typecheck
 npm --prefix "$TEMP_ROOT/devspace" test
 npm --prefix "$TEMP_ROOT/devspace" run build
+/usr/bin/swiftc -parse-as-library -typecheck -framework SwiftUI -framework AppKit \
+  "$TEMP_ROOT/devspace/extensions/devspace-tool/UsageCore.swift" \
+  "$TEMP_ROOT/devspace/extensions/devspace-tool/DevSpaceToolView.swift" \
+  "$TEMP_ROOT/devspace/extensions/devspace-tool/DevSpaceTool.swift"
 
 git -C "$TEMP_ROOT/devspace" config user.name "devspace-sync[local]"
 git -C "$TEMP_ROOT/devspace" config user.email "devspace-sync@users.noreply.github.com"
-SYNC_BRANCH="sync/gpt-agent-core-$STAMP"
+SYNC_BRANCH="sync/devspace-core-$STAMP"
 git -C "$TEMP_ROOT/devspace" switch -c "$SYNC_BRANCH"
 git -C "$TEMP_ROOT/devspace" add \
   .env.example \
@@ -74,14 +78,15 @@ git -C "$TEMP_ROOT/devspace" add \
   scripts/build-app.mjs \
   scripts/clean-dist.mjs \
   scripts/dev-server.mjs \
-  scripts/fix-node-pty-permissions.mjs
+  scripts/fix-node-pty-permissions.mjs \
+  extensions/devspace-tool
 
 if git -C "$TEMP_ROOT/devspace" diff --cached --quiet; then
   echo "auto-publish: public DevSpace core already current"
   exit 0
 fi
 
-git -C "$TEMP_ROOT/devspace" commit -m "chore: sync generic GPT-Agent core $(git -C "$ROOT" rev-parse --short=12 HEAD)"
+git -C "$TEMP_ROOT/devspace" commit -m "chore: sync generic DevSpace core $(git -C "$ROOT" rev-parse --short=12 HEAD)"
 git -C "$TEMP_ROOT/devspace" push origin "$SYNC_BRANCH"
 git -C "$TEMP_ROOT/devspace" push origin "$SYNC_BRANCH:main"
 echo "auto-publish: private and public repositories updated"
