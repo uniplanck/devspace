@@ -14,6 +14,8 @@ process.env.DEVSPACE_CHAT_PROGRESS_PATH = join(stateDir, "chat-progress.json");
 
 const started = updateChatProgress({
   sessionId: "session_test",
+  conversationId: "11111111-2222-3333-4444-555555555555",
+  conversationUrl: "https://chatgpt.com/c/11111111-2222-3333-4444-555555555555",
   chatLabel: "GAG進化",
   workspaceId: "ws_test",
   workspaceRoot: "/tmp/gag",
@@ -22,13 +24,16 @@ const started = updateChatProgress({
   currentTask: "既存確認",
   estimateMinutes: 20,
 });
-assert.equal(started.id, "chat_session_test");
+assert.equal(started.id, "chat_11111111-2222-3333-4444-555555555555");
+assert.equal(started.conversationId, "11111111-2222-3333-4444-555555555555");
+assert.equal(started.conversationUrl, "https://chatgpt.com/c/11111111-2222-3333-4444-555555555555");
 assert.equal(started.status, "running");
 assert.equal(started.estimatedTotalSeconds, 1_200);
 assert.equal(started.estimateSource, "provided");
 
 const updated = updateChatProgress({
-  sessionId: "session_test",
+  sessionId: "session_changed_but_same_chat",
+  conversationId: "11111111-2222-3333-4444-555555555555",
   chatLabel: "GAG進化",
   workspaceId: "ws_test",
   workspaceRoot: "/tmp/gag",
@@ -44,7 +49,8 @@ assert.equal(updated.estimatedTotalSeconds, 1_200);
 assert.match(formatChatProgressResult(updated), /Progress synced: 50%/u);
 
 const completed = updateChatProgress({
-  sessionId: "session_test",
+  sessionId: "session_changed_again",
+  conversationId: "11111111-2222-3333-4444-555555555555",
   chatLabel: "GAG進化",
   workspaceId: "ws_test",
   workspaceRoot: "/tmp/gag",
@@ -56,6 +62,19 @@ const completed = updateChatProgress({
 assert.equal(completed.status, "completed");
 assert.equal(completed.remainingSeconds, 0);
 assert.equal(listChatProgress().length, 1);
+
+const parallel = updateChatProgress({
+  sessionId: "parallel_session",
+  conversationId: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+  conversationUrl: "https://chatgpt.com/c/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+  chatLabel: "GAG進化",
+  workspaceId: "ws_test",
+  workspaceRoot: "/tmp/gag",
+  overallProgress: 30,
+  currentTask: "並列レビュー",
+});
+assert.equal(parallel.status, "running");
+assert.equal(listChatProgress().length, 2);
 
 if (previousPath === undefined) {
   delete process.env.DEVSPACE_CHAT_PROGRESS_PATH;

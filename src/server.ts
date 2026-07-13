@@ -861,8 +861,13 @@ function createMcpServer(
       const workspace = input.workspaceId
         ? workspaces.getWorkspace(input.workspaceId)
         : undefined;
+      const conversation = chatConversationContext(
+        extra._meta as Record<string, unknown> | undefined,
+      );
       const record = updateChatProgress({
         sessionId: extra.sessionId,
+        conversationId: conversation.id,
+        conversationUrl: conversation.url,
         chatLabel: input.chatLabel,
         workspaceId: input.workspaceId,
         workspaceRoot: workspace?.root,
@@ -1976,6 +1981,76 @@ function createMcpServer(
   registerV11Tools(server, { config, workspaces, localAgentProviders });
 
   return server;
+}
+
+function firstMetaString(
+  meta: Record<string, unknown> | undefined,
+  keys: string[],
+): string | undefined {
+  for (const key of keys) {
+    const value = meta?.[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return undefined;
+}
+
+function safeChatGptUrl(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  try {
+    const url = new URL(value);
+    const hostname = url.hostname.toLowerCase();
+    if (url.protocol !== "https:" || (hostname !== "chatgpt.com" && hostname !== "www.chatgpt.com")) {
+      return undefined;
+    }
+    url.hostname = "chatgpt.com";
+    url.hash = "";
+    return url.toString();
+  } catch {
+    return undefined;
+  }
+}
+
+function chatConversationContext(
+  meta: Record<string, unknown> | undefined,
+): { id?: string; url?: string } {
+  const id = firstMetaString(meta, [
+    "openai/conversation_id",
+    "openai/conversationId",
+    "openai/chat_id",
+    "openai/chatId",
+    "conversation_id",
+    "conversationId",
+    "chat_id",
+    "chatId",
+  ]);
+  const directUrl = safeChatGptUrl(firstMetaString(meta, [
+    "openai/conversation_url",
+    "openai/conversationUrl",
+    "openai/chat_url",
+    "openai/chatUrl",
+    "conversation_url",
+    "conversationUrl",
+    "chat_url",
+    "chatUrl",
+  ]));
+  if (directUrl) return { id, url: directUrl };
+  if (!id) return {};
+
+  const projectId = firstMetaString(meta, [
+    "openai/project_id",
+    "openai/projectId",
+    "openai/gizmo_id",
+    "openai/gizmoId",
+    "project_id",
+    "projectId",
+    "gizmo_id",
+    "gizmoId",
+  ]);
+  const encodedConversation = encodeURIComponent(id);
+  const url = projectId
+    ? `https://chatgpt.com/g/${encodeURIComponent(projectId)}/c/${encodedConversation}`
+    : `https://chatgpt.com/c/${encodedConversation}`;
+  return { id, url };
 }
 
 function privateUsageSessionKey(req: Request, fallback?: string): string | undefined {
