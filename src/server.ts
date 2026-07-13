@@ -19,6 +19,10 @@ import type { Request, Response } from "express";
 import * as z from "zod/v4";
 import { applyPatch } from "./apply-patch.js";
 import { formatChatProgressResult, updateChatProgress } from "./chat-progress.js";
+import {
+  formatEc2ControlSummary,
+  invokeEc2Control,
+} from "./ec2-control.js";
 import { loadConfig, type ServerConfig, type WidgetMode } from "./config.js";
 import {
   logEvent,
@@ -888,6 +892,129 @@ function createMcpServer(
           estimatedJpyMax: record.sessionEstimatedJpyMax ?? record.sessionEstimatedJpy,
         },
       };
+    },
+  );
+
+  registerAppTool(
+    server,
+    "ec2_status",
+    {
+      title: "EC2 status and AWS credits",
+      description:
+        "Read the current Uniplanck EC2, GAE, Minecraft, EC2 schedule queue, AWS credit balance, and estimated remaining operating days. This is IAM-authenticated and does not require an open workspace. Use this before and after EC2 control operations.",
+      inputSchema: {},
+      outputSchema: {
+        result: z.string(),
+        data: z.unknown(),
+      },
+      _meta: {},
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    async () => {
+      const startedAt = performance.now();
+      try {
+        const data = await invokeEc2Control({ action: "status" });
+        const result = formatEc2ControlSummary(data);
+        logToolCall(config, {
+          tool: "ec2_status",
+          success: true,
+          durationMs: Math.round(performance.now() - startedAt),
+        });
+        return {
+          content: [textBlock(result)],
+          structuredContent: { result, data },
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        logToolCall(config, {
+          tool: "ec2_status",
+          success: false,
+          durationMs: Math.round(performance.now() - startedAt),
+          error: message,
+        });
+        throw error;
+      }
+    },
+  );
+
+  registerAppTool(
+    server,
+    "ec2_control",
+    {
+      title: "Control and schedule EC2",
+      description:
+        "Control the fixed Uniplanck EC2 through an IAM-authenticated Lambda. Supports immediate start/stop, one-time or daily start/stop schedules, schedule cancellation, and billing refresh. Start/stop and schedule mutations are real production operations: call only when the user explicitly requests them. Every successful response automatically includes EC2/GAE/Minecraft state, AWS credits, estimated operating days, and the current schedule queue.",
+      inputSchema: {
+        action: z.enum([
+          "ec2_start",
+          "ec2_stop",
+          "schedule_create",
+          "schedule_delete",
+          "billing_refresh",
+        ]),
+        scheduleAction: z.enum(["ec2_start", "ec2_stop"]).optional(),
+        scheduleType: z.enum(["once", "daily"]).optional(),
+        runAt: z
+          .string()
+          .optional()
+          .describe("One-time execution in Asia/Tokyo, formatted YYYY-MM-DDTHH:mm."),
+        dailyTime: z
+          .string()
+          .optional()
+          .describe("Daily execution time in Asia/Tokyo, formatted HH:mm."),
+        scheduleName: z
+          .string()
+          .optional()
+          .describe("Existing schedule name returned by ec2_status."),
+      },
+      outputSchema: {
+        result: z.string(),
+        data: z.unknown(),
+      },
+      _meta: {},
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
+    },
+    async ({ action, scheduleAction, scheduleType, runAt, dailyTime, scheduleName }) => {
+      const startedAt = performance.now();
+      try {
+        const data = await invokeEc2Control({
+          action,
+          scheduleAction,
+          scheduleType,
+          runAt,
+          dailyTime,
+          scheduleName,
+        });
+        const result = formatEc2ControlSummary(data);
+        logToolCall(config, {
+          tool: "ec2_control",
+          success: true,
+          durationMs: Math.round(performance.now() - startedAt),
+        });
+        return {
+          content: [textBlock(result)],
+          structuredContent: { result, data },
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        logToolCall(config, {
+          tool: "ec2_control",
+          success: false,
+          durationMs: Math.round(performance.now() - startedAt),
+          error: message,
+        });
+        throw error;
+      }
     },
   );
 
