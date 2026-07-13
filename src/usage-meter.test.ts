@@ -10,6 +10,7 @@ import {
   estimateTokensFromChars,
   getExecutionCostSnapshot,
   recordObservedToolUsage,
+  runWithUsageSession,
   textContentChars,
 } from "./usage-meter.js";
 
@@ -31,7 +32,9 @@ assert.equal(textContentChars([{ type: "text", text: "hello" }]), 5);
 
 const previousHistory = process.env.DEVSPACE_USAGE_HISTORY;
 const previousRole = process.env.DEVSPACE_NODE_ROLE;
+const previousLabel = process.env.DEVSPACE_USAGE_LABEL;
 process.env.DEVSPACE_USAGE_HISTORY = platform() === "win32" ? "NUL" : "/dev/null";
+delete process.env.DEVSPACE_USAGE_LABEL;
 process.env.DEVSPACE_NODE_ROLE = "gag";
 const usage = recordObservedToolUsage({
   tool: "read",
@@ -91,6 +94,24 @@ const otherChat = recordObservedToolUsage({
 });
 assert.equal(sameChat.sessionCalls, 2);
 assert.equal(otherChat.sessionCalls, 1);
+const stableFirst = runWithUsageSession("mcp-chat-stable", () => recordObservedToolUsage({
+  tool: "read",
+  usageSessionId: "request-a",
+  observedChars: 4,
+  savedChars: 0,
+  inputChars: 4,
+  outputChars: 4,
+}));
+const stableSecond = runWithUsageSession("mcp-chat-stable", () => recordObservedToolUsage({
+  tool: "read",
+  usageSessionId: "request-b",
+  observedChars: 4,
+  savedChars: 0,
+  inputChars: 4,
+  outputChars: 4,
+}));
+assert.equal(stableFirst.sessionCalls, 1);
+assert.equal(stableSecond.sessionCalls, 2);
 process.env.DEVSPACE_NODE_ROLE = "gae";
 const gaeText = appendUsageToContent(content, otherChat, "compact").at(-1);
 assert.match(gaeText?.type === "text" ? gaeText.text : "", /^GAE · GPT-5\.6推定/u);
@@ -117,4 +138,9 @@ if (previousRole === undefined) {
   delete process.env.DEVSPACE_NODE_ROLE;
 } else {
   process.env.DEVSPACE_NODE_ROLE = previousRole;
+}
+if (previousLabel === undefined) {
+  delete process.env.DEVSPACE_USAGE_LABEL;
+} else {
+  process.env.DEVSPACE_USAGE_LABEL = previousLabel;
 }
