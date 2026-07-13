@@ -38,6 +38,24 @@ await writeFile(packagePath, `${JSON.stringify(packageJson, null, 2)}\n`);
 await rm(join(targetRoot, "src/gex-learning-store.ts"), { force: true });
 await rm(join(targetRoot, "src/gex-learning-store.test.ts"), { force: true });
 
+const usageMeterPath = join(targetRoot, "src/usage-meter.ts");
+const usageMeterSource = await readFile(usageMeterPath, "utf8");
+const privateUsageLabel = 'return role === "gae" || role === "ec2" || instance.includes("4ec2") ? "GAE" : "GAG";';
+if (!usageMeterSource.includes(privateUsageLabel)) {
+  throw new Error("public sanitizer could not find the private GAG usage label");
+}
+await writeFile(
+  usageMeterPath,
+  usageMeterSource.replace(privateUsageLabel, privateUsageLabel.replace('"GAG"', '"DevSpace"')),
+);
+
+const usageMeterTestPath = join(targetRoot, "src/usage-meter.test.ts");
+const usageMeterTestSource = await readFile(usageMeterTestPath, "utf8");
+if (!usageMeterTestSource.includes("GAG")) {
+  throw new Error("public sanitizer could not find the private GAG usage test label");
+}
+await writeFile(usageMeterTestPath, usageMeterTestSource.replaceAll("GAG", "DevSpace"));
+
 async function filesUnder(directory) {
   const entries = await readdir(directory, { withFileTypes: true });
   const files = [];

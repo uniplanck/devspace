@@ -30,9 +30,12 @@ assert.equal(editInputChars([{ oldText: "old", newText: "new" }]), 6);
 assert.equal(textContentChars([{ type: "text", text: "hello" }]), 5);
 
 const previousHistory = process.env.DEVSPACE_USAGE_HISTORY;
+const previousRole = process.env.DEVSPACE_NODE_ROLE;
 process.env.DEVSPACE_USAGE_HISTORY = platform() === "win32" ? "NUL" : "/dev/null";
+process.env.DEVSPACE_NODE_ROLE = "gag";
 const usage = recordObservedToolUsage({
   tool: "read",
+  usageSessionId: "chat-a",
   observedChars: 40,
   savedChars: 80,
   inputChars: 10,
@@ -54,18 +57,43 @@ const compactContent = appendUsageToContent(content, usage, "compact");
 const compactText = compactContent.at(-1);
 assert.match(
   compactText?.type === "text" ? compactText.text : "",
-  /gag cost: in ~8 \/ out ~3 tok/u,
+  /GAG · GPT-5\.6推定 \| 今回 in ~8 \/ out ~3 tok/u,
+);
+assert.match(
+  compactText?.type === "text" ? compactText.text : "",
+  /このChat累計/u,
 );
 const fullContent = appendUsageToContent(content, usage, "full");
 const fullText = fullContent.at(-1);
 assert.match(
   fullText?.type === "text" ? fullText.text : "",
-  /実行コスト目安/u,
+  /GAG · GPT-5\.6推定コスト/u,
 );
 assert.match(
   fullText?.type === "text" ? fullText.text : "",
   /GAG返却結果をモデル入力、ツール引数をモデル出力/u,
 );
+const sameChat = recordObservedToolUsage({
+  tool: "read",
+  usageSessionId: "chat-a",
+  observedChars: 4,
+  savedChars: 0,
+  inputChars: 4,
+  outputChars: 4,
+});
+const otherChat = recordObservedToolUsage({
+  tool: "read",
+  usageSessionId: "chat-b",
+  observedChars: 4,
+  savedChars: 0,
+  inputChars: 4,
+  outputChars: 4,
+});
+assert.equal(sameChat.sessionCalls, 2);
+assert.equal(otherChat.sessionCalls, 1);
+process.env.DEVSPACE_NODE_ROLE = "gae";
+const gaeText = appendUsageToContent(content, otherChat, "compact").at(-1);
+assert.match(gaeText?.type === "text" ? gaeText.text : "", /^GAE · GPT-5\.6推定/u);
 const snapshot = getExecutionCostSnapshot();
 assert.equal(snapshot.calls >= 1, true);
 assert.equal(snapshot.byTool.read.calls >= 1, true);
@@ -80,4 +108,9 @@ if (previousHistory === undefined) {
   delete process.env.DEVSPACE_USAGE_HISTORY;
 } else {
   process.env.DEVSPACE_USAGE_HISTORY = previousHistory;
+}
+if (previousRole === undefined) {
+  delete process.env.DEVSPACE_NODE_ROLE;
+} else {
+  process.env.DEVSPACE_NODE_ROLE = previousRole;
 }
