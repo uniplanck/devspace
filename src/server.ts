@@ -1,4 +1,4 @@
-import { randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { access, realpath } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
@@ -41,6 +41,7 @@ import {
   editInputChars,
   estimateFileChars,
   recordObservedToolUsage,
+  runWithUsageSession,
   textContentChars,
 } from "./usage-meter.js";
 import { SingleUserOAuthProvider } from "./oauth-provider.js";
@@ -1944,6 +1945,57 @@ function createMcpServer(
   return server;
 }
 
+function privateUsageSessionKey(
+  req: Request,
+  workspaces: WorkspaceRegistry,
+  fallback?: string,
+): string | undefined {
+  const meta = req.body?.params?._meta as Record<string, unknown> | undefined;
+  const args = req.body?.params?.arguments as Record<string, unknown> | undefined;
+  const conversationCandidates = [
+    meta?.["openai/conversation_id"],
+    meta?.["openai/conversationId"],
+    meta?.["openai/chat_id"],
+    meta?.["openai/chatId"],
+    meta?.conversation_id,
+    meta?.conversationId,
+    meta?.chat_id,
+    meta?.chatId,
+  ];
+  const conversationId = conversationCandidates.find(
+    (value): value is string => typeof value === "string" && value.trim().length > 0,
+  );
+
+  let workspaceRoot: string | undefined;
+  const workspaceId = typeof args?.workspaceId === "string" ? args.workspaceId.trim() : "";
+  if (workspaceId) {
+    try {
+      workspaceRoot = workspaces.getWorkspace(workspaceId).root;
+    } catch {
+      workspaceRoot = undefined;
+    }
+  } else if (
+    req.body?.params?.name === "open_workspace"
+    && typeof args?.path === "string"
+    && args.path.trim()
+  ) {
+    workspaceRoot = args.path.trim();
+  }
+
+  const privateValue = conversationId
+    ? `conversation:${conversationId.trim()}`
+    : req.auth?.token
+      ? `oauth:${req.auth.token}`
+      : workspaceRoot
+        ? `workspace:${workspaceRoot}`
+        : fallback
+          ? `transport:${fallback}`
+          : undefined;
+  return privateValue
+    ? createHash("sha256").update(privateValue).digest("hex").slice(0, 32)
+    : undefined;
+}
+
 export function createServer(config = loadConfig()): RunningServer {
   const allowedHosts = config.allowedHosts.includes("*")
     ? undefined
@@ -2084,7 +2136,10 @@ export function createServer(config = loadConfig()): RunningServer {
         return;
       }
 
-      await transport.handleRequest(req, res, req.body);
+      await runWithUsageSession(
+        privateUsageSessionKey(req, workspaces, sessionId ?? transport.sessionId),
+        () => transport.handleRequest(req, res, req.body),
+      );
     } catch (error) {
       logEvent(config.logging, "error", "mcp_request_error", {
         requestId,
