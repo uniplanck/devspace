@@ -7,7 +7,7 @@ on:
 
 permissions:
   contents: read
-  pull-requests: write
+  pull-requests: read
 
 concurrency:
   group: propose-gag-to-gae
@@ -39,16 +39,11 @@ jobs:
           number="$(gh pr list --base gae --head main --state open --json number --jq '.[0].number // empty')"
           echo "number=$number" >> "$GITHUB_OUTPUT"
 
-      - name: Create promotion pull request
+      - name: Report manual promotion required
         if: steps.diff.outputs.count != '0' && steps.existing.outputs.number == ''
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
-          gh pr create \
-            --base gae \
-            --head main \
-            --title "sync: promote GAG main to GAE" \
-            --body $'GAG `main` has changes not yet reviewed for the GAE release channel.\n\nThis pull request does **not** update EC2, restart services, or merge automatically. Review GAE-specific runtime behavior and CI before merging.'
+          echo "::warning::GAG main is ahead of GAE and no promotion PR is open."
+          echo "Run zsh scripts/propose-gae-sync-local.sh from an authenticated Mac checkout to create the review PR."
 
       - name: Report existing promotion pull request
         if: steps.diff.outputs.count != '0' && steps.existing.outputs.number != ''

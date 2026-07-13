@@ -38,6 +38,9 @@ else
   fi
 fi
 
+zsh "$ROOT/scripts/propose-gae-sync-local.sh" || \
+  echo "auto-publish: GAE promotion PR check failed; private main remains updated" >&2
+
 if [[ ! -f "$SYNC_KEY" ]]; then
   echo "auto-publish: private repo updated; public sync key is missing at $SYNC_KEY" >&2
   exit 0

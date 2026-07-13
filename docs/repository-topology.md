@@ -56,7 +56,13 @@ The private GAG publisher then exports the generic version to `uniplanck/devspac
 
 `uniplanck/gpt-agent:gae` is the source of truth for GPT-Agent4EC2.
 
-GAE starts from reviewed GAG `main` commits and adds EC2 release-channel policy. A push to `main` may create or update a pull request with:
+GAE starts from reviewed GAG `main` commits and adds EC2 release-channel policy. A push to `main` checks whether a promotion pull request already exists. PR creation uses the authenticated Mac checkout because this repository does not grant GitHub Actions permission to create pull requests:
+
+```bash
+zsh scripts/propose-gae-sync-local.sh
+```
+
+The resulting pull request uses:
 
 ```text
 base: gae
