@@ -33,6 +33,7 @@ struct DevSpaceToolView: View {
     @State private var didApplyDefaultSection = false
 
     private let timer = Timer.publish(every: 5, on: .main, in: .common).autoconnect()
+    private let settingsControlWidth: CGFloat = 420
 
     private var language: AppLanguage { AppLanguage(rawValue: languageRaw) ?? .automatic }
     private var region: RegionPreset { RegionPreset(rawValue: regionRaw) ?? .automatic }
@@ -379,22 +380,22 @@ struct DevSpaceToolView: View {
                         Text(japanese ? "自動" : "Automatic").tag(AppLanguage.automatic.rawValue)
                         Text("English").tag(AppLanguage.english.rawValue)
                         Text("日本語").tag(AppLanguage.japanese.rawValue)
-                    }.pickerStyle(.segmented).frame(width: 360)
+                    }.pickerStyle(.segmented).frame(width: settingsControlWidth)
                 }
                 settingRow(japanese ? "地域形式" : "Regional format") {
                     Picker("Region", selection: $regionRaw) {
                         ForEach(RegionPreset.allCases) { value in Text(regionName(value)).tag(value.rawValue) }
-                    }.frame(width: 230)
+                    }.frame(width: settingsControlWidth)
                 }
                 settingRow(japanese ? "集計タイムゾーン" : "Aggregation time zone") {
                     Picker("Time zone", selection: $timeZoneRaw) {
                         ForEach(TimeZonePreset.allCases) { value in Text(timeZoneName(value)).tag(value.rawValue) }
-                    }.frame(width: 230)
+                    }.frame(width: settingsControlWidth)
                 }
                 settingRow(japanese ? "表示通貨" : "Display currency") {
                     Picker("Currency", selection: $currencyRaw) {
                         ForEach(DisplayCurrency.allCases) { value in Text(value.rawValue).tag(value.rawValue) }
-                    }.pickerStyle(.segmented).frame(width: 300)
+                    }.pickerStyle(.segmented).frame(width: settingsControlWidth)
                 }
             }
 
@@ -403,49 +404,66 @@ struct DevSpaceToolView: View {
                     Picker("Week mode", selection: $weekModeRaw) {
                         Text(japanese ? "今日を含む7日" : "Rolling 7 days").tag(WeekMode.rollingSevenDays.rawValue)
                         Text(japanese ? "曜日起点" : "Calendar week").tag(WeekMode.calendarWeek.rawValue)
-                    }.pickerStyle(.segmented).frame(width: 360)
+                    }.pickerStyle(.segmented).frame(width: settingsControlWidth)
                 }
                 if weekMode == .calendarWeek {
                     settingRow(japanese ? "週の開始曜日" : "Week starts on") {
                         Picker("Weekday", selection: $weekStartWeekday) {
                             ForEach(1...7, id: \.self) { weekday in Text(weekdayName(weekday)).tag(weekday) }
-                        }.frame(width: 180)
+                        }.frame(width: settingsControlWidth)
                     }
                 }
                 settingRow(japanese ? "日の切替時刻" : "Day boundary") {
-                    Stepper(value: $dayBoundaryHour, in: 0...23) {
-                        Text(String(format: "%02d:00", dayBoundaryHour)).font(.system(.body, design: .monospaced))
-                    }.frame(width: 150)
+                    HStack {
+                        Spacer()
+                        Stepper(value: $dayBoundaryHour, in: 0...23) {
+                            Text(String(format: "%02d:00", dayBoundaryHour))
+                                .font(.system(.body, design: .monospaced))
+                                .frame(width: 72, alignment: .trailing)
+                        }
+                        .frame(width: 160)
+                    }
+                    .frame(width: settingsControlWidth)
                 }
                 settingRow(japanese ? "1か月" : "One month") {
                     Picker("Month mode", selection: $monthModeRaw) {
                         Text(japanese ? "今日を含む30日" : "Rolling 30 days").tag(MonthMode.rollingThirtyDays.rawValue)
                         Text(japanese ? "毎月1日起点" : "Calendar month").tag(MonthMode.calendarMonth.rawValue)
-                    }.pickerStyle(.segmented).frame(width: 360)
+                    }.pickerStyle(.segmented).frame(width: settingsControlWidth)
                 }
                 settingRow(japanese ? "1年" : "One year") {
                     Picker("Year mode", selection: $yearModeRaw) {
                         Text(japanese ? "今日を含む365日" : "Rolling 365 days").tag(YearMode.rollingThreeSixtyFiveDays.rawValue)
                         Text(japanese ? "1月1日起点" : "Calendar year").tag(YearMode.calendarYear.rawValue)
-                    }.pickerStyle(.segmented).frame(width: 360)
+                    }.pickerStyle(.segmented).frame(width: settingsControlWidth)
                 }
             }
 
             settingPanel(japanese ? "料金計算" : "Pricing") {
                 settingRow(japanese ? "入力 / 100万token (USD)" : "Input / 1M tokens (USD)") {
-                    TextField("5", value: $inputUsdPerMillion, format: .number.precision(.fractionLength(0...4))).frame(width: 130)
+                    TextField("5", value: $inputUsdPerMillion, format: .number.precision(.fractionLength(0...4)))
+                        .multilineTextAlignment(.trailing)
+                        .frame(width: settingsControlWidth)
                 }
                 settingRow(japanese ? "出力 / 100万token (USD)" : "Output / 1M tokens (USD)") {
-                    TextField("30", value: $outputUsdPerMillion, format: .number.precision(.fractionLength(0...4))).frame(width: 130)
+                    TextField("30", value: $outputUsdPerMillion, format: .number.precision(.fractionLength(0...4)))
+                        .multilineTextAlignment(.trailing)
+                        .frame(width: settingsControlWidth)
                 }
                 settingRow("USD / JPY") {
-                    TextField("160", value: $usdJpyRate, format: .number.precision(.fractionLength(0...4))).frame(width: 130)
+                    TextField("160", value: $usdJpyRate, format: .number.precision(.fractionLength(0...4)))
+                        .multilineTextAlignment(.trailing)
+                        .frame(width: settingsControlWidth)
                 }
                 settingRow("USD / EUR") {
-                    TextField("0.92", value: $usdEurRate, format: .number.precision(.fractionLength(0...4))).frame(width: 130)
+                    TextField("0.92", value: $usdEurRate, format: .number.precision(.fractionLength(0...4)))
+                        .multilineTextAlignment(.trailing)
+                        .frame(width: settingsControlWidth)
                 }
                 settingRow("USD / GBP") {
-                    TextField("0.79", value: $usdGbpRate, format: .number.precision(.fractionLength(0...4))).frame(width: 130)
+                    TextField("0.79", value: $usdGbpRate, format: .number.precision(.fractionLength(0...4)))
+                        .multilineTextAlignment(.trailing)
+                        .frame(width: settingsControlWidth)
                 }
                 Text(japanese ? "表示値は履歴上のtokenから算出する概算で、ChatGPT契約料金や実請求額ではありません。" : "Values are estimates from recorded tokens, not ChatGPT subscription billing or provider invoices.")
                     .font(.system(size: 10))
@@ -458,10 +476,14 @@ struct DevSpaceToolView: View {
                         Text(japanese ? "オーロラ" : "Aurora").tag(AppTheme.aurora.rawValue)
                         Text(japanese ? "モノクロ" : "Monochrome").tag(AppTheme.monochrome.rawValue)
                         Text(japanese ? "シンプル" : "Minimal").tag(AppTheme.minimal.rawValue)
-                    }.pickerStyle(.segmented).frame(width: 360)
+                    }.pickerStyle(.segmented).frame(width: settingsControlWidth)
                 }
-                Toggle(japanese ? "入力・出力費用の内訳を表示" : "Show input/output cost split", isOn: $showCostSplit)
-                Toggle(japanese ? "数値をK/M形式で短縮" : "Use compact K/M numbers", isOn: $compactNumbers)
+                settingRow(japanese ? "入力・出力費用の内訳を表示" : "Show input/output cost split") {
+                    Toggle("", isOn: $showCostSplit).labelsHidden().frame(width: settingsControlWidth, alignment: .trailing)
+                }
+                settingRow(japanese ? "数値をK/M形式で短縮" : "Use compact K/M numbers") {
+                    Toggle("", isOn: $compactNumbers).labelsHidden().frame(width: settingsControlWidth, alignment: .trailing)
+                }
             }
 
             settingPanel(japanese ? "動作" : "Behavior") {
@@ -472,21 +494,23 @@ struct DevSpaceToolView: View {
                         Text("20 sec").tag(20)
                         Text("1 min").tag(60)
                         Text("5 min").tag(300)
-                    }.frame(width: 150)
+                    }.frame(width: settingsControlWidth)
                 }
                 settingRow(japanese ? "起動時の画面" : "Default screen") {
                     Picker("Default screen", selection: $defaultSectionRaw) {
                         ForEach(AppSection.allCases) { value in Text(sectionTitle(value)).tag(value.rawValue) }
-                    }.frame(width: 180)
+                    }.frame(width: settingsControlWidth)
                 }
                 settingRow(japanese ? "フォルダ並び順" : "Folder sort") {
                     Picker("Sort", selection: $sortMetricRaw) {
                         Text(japanese ? "費用" : "Cost").tag(SortMetric.cost.rawValue)
                         Text("Token").tag(SortMetric.tokens.rawValue)
                         Text(japanese ? "呼び出し数" : "Calls").tag(SortMetric.calls.rawValue)
-                    }.pickerStyle(.segmented).frame(width: 300)
+                    }.pickerStyle(.segmented).frame(width: settingsControlWidth)
                 }
-                Toggle(japanese ? "所属不明の履歴を非表示" : "Hide unknown workspace history", isOn: $hideUnknownFolders)
+                settingRow(japanese ? "所属不明の履歴を非表示" : "Hide unknown workspace history") {
+                    Toggle("", isOn: $hideUnknownFolders).labelsHidden().frame(width: settingsControlWidth, alignment: .trailing)
+                }
             }
 
             settingPanel(japanese ? "詳細設定" : "Advanced") {
@@ -590,7 +614,7 @@ struct DevSpaceToolView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             content()
                 .labelsHidden()
-                .frame(width: 380, alignment: .trailing)
+                .frame(width: settingsControlWidth, alignment: .trailing)
         }
     }
 
