@@ -66,7 +66,8 @@ The optional macOS **DevSpace Tool** provides:
 - Automatic / English / Japanese UI switching
 - Overview, Analytics, Runtime, Folders, and Settings screens
 - runtime status plus optional start/stop controls
-- approved-root visibility
+- approved-folder listing, Finder selection, path entry, and removal
+- automatic config backups plus runtime restart when roots change
 - token, call, and estimated API-cost analytics
 - Aurora, Monochrome, and Minimal themes
 - safe copy actions for the MCP URL, diagnostics command, and Owner Password retrieval command
