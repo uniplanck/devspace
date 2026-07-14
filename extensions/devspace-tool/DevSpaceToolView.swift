@@ -16,11 +16,17 @@ struct DevSpaceToolView: View {
     @AppStorage("devspaceTool.analysisPeriod") private var selectedPeriodRaw = AnalysisPeriod.week.rawValue
     @AppStorage("devspaceTool.customStart") private var customStartTimestamp = Date().addingTimeInterval(-6 * 86_400).timeIntervalSince1970
     @AppStorage("devspaceTool.customEnd") private var customEndTimestamp = Date().timeIntervalSince1970
+    @AppStorage("devspaceTool.pricingModelID") private var pricingModelID = "gpt-5.6-sol"
+    @AppStorage("devspaceTool.pricingCatalogJSON") private var pricingCatalogJSON = ""
     @AppStorage("devspaceTool.inputUsdPerMillion") private var inputUsdPerMillion = 5.0
     @AppStorage("devspaceTool.outputUsdPerMillion") private var outputUsdPerMillion = 30.0
     @AppStorage("devspaceTool.usdJpyRate") private var usdJpyRate = 160.0
     @AppStorage("devspaceTool.usdEurRate") private var usdEurRate = 0.92
     @AppStorage("devspaceTool.usdGbpRate") private var usdGbpRate = 0.79
+    @AppStorage("devspaceTool.autoPricingUpdate") private var autoPricingUpdate = true
+    @AppStorage("devspaceTool.pricingLastUpdated") private var pricingLastUpdated = 0.0
+    @AppStorage("devspaceTool.exchangeLastUpdated") private var exchangeLastUpdated = 0.0
+    @AppStorage("devspaceTool.pricingRefreshStatus") private var pricingRefreshStatus = ""
     @AppStorage("devspaceTool.theme") private var themeRaw = AppTheme.aurora.rawValue
     @AppStorage("devspaceTool.sortMetric") private var sortMetricRaw = SortMetric.cost.rawValue
     @AppStorage("devspaceTool.autoRefreshSeconds") private var autoRefreshSeconds = 20
@@ -34,6 +40,8 @@ struct DevSpaceToolView: View {
     @State private var showingPathInput = false
     @State private var pathInput = ""
     @State private var pendingRootRemoval: String?
+    @State private var pricingRefreshInProgress = false
+    @State private var pricingRefreshMessage = ""
 
     private let timer = Timer.publish(every: 5, on: .main, in: .common).autoconnect()
     private let settingsControlWidth: CGFloat = 420
@@ -50,6 +58,13 @@ struct DevSpaceToolView: View {
     private var theme: AppTheme { AppTheme(rawValue: themeRaw) ?? .aurora }
     private var sortMetric: SortMetric { SortMetric(rawValue: sortMetricRaw) ?? .cost }
     private var defaultSection: AppSection { AppSection(rawValue: defaultSectionRaw) ?? .overview }
+    private var pricingModels: [ModelPricingProfile] {
+        _ = pricingCatalogJSON
+        return ModelPricingService.catalog(prefix: "devspaceTool")
+    }
+    private var selectedPricingProfile: ModelPricingProfile? {
+        pricingModels.first { $0.id == pricingModelID }
+    }
 
     private var japanese: Bool {
         switch language {
@@ -93,6 +108,7 @@ struct DevSpaceToolView: View {
                 VStack(spacing: 0) {
                     header
                     ScrollView { content.padding(24) }
+                    footerBar
                 }
             }
         }
@@ -107,6 +123,26 @@ struct DevSpaceToolView: View {
         }
         .onChange(of: settings) { _, newValue in
             model.refresh(settings: newValue)
+        }
+        .task {
+            guard autoPricingUpdate else { return }
+            await refreshPricing(force: false)
+        }
+        .onChange(of: autoPricingUpdate) { _, enabled in
+            guard enabled else {
+                pricingRefreshMessage = japanese ? "自動更新を停止しました" : "Automatic updates disabled"
+                return
+            }
+            Task { await refreshPricing(force: true) }
+        }
+        .onChange(of: pricingModelID) { _, modelID in
+            if ModelPricingService.applySelection(prefix: "devspaceTool", modelID: modelID) {
+                pricingRefreshMessage = japanese
+                    ? "料金計算の基準を\(modelID)へ変更しました"
+                    : "Pricing basis changed to \(modelID)"
+            } else if modelID == "custom" {
+                pricingRefreshMessage = japanese ? "手動単価を使用します" : "Using manual pricing"
+            }
         }
         .onReceive(timer) { _ in
             guard autoRefreshSeconds > 0,
@@ -137,11 +173,7 @@ struct DevSpaceToolView: View {
     @ViewBuilder private var background: some View {
         switch theme {
         case .aurora:
-            LinearGradient(
-                colors: [Color(red: 0.025, green: 0.04, blue: 0.08), Color(red: 0.045, green: 0.025, blue: 0.09)],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            ).ignoresSafeArea()
+            DevSpaceFuturisticBackground()
         case .monochrome:
             LinearGradient(colors: [Color.black, Color(white: 0.08)], startPoint: .top, endPoint: .bottom).ignoresSafeArea()
         case .minimal:
@@ -150,17 +182,29 @@ struct DevSpaceToolView: View {
     }
 
     private var sidebar: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            VStack(alignment: .leading, spacing: 5) {
-                Text("DEVSPACE")
-                    .font(.system(size: 10, weight: .black, design: .monospaced))
-                    .foregroundStyle(palette.accent)
-                Text("Tool")
-                    .font(.system(size: 30, weight: .black, design: theme == .minimal ? .default : .rounded))
-                Text(japanese ? "利用状況とローカル実行管理" : "Usage and local runtime control")
-                    .font(.system(size: 10, weight: .medium, design: .monospaced))
-                    .foregroundStyle(palette.secondaryText)
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 11) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 13, style: .continuous)
+                        .fill(LinearGradient(colors: [palette.accent.opacity(0.34), .purple.opacity(0.28)], startPoint: .topLeading, endPoint: .bottomTrailing))
+                    Image(systemName: "terminal.fill")
+                        .font(.system(size: 20, weight: .black))
+                        .foregroundStyle(.white)
+                }
+                .frame(width: 42, height: 42)
+                .overlay(RoundedRectangle(cornerRadius: 13).stroke(Color.white.opacity(0.20), lineWidth: 1))
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("DEVSPACE")
+                        .font(.system(size: 14, weight: .black, design: .rounded))
+                        .foregroundStyle(.white)
+                    Text("CONTROL OS")
+                        .font(.system(size: 8, weight: .black, design: .monospaced))
+                        .tracking(1.6)
+                        .foregroundStyle(palette.accent.opacity(0.72))
+                }
             }
+            .padding(.bottom, 22)
 
             VStack(spacing: 7) {
                 ForEach(AppSection.allCases) { item in
@@ -168,67 +212,173 @@ struct DevSpaceToolView: View {
                         withAnimation(.easeInOut(duration: 0.16)) { section = item }
                     } label: {
                         HStack(spacing: 11) {
-                            Image(systemName: item.icon).frame(width: 20)
-                            Text(sectionTitle(item)).font(.system(size: 13, weight: .bold, design: theme == .minimal ? .default : .rounded))
+                            Image(systemName: item.icon)
+                                .font(.system(size: 14, weight: .semibold))
+                                .frame(width: 22)
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(sectionTitle(item))
+                                    .font(.system(size: 13, weight: .bold, design: .rounded))
+                                Text(sectionSidebarSubtitle(item))
+                                    .font(.system(size: 8, weight: .medium, design: .monospaced))
+                                    .foregroundStyle(section == item ? palette.primaryText.opacity(0.58) : palette.secondaryText.opacity(0.72))
+                            }
                             Spacer()
+                            if section == item {
+                                Capsule().fill(palette.accent).frame(width: 3, height: 24)
+                                    .shadow(color: palette.accent.opacity(0.75), radius: 5)
+                            }
                         }
                         .foregroundStyle(section == item ? palette.primaryText : palette.secondaryText)
                         .padding(.horizontal, 12)
-                        .padding(.vertical, 11)
+                        .padding(.vertical, 10)
                         .background(
                             RoundedRectangle(cornerRadius: theme == .minimal ? 8 : 13)
                                 .fill(section == item ? palette.selection : palette.faintFill)
                         )
                         .overlay(
                             RoundedRectangle(cornerRadius: theme == .minimal ? 8 : 13)
-                                .stroke(section == item ? palette.accent.opacity(0.42) : Color.clear, lineWidth: 1)
+                                .stroke(section == item ? palette.accent.opacity(0.38) : Color.clear, lineWidth: 1)
                         )
                     }
                     .buttonStyle(.plain)
                 }
             }
 
-            Spacer()
-            VStack(alignment: .leading, spacing: 9) {
-                Text(japanese ? "API費用概算" : "ESTIMATED API COST")
-                    .font(.system(size: 9, weight: .black, design: .monospaced))
-                    .foregroundStyle(palette.secondaryText)
+            Spacer(minLength: 18)
+
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("API SPEND")
+                        .font(.system(size: 8, weight: .black, design: .monospaced))
+                        .tracking(1.2)
+                        .foregroundStyle(palette.secondaryText)
+                    Spacer()
+                    Image(systemName: "waveform.path.ecg")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(palette.accent.opacity(0.72))
+                }
                 sidebarCost(periodTitle(.today), model.summary.today.cost.total)
                 sidebarCost(periodTitle(.week), model.summary.week.cost.total)
                 sidebarCost(periodTitle(.month), model.summary.month.cost.total)
-                sidebarCost(periodTitle(.year), model.summary.year.cost.total)
+                sidebarCost(japanese ? "全期間" : "TOTAL", model.summary.total.cost.total, emphasized: true)
             }
-            .padding(13)
-            .background(RoundedRectangle(cornerRadius: theme == .minimal ? 8 : 16).fill(palette.panel))
+            .padding(12)
+            .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(palette.accent.opacity(0.045)))
+            .overlay(RoundedRectangle(cornerRadius: 16).stroke(palette.accent.opacity(0.16), lineWidth: 1))
+            .padding(.bottom, 12)
+
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(model.runtimeOnline ? Color.green : Color.red)
+                    .frame(width: 8, height: 8)
+                    .shadow(color: (model.runtimeOnline ? Color.green : Color.red).opacity(0.7), radius: 6)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(model.runtimeOnline ? "SYSTEM ONLINE" : "SYSTEM OFFLINE")
+                        .font(.system(size: 9, weight: .black, design: .monospaced))
+                        .foregroundStyle(.white.opacity(0.78))
+                    Text("\(model.roots.count) roots · port \(model.toolConfig.port)")
+                        .font(.system(size: 8, weight: .medium, design: .monospaced))
+                        .foregroundStyle(.white.opacity(0.36))
+                }
+                Spacer()
+            }
+            .padding(11)
+            .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Color.white.opacity(0.045)))
+            .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.white.opacity(0.08), lineWidth: 1))
         }
-        .padding(20)
-        .frame(width: 240)
-        .background(palette.sidebar)
+        .padding(.horizontal, 16)
+        .padding(.top, 20)
+        .padding(.bottom, 14)
+        .frame(width: 244)
+        .background(
+            LinearGradient(
+                colors: [Color.black.opacity(0.46), Color(red: 0.035, green: 0.055, blue: 0.085).opacity(0.82)],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+        )
     }
 
     private var header: some View {
-        HStack {
+        HStack(alignment: .center, spacing: 12) {
             VStack(alignment: .leading, spacing: 3) {
-                Text(sectionTitle(section)).font(.system(size: 25, weight: .black, design: theme == .minimal ? .default : .rounded))
+                Text(sectionTitle(section))
+                    .font(.system(size: 28, weight: .black, design: .rounded))
+                    .foregroundStyle(.white)
                 Text(sectionSubtitle(section))
-                    .font(.system(size: 11, weight: .medium, design: .monospaced))
-                    .foregroundStyle(palette.secondaryText)
+                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.44))
             }
             Spacer()
-            HStack(spacing: 9) {
-                Text(lastUpdatedText)
-                    .font(.system(size: 9, weight: .medium, design: .monospaced))
-                    .foregroundStyle(palette.secondaryText)
-                Circle().fill(model.runtimeOnline ? Color.green : Color.red).frame(width: 8, height: 8)
-                Text(model.runtimeOnline ? "ONLINE" : "OFFLINE")
-                    .font(.system(size: 10, weight: .black, design: .monospaced))
-                Button { model.refresh(settings: settings) } label: { Image(systemName: "arrow.clockwise") }
-                    .buttonStyle(GlassButtonStyle(palette: palette))
+            Text(model.runtimeOnline ? "LIVE" : "OFFLINE")
+                .font(.system(size: 9, weight: .black, design: .monospaced))
+                .foregroundStyle(model.runtimeOnline ? .green : .red)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(Capsule().fill((model.runtimeOnline ? Color.green : Color.red).opacity(0.10)))
+                .overlay(Capsule().stroke((model.runtimeOnline ? Color.green : Color.red).opacity(0.22), lineWidth: 1))
+            Button { model.refresh(settings: settings) } label: {
+                Image(systemName: "arrow.clockwise")
+                    .font(.system(size: 13, weight: .bold))
+                    .frame(width: 34, height: 34)
             }
+            .buttonStyle(GlassButtonStyle(palette: palette))
         }
         .padding(.horizontal, 24)
         .padding(.vertical, 17)
         .background(palette.header)
+    }
+
+    private var footerBar: some View {
+        VStack(spacing: 8) {
+            HStack(spacing: 10) {
+                Button {
+                    if model.runtimeOnline {
+                        model.stopRuntime(settings: settings)
+                    } else {
+                        model.startRuntime(settings: settings)
+                    }
+                } label: {
+                    Label(
+                        model.runtimeOnline ? (japanese ? "停止" : "Turn OFF") : (japanese ? "起動" : "Turn ON"),
+                        systemImage: model.runtimeOnline ? "stop.circle.fill" : "power.circle.fill"
+                    )
+                }
+                .buttonStyle(DevSpacePrimaryButtonStyle(active: !model.runtimeOnline, palette: palette))
+
+                Button { model.refresh(settings: settings) } label: {
+                    Label(japanese ? "更新" : "Refresh", systemImage: "arrow.clockwise")
+                }
+                .buttonStyle(DevSpaceNeoButtonStyle(palette: palette))
+
+                Button { model.revealConfig() } label: {
+                    Label(japanese ? "詳細設定" : "Advanced", systemImage: "ellipsis.circle")
+                }
+                .buttonStyle(DevSpaceNeoButtonStyle(palette: palette))
+
+                Spacer()
+                Text(lastUpdatedText)
+                    .font(.system(size: 9, weight: .medium, design: .monospaced))
+                    .foregroundStyle(palette.secondaryText)
+            }
+            HStack(spacing: 8) {
+                Image(systemName: "terminal")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(palette.accent.opacity(0.74))
+                Text(model.logText)
+                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.62))
+                    .lineLimit(1)
+                    .textSelection(.enabled)
+                Spacer()
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Color.white.opacity(0.045)))
+            .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.white.opacity(0.08), lineWidth: 1))
+        }
+        .padding(.horizontal, 24)
+        .padding(.bottom, 14)
     }
 
     @ViewBuilder private var content: some View {
@@ -242,21 +392,137 @@ struct DevSpaceToolView: View {
     }
 
     private var overview: some View {
-        VStack(spacing: 16) {
-            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: 4), spacing: 12) {
-                periodCard(periodTitle(.today), model.summary.today, accent(0))
-                periodCard(periodTitle(.week), model.summary.week, accent(1))
-                periodCard(periodTitle(.month), model.summary.month, accent(2))
-                periodCard(periodTitle(.year), model.summary.year, accent(3))
-            }
-            HStack(spacing: 14) {
-                statusCard(japanese ? "ランタイム" : "RUNTIME", model.runtimeOnline ? "ONLINE" : "OFFLINE", model.runtimeOnline)
-                statusCard(japanese ? "ポート" : "PORT", "\(model.toolConfig.port)", model.runtimeOnline)
-                statusCard(japanese ? "許可フォルダ" : "ROOTS", "\(model.roots.count)", !model.roots.isEmpty)
-            }
-            selectedRangeSummary
-            analyticsList(limit: 6)
+        VStack(spacing: 14) {
+            costTimelinePanel
+            usageHealthPanel
+            workspaceUsagePanel
         }
+    }
+
+    private var costTimelinePanel: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .center) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("API Cost Timeline")
+                        .font(.system(size: 18, weight: .black, design: .rounded))
+                        .foregroundStyle(.white)
+                    Text("\(pricingModelID) standard API conversion · total with input/output split")
+                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(.white.opacity(0.42))
+                }
+                Spacer()
+                Button {
+                    withAnimation(.easeInOut(duration: 0.16)) { section = .settings }
+                } label: {
+                    Label(japanese ? "料金設定" : "Pricing settings", systemImage: "slider.horizontal.3")
+                }
+                .buttonStyle(DevSpaceNeoButtonStyle(palette: palette))
+                Button {
+                    withAnimation(.easeInOut(duration: 0.16)) { section = .folders }
+                } label: {
+                    Label(japanese ? "フォルダ" : "Folders", systemImage: "chart.bar.xaxis")
+                }
+                .buttonStyle(DevSpaceNeoButtonStyle(palette: palette))
+            }
+
+            HStack(spacing: 10) {
+                periodCard(periodTitle(.today), model.summary.today, .cyan)
+                periodCard(periodTitle(.week), model.summary.week, .blue)
+                periodCard(periodTitle(.month), model.summary.month, .purple)
+                periodCard(japanese ? "全期間" : "TOTAL", model.summary.total, .green)
+            }
+        }
+        .padding(16)
+        .background(DevSpaceGlassPanel(palette: palette))
+    }
+
+    private var usageHealthPanel: some View {
+        HStack(spacing: 10) {
+            healthMiniCard(
+                title: japanese ? "INPUT TODAY" : "INPUT TODAY",
+                value: formatTokens(model.summary.today.inputTokens),
+                detail: "\(model.summary.today.calls) calls · model input",
+                accent: .green
+            )
+            healthMiniCard(
+                title: japanese ? "OUTPUT TODAY" : "OUTPUT TODAY",
+                value: formatTokens(model.summary.today.outputTokens),
+                detail: "tool arguments generated",
+                accent: .green
+            )
+            healthMiniCard(
+                title: japanese ? "API COST TODAY" : "API COST TODAY",
+                value: formatCurrency(model.summary.today.cost.total),
+                detail: "\(formatCurrency(model.summary.today.cost.input)) / \(formatCurrency(model.summary.today.cost.output))",
+                accent: .green
+            )
+            healthMiniCard(
+                title: japanese ? "AVG COST / CALL" : "AVG COST / CALL",
+                value: formatCurrency(model.summary.today.averageCostPerCall),
+                detail: pricingModelID,
+                accent: palette.accent
+            )
+        }
+    }
+
+    private var workspaceUsagePanel: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .center, spacing: 10) {
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 8) {
+                        Text(japanese ? "Workspace Usage" : "Workspace Usage")
+                            .font(.system(size: 20, weight: .bold, design: .rounded))
+                            .foregroundStyle(.white)
+                        Text("\(model.summary.folders.count) WORKSPACES · \(model.summary.selected.calls) CALLS")
+                            .font(.system(size: 9, weight: .black, design: .monospaced))
+                            .foregroundStyle(model.summary.selected.calls > 0 ? .green : .white.opacity(0.42))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(Capsule().fill((model.summary.selected.calls > 0 ? Color.green : Color.white).opacity(0.10)))
+                    }
+                    Text(japanese ? "選択期間のフォルダ別token・API費用" : "Tokens and API cost by workspace for the selected period")
+                        .font(.system(size: 11, weight: .medium, design: .rounded))
+                        .foregroundStyle(.white.opacity(0.54))
+                }
+                Spacer()
+                Text(periodTitle(selectedPeriod))
+                    .font(.system(size: 8, weight: .black, design: .monospaced))
+                    .foregroundStyle(palette.accent)
+                Button {
+                    withAnimation(.easeInOut(duration: 0.16)) { section = .analytics }
+                } label: {
+                    Label(japanese ? "詳細" : "Details", systemImage: "arrow.up.right")
+                }
+                .buttonStyle(DevSpaceNeoButtonStyle(palette: palette))
+            }
+
+            if model.summary.folders.isEmpty {
+                HStack(spacing: 10) {
+                    Image(systemName: "folder.badge.questionmark")
+                        .font(.system(size: 22, weight: .semibold))
+                        .foregroundStyle(palette.accent.opacity(0.62))
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(japanese ? "利用履歴はまだありません" : "No workspace usage reported yet")
+                            .font(.system(size: 14, weight: .bold, design: .rounded))
+                            .foregroundStyle(.white.opacity(0.82))
+                        Text(japanese ? "DevSpaceのtool call履歴がフォルダ別に表示されます。" : "DevSpace tool-call history will appear here, grouped by workspace.")
+                            .font(.system(size: 11, weight: .medium, design: .rounded))
+                            .foregroundStyle(.white.opacity(0.46))
+                    }
+                    Spacer()
+                }
+                .padding(14)
+                .background(RoundedRectangle(cornerRadius: 16).fill(Color.white.opacity(0.035)))
+            } else {
+                LazyVStack(spacing: 8) {
+                    ForEach(model.summary.folders.prefix(6)) { folder in
+                        workspaceUsageRow(folder)
+                    }
+                }
+            }
+        }
+        .padding(16)
+        .background(DevSpaceGlassPanel(palette: palette))
     }
 
     private var analytics: some View {
@@ -500,8 +766,65 @@ struct DevSpaceToolView: View {
         }
     }
 
+    private var pricingBasisPanel: some View {
+        settingPanel(japanese ? "料金計算の基準" : "Pricing basis") {
+            settingRow(japanese ? "基準モデル" : "Reference model") {
+                Picker("Pricing model", selection: $pricingModelID) {
+                    ForEach(pricingModels) { profile in
+                        Text(profile.displayName).tag(profile.id)
+                    }
+                }
+                .pickerStyle(.menu)
+                .fixedSize()
+            }
+            if let selectedPricingProfile {
+                settingRow(japanese ? "標準単価" : "Standard rates") {
+                    Text(String(format: "$%.4g input / $%.4g output", selectedPricingProfile.inputUsdPerMillion, selectedPricingProfile.outputUsdPerMillion))
+                        .font(.system(size: 10, weight: .bold, design: .monospaced))
+                        .foregroundStyle(palette.accent.opacity(0.86))
+                }
+            }
+            toggleSettingRow(
+                japanese ? "公式単価・為替を毎日自動更新" : "Update official pricing and exchange rates daily",
+                isOn: $autoPricingUpdate
+            )
+            settingRow(japanese ? "更新状況" : "Update status") {
+                HStack(spacing: 10) {
+                    VStack(alignment: .trailing, spacing: 2) {
+                        Text(pricingRefreshSummary)
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.74))
+                        if !pricingRefreshDetail.isEmpty {
+                            Text(pricingRefreshDetail)
+                                .font(.system(size: 9, weight: .medium, design: .monospaced))
+                                .foregroundStyle(.white.opacity(0.40))
+                                .lineLimit(2)
+                        }
+                    }
+                    Button {
+                        Task { await refreshPricing(force: true) }
+                    } label: {
+                        if pricingRefreshInProgress {
+                            ProgressView().controlSize(.small)
+                        } else {
+                            Label(japanese ? "今すぐ更新" : "Update now", systemImage: "arrow.clockwise")
+                        }
+                    }
+                    .buttonStyle(DevSpaceNeoButtonStyle(palette: palette))
+                    .disabled(pricingRefreshInProgress)
+                }
+            }
+            Text(japanese
+                 ? "このモデルは料金換算だけに使用します。DevSpaceの実行モデル自体は変更しません。"
+                 : "This model is used only for cost conversion and does not change the DevSpace runtime model.")
+                .font(.system(size: 10))
+                .foregroundStyle(palette.secondaryText)
+        }
+    }
+
     private var settingsView: some View {
         VStack(alignment: .leading, spacing: 14) {
+            pricingBasisPanel
             settingPanel(japanese ? "言語・地域" : "Language & region") {
                 settingRow(japanese ? "言語" : "Language") {
                     trailingSegmented(
@@ -607,11 +930,23 @@ struct DevSpaceToolView: View {
 
             settingPanel(japanese ? "料金計算" : "Pricing") {
                 numericSettingRow(japanese ? "入力 / 100万token (USD)" : "Input / 1M tokens (USD)", value: $inputUsdPerMillion, placeholder: "5")
+                    .disabled(autoPricingUpdate && pricingModelID != "custom")
+                    .opacity(autoPricingUpdate && pricingModelID != "custom" ? 0.60 : 1)
                 numericSettingRow(japanese ? "出力 / 100万token (USD)" : "Output / 1M tokens (USD)", value: $outputUsdPerMillion, placeholder: "30")
+                    .disabled(autoPricingUpdate && pricingModelID != "custom")
+                    .opacity(autoPricingUpdate && pricingModelID != "custom" ? 0.60 : 1)
                 numericSettingRow("USD / JPY", value: $usdJpyRate, placeholder: "160")
+                    .disabled(autoPricingUpdate)
+                    .opacity(autoPricingUpdate ? 0.60 : 1)
                 numericSettingRow("USD / EUR", value: $usdEurRate, placeholder: "0.92")
+                    .disabled(autoPricingUpdate)
+                    .opacity(autoPricingUpdate ? 0.60 : 1)
                 numericSettingRow("USD / GBP", value: $usdGbpRate, placeholder: "0.79")
-                Text(japanese ? "表示値は履歴上のtokenから算出する概算で、ChatGPT契約料金や実請求額ではありません。" : "Values are estimates from recorded tokens, not ChatGPT subscription billing or provider invoices.")
+                    .disabled(autoPricingUpdate)
+                    .opacity(autoPricingUpdate ? 0.60 : 1)
+                Text(japanese
+                     ? "選択したモデルは料金換算だけに使われ、DevSpaceが実際に使用するモデルは変更しません。OpenAI公式ページからGPT-5系モデルを自動検出し、ECBの為替を24時間ごとに取得します。"
+                     : "The selected model is used only for cost conversion and does not change the model used by DevSpace. GPT-5 family models are discovered from the official OpenAI pricing page, and ECB exchange rates refresh every 24 hours.")
                     .font(.system(size: 10))
                     .foregroundStyle(palette.secondaryText)
             }
@@ -674,6 +1009,65 @@ struct DevSpaceToolView: View {
         }
     }
 
+    private func healthMiniCard(title: String, value: String, detail: String, accent: Color) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 6) {
+                Circle().fill(accent).frame(width: 7, height: 7)
+                Text(title)
+                    .font(.system(size: 8, weight: .black, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.48))
+            }
+            Text(value)
+                .font(.system(size: 17, weight: .black, design: .rounded))
+                .foregroundStyle(.white)
+            Text(detail)
+                .font(.system(size: 8, weight: .medium, design: .monospaced))
+                .foregroundStyle(.white.opacity(0.36))
+                .lineLimit(1)
+        }
+        .frame(maxWidth: .infinity, minHeight: 58, alignment: .leading)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(RoundedRectangle(cornerRadius: 18, style: .continuous).fill(Color.white.opacity(0.055)))
+        .overlay(RoundedRectangle(cornerRadius: 18).stroke(palette.accent.opacity(0.16), lineWidth: 1))
+    }
+
+    private func workspaceUsageRow(_ folder: FolderUsage) -> some View {
+        HStack(spacing: 12) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(palette.accent.opacity(0.09))
+                Image(systemName: "folder.fill")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(palette.accent.opacity(0.82))
+            }
+            .frame(width: 34, height: 34)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(folder.name)
+                    .font(.system(size: 13, weight: .bold, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.88))
+                Text(folder.path)
+                    .font(.system(size: 9, weight: .medium, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.36))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            Spacer()
+            VStack(alignment: .trailing, spacing: 2) {
+                Text(formatCurrency(folder.usage.cost.total))
+                    .font(.system(size: 14, weight: .black, design: .monospaced))
+                    .foregroundStyle(palette.accent)
+                Text("\(formatTokens(folder.usage.tokens)) · \(folder.usage.calls) calls")
+                    .font(.system(size: 8, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.38))
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Color.white.opacity(0.04)))
+    }
+
     private func analyticsList(limit: Int?) -> some View {
         let rows = limit.map { Array(model.summary.folders.prefix($0)) } ?? model.summary.folders
         return VStack(alignment: .leading, spacing: 10) {
@@ -713,19 +1107,35 @@ struct DevSpaceToolView: View {
 
     private func periodCard(_ title: String, _ usage: PeriodUsage, _ accent: Color) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(title).font(.system(size: 9, weight: .black, design: .monospaced)).foregroundStyle(accent)
-            Text(formatCurrency(usage.cost.total)).font(.system(size: 23, weight: .black, design: theme == .minimal ? .default : .rounded))
+            HStack {
+                Text(title.uppercased())
+                    .font(.system(size: 9, weight: .black, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.45))
+                Spacer()
+                Circle()
+                    .fill(accent)
+                    .frame(width: 6, height: 6)
+                    .shadow(color: accent.opacity(0.75), radius: 5)
+            }
+            Text(formatCurrency(usage.cost.total))
+                .font(.system(size: 23, weight: .black, design: .rounded))
+                .foregroundStyle(.white)
             if showCostSplit {
                 Text("\(formatCurrency(usage.cost.input)) / \(formatCurrency(usage.cost.output))")
-                    .font(.system(size: 9, weight: .bold, design: .monospaced)).foregroundStyle(palette.secondaryText)
+                    .font(.system(size: 9, weight: .bold, design: .monospaced))
+                    .foregroundStyle(accent.opacity(0.80))
             }
             Text("\(formatTokens(usage.tokens)) · \(usage.calls) calls")
-                .font(.system(size: 9, weight: .medium, design: .monospaced)).foregroundStyle(palette.tertiaryText)
+                .font(.system(size: 9, weight: .medium, design: .monospaced))
+                .foregroundStyle(.white.opacity(0.30))
         }
-        .frame(maxWidth: .infinity, minHeight: 100, alignment: .leading)
+        .frame(maxWidth: .infinity, minHeight: 96, alignment: .leading)
         .padding(14)
-        .background(panelBackground)
-        .overlay(RoundedRectangle(cornerRadius: palette.cornerRadius).stroke(accent.opacity(0.25), lineWidth: 1))
+        .background(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .fill(LinearGradient(colors: [accent.opacity(0.10), Color.white.opacity(0.045)], startPoint: .topLeading, endPoint: .bottomTrailing))
+        )
+        .overlay(RoundedRectangle(cornerRadius: 20).stroke(accent.opacity(0.24), lineWidth: 1))
     }
 
     private func metricCard(_ title: String, _ value: String, _ accent: Color) -> some View {
@@ -747,6 +1157,56 @@ struct DevSpaceToolView: View {
         .frame(maxWidth: .infinity, minHeight: 72, alignment: .leading)
         .padding(14)
         .background(panelBackground)
+    }
+
+    private var pricingRefreshSummary: String {
+        if pricingRefreshInProgress { return japanese ? "更新中…" : "Updating…" }
+        if pricingLastUpdated <= 0 && exchangeLastUpdated <= 0 {
+            return japanese ? "未更新" : "Not updated"
+        }
+        if pricingLastUpdated > 0 && exchangeLastUpdated > 0 {
+            return japanese ? "自動更新済み" : "Automatically updated"
+        }
+        return japanese ? "一部更新済み" : "Partially updated"
+    }
+
+    private var pricingRefreshDetail: String {
+        if !pricingRefreshMessage.isEmpty { return pricingRefreshMessage }
+        var parts: [String] = []
+        if pricingLastUpdated > 0 { parts.append("OpenAI \(formatUpdateDate(pricingLastUpdated))") }
+        if exchangeLastUpdated > 0 { parts.append("ECB \(formatUpdateDate(exchangeLastUpdated))") }
+        if !pricingRefreshStatus.isEmpty { parts.append(pricingRefreshStatus) }
+        return parts.joined(separator: " · ")
+    }
+
+    @MainActor
+    private func refreshPricing(force: Bool) async {
+        guard !pricingRefreshInProgress else { return }
+        pricingRefreshInProgress = true
+        defer { pricingRefreshInProgress = false }
+
+        let result = await ModelPricingService.shared.refresh(
+            prefix: "devspaceTool",
+            selectedModelID: pricingModelID,
+            force: force
+        )
+        if result.skipped {
+            pricingRefreshMessage = japanese ? "24時間以内に更新済みです" : "Already updated within the last 24 hours"
+        } else if result.pricingUpdated && result.exchangeUpdated {
+            pricingRefreshMessage = japanese ? "公式単価・モデル一覧・為替を更新しました" : "Official pricing, model catalog, and exchange rates updated"
+        } else if result.updatedAnything {
+            pricingRefreshMessage = japanese ? "一部を更新しました。失敗した値は前回値を維持しています" : "Partially updated; failed values retained their previous values"
+        } else {
+            pricingRefreshMessage = japanese ? "更新に失敗しました。前回値を維持しています" : "Update failed; previous values retained"
+        }
+    }
+
+    private func formatUpdateDate(_ timestamp: Double) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: japanese ? "ja_JP" : "en_US_POSIX")
+        formatter.timeZone = .current
+        formatter.dateFormat = japanese ? "M/d HH:mm" : "MMM d HH:mm"
+        return formatter.string(from: Date(timeIntervalSince1970: timestamp))
     }
 
     private func settingPanel<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
@@ -830,13 +1290,15 @@ struct DevSpaceToolView: View {
         }
     }
 
-    private func sidebarCost(_ label: String, _ value: Double) -> some View {
+    private func sidebarCost(_ label: String, _ value: Double, emphasized: Bool = false) -> some View {
         HStack {
-            Text(label).foregroundStyle(palette.secondaryText)
+            Text(label)
+                .foregroundStyle(emphasized ? .white.opacity(0.60) : palette.secondaryText)
             Spacer()
-            Text(formatCurrency(value)).foregroundStyle(palette.primaryText)
+            Text(formatCurrency(value))
+                .foregroundStyle(emphasized ? Color.green : palette.primaryText)
         }
-        .font(.system(size: 10, weight: .bold, design: .monospaced))
+        .font(.system(size: 10, weight: emphasized ? .black : .bold, design: .monospaced))
     }
 
     private var panelBackground: some View {
@@ -876,6 +1338,16 @@ struct DevSpaceToolView: View {
         case .runtime: return japanese ? "ランタイム" : "Runtime"
         case .folders: return japanese ? "フォルダ" : "Folders"
         case .settings: return japanese ? "設定" : "Settings"
+        }
+    }
+
+    private func sectionSidebarSubtitle(_ item: AppSection) -> String {
+        switch item {
+        case .overview: return japanese ? "ライブ司令塔" : "Live command center"
+        case .analytics: return japanese ? "token・期間・API費用" : "Tokens, periods, API cost"
+        case .runtime: return japanese ? "起動・停止と接続" : "Runtime and connection"
+        case .folders: return japanese ? "許可範囲の管理" : "Approved access roots"
+        case .settings: return japanese ? "集計・料金・表示" : "Period, pricing, appearance"
         }
     }
 
@@ -1006,6 +1478,103 @@ struct ToolPalette {
     var sidebar: Color { .black.opacity(theme == .minimal ? 0.10 : 0.24) }
     var header: Color { .black.opacity(theme == .minimal ? 0.08 : 0.14) }
     var cornerRadius: CGFloat { theme == .minimal ? 8 : 18 }
+}
+
+struct DevSpaceFuturisticBackground: View {
+    var body: some View {
+        ZStack {
+            LinearGradient(
+                colors: [
+                    Color(red: 0.02, green: 0.03, blue: 0.08),
+                    Color(red: 0.02, green: 0.07, blue: 0.13),
+                    Color(red: 0.07, green: 0.04, blue: 0.12)
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+            Circle()
+                .fill(.cyan.opacity(0.16))
+                .blur(radius: 70)
+                .frame(width: 320, height: 320)
+                .offset(x: -300, y: -230)
+            Circle()
+                .fill(.purple.opacity(0.16))
+                .blur(radius: 90)
+                .frame(width: 360, height: 360)
+                .offset(x: 310, y: 240)
+            Circle()
+                .stroke(.white.opacity(0.04), lineWidth: 1)
+                .frame(width: 720, height: 720)
+                .offset(x: 260, y: -220)
+        }
+        .ignoresSafeArea()
+    }
+}
+
+struct DevSpaceGlassPanel: View {
+    let palette: ToolPalette
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: 28, style: .continuous)
+            .fill(Color.white.opacity(0.07))
+            .overlay(
+                RoundedRectangle(cornerRadius: 28, style: .continuous)
+                    .stroke(
+                        LinearGradient(
+                            colors: [palette.accent.opacity(0.40), .white.opacity(0.12), .purple.opacity(0.32)],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        ),
+                        lineWidth: 1
+                    )
+            )
+            .shadow(color: palette.accent.opacity(0.08), radius: 24, x: 0, y: 12)
+    }
+}
+
+struct DevSpaceNeoButtonStyle: ButtonStyle {
+    let palette: ToolPalette
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 11, weight: .bold, design: .rounded))
+            .padding(.horizontal, 14)
+            .padding(.vertical, 9)
+            .foregroundStyle(.white.opacity(configuration.isPressed ? 0.70 : 0.90))
+            .background(
+                RoundedRectangle(cornerRadius: 13, style: .continuous)
+                    .fill(Color.white.opacity(configuration.isPressed ? 0.06 : 0.10))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 13, style: .continuous)
+                    .stroke(Color.white.opacity(configuration.isPressed ? 0.10 : 0.16), lineWidth: 1)
+            )
+            .scaleEffect(configuration.isPressed ? 0.98 : 1)
+    }
+}
+
+struct DevSpacePrimaryButtonStyle: ButtonStyle {
+    let active: Bool
+    let palette: ToolPalette
+
+    func makeBody(configuration: Configuration) -> some View {
+        let tint = active ? palette.accent : Color.red
+        configuration.label
+            .font(.system(size: 11, weight: .black, design: .rounded))
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            .foregroundStyle(.white)
+            .background(
+                RoundedRectangle(cornerRadius: 13, style: .continuous)
+                    .fill(tint.opacity(configuration.isPressed ? 0.20 : 0.28))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 13, style: .continuous)
+                    .stroke(tint.opacity(0.56), lineWidth: 1)
+            )
+            .shadow(color: tint.opacity(0.14), radius: 10, x: 0, y: 5)
+            .scaleEffect(configuration.isPressed ? 0.98 : 1)
+    }
 }
 
 struct GlassButtonStyle: ButtonStyle {
