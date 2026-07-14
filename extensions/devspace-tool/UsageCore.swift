@@ -277,6 +277,110 @@ final class DevSpaceToolModel: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self.refresh(settings: settings) }
     }
 
+    func chooseFolderAndAdd(settings: AnalysisSettings, japanese: Bool) {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = true
+        panel.message = japanese
+            ? "DevSpaceからアクセスを許可するフォルダを選択してください"
+            : "Choose a folder that DevSpace may access"
+        panel.prompt = japanese ? "追加" : "Add"
+        if panel.runModal() == .OK, let url = panel.url {
+            addRoot(url.path, settings: settings, japanese: japanese)
+        }
+    }
+
+    func addRoot(_ rawPath: String, settings: AnalysisSettings, japanese: Bool) {
+        let normalized = Self.normalizedPath(rawPath)
+        guard !normalized.isEmpty else {
+            logText = japanese ? "フォルダのパスを入力してください。" : "Enter a folder path."
+            return
+        }
+
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: normalized, isDirectory: &isDirectory), isDirectory.boolValue else {
+            logText = japanese ? "フォルダが存在しません:\n\(normalized)" : "Folder does not exist:\n\(normalized)"
+            return
+        }
+
+        let currentRoots = Self.compactRoots(roots)
+        if let parent = currentRoots.first(where: { Self.isSameOrDescendant(normalized, of: $0) }) {
+            logText = japanese
+                ? "すでに次の許可フォルダに含まれています:\n\(parent)"
+                : "Already covered by this approved root:\n\(parent)"
+            return
+        }
+
+        let removedChildren = currentRoots.filter { Self.isSameOrDescendant($0, of: normalized) }
+        let updatedRoots = Self.compactRoots(currentRoots + [normalized])
+        do {
+            let backup = try Self.writeAllowedRoots(updatedRoots)
+            roots = updatedRoots
+            var message = japanese ? "許可フォルダを追加しました:\n\(normalized)" : "Approved root added:\n\(normalized)"
+            if !removedChildren.isEmpty {
+                message += japanese
+                    ? "\n\n親フォルダに統合したため、次の子フォルダ設定を整理しました:\n" + removedChildren.joined(separator: "\n")
+                    : "\n\nCollapsed child roots now covered by the parent:\n" + removedChildren.joined(separator: "\n")
+            }
+            if let backup {
+                message += japanese ? "\n\nバックアップ: \(backup.path)" : "\n\nBackup: \(backup.path)"
+            }
+            finishRootChange(message: message, settings: settings, japanese: japanese)
+        } catch {
+            logText = japanese ? "設定の保存に失敗しました:\n\(error.localizedDescription)" : "Failed to save configuration:\n\(error.localizedDescription)"
+        }
+    }
+
+    func removeRoot(_ root: String, settings: AnalysisSettings, japanese: Bool) {
+        let normalized = Self.normalizedPath(root)
+        guard roots.contains(where: { Self.normalizedPath($0) == normalized }) else {
+            logText = japanese ? "対象の許可フォルダが見つかりません。" : "The approved root was not found."
+            return
+        }
+        let updatedRoots = Self.compactRoots(roots.filter { Self.normalizedPath($0) != normalized })
+
+        do {
+            let backup = try Self.writeAllowedRoots(updatedRoots)
+            roots = updatedRoots
+            var message = japanese ? "許可フォルダを削除しました:\n\(normalized)" : "Approved root removed:\n\(normalized)"
+            if let backup {
+                message += japanese ? "\n\nバックアップ: \(backup.path)" : "\n\nBackup: \(backup.path)"
+            }
+            finishRootChange(message: message, settings: settings, japanese: japanese)
+        } catch {
+            logText = japanese ? "設定の保存に失敗しました:\n\(error.localizedDescription)" : "Failed to save configuration:\n\(error.localizedDescription)"
+        }
+    }
+
+    private func finishRootChange(message: String, settings: AnalysisSettings, japanese: Bool) {
+        let wasOnline = runtimeOnline || Self.portIsListening(toolConfig.port)
+        guard wasOnline else {
+            logText = message + (japanese ? "\n\n次回起動時に反映されます。" : "\n\nThe change will apply on the next start.")
+            refresh(settings: settings)
+            return
+        }
+
+        let command = toolConfig.runtimeCommand.trimmingCharacters(in: .whitespacesAndNewlines)
+        let match = toolConfig.runtimeProcessMatch.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !command.isEmpty, !match.isEmpty else {
+            logText = message + (japanese
+                ? "\n\nDevSpaceは稼働中です。設定を反映するには再起動してください。"
+                : "\n\nDevSpace is running. Restart it to apply the updated roots.")
+            refresh(settings: settings)
+            return
+        }
+
+        _ = Self.shell("/usr/bin/pkill -f -- \(Self.shellQuote(match))")
+        Thread.sleep(forTimeInterval: 0.4)
+        let result = Self.shell("/usr/bin/nohup /bin/zsh -lc \(Self.shellQuote(command)) >/tmp/devspace-tool-runtime.log 2>&1 &")
+        logText = message
+            + (japanese ? "\n\nDevSpaceを再起動して反映しました。" : "\n\nDevSpace was restarted with the updated roots.")
+            + (result.isEmpty ? "" : "\n\n\(result)")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self.refresh(settings: settings) }
+    }
+
     func revealConfig() {
         let path = (devSpaceToolConfigPath as NSString).expandingTildeInPath
         let url = URL(fileURLWithPath: path)
@@ -511,6 +615,73 @@ final class DevSpaceToolModel: ObservableObject {
         guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
               let config = try? JSONDecoder().decode(DevSpaceConfig.self, from: data) else { return DevSpaceConfig() }
         return config
+    }
+
+    private static func normalizedPath(_ rawPath: String) -> String {
+        let trimmed = rawPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "" }
+        let expanded = (trimmed as NSString).expandingTildeInPath
+        return URL(fileURLWithPath: expanded, isDirectory: true)
+            .standardizedFileURL
+            .resolvingSymlinksInPath()
+            .path
+    }
+
+    private static func isSameOrDescendant(_ path: String, of parent: String) -> Bool {
+        let candidatePath = normalizedPath(path)
+        let parentPath = normalizedPath(parent)
+        guard !candidatePath.isEmpty, !parentPath.isEmpty else { return false }
+        if candidatePath == parentPath { return true }
+        return candidatePath.hasPrefix(parentPath.hasSuffix("/") ? parentPath : parentPath + "/")
+    }
+
+    private static func compactRoots(_ rawRoots: [String]) -> [String] {
+        var roots: [String] = []
+        for rawRoot in rawRoots {
+            let root = normalizedPath(rawRoot)
+            guard !root.isEmpty else { continue }
+            if roots.contains(where: { isSameOrDescendant(root, of: $0) }) { continue }
+            roots.removeAll { isSameOrDescendant($0, of: root) }
+            roots.append(root)
+        }
+        return roots
+    }
+
+    @discardableResult
+    private static func writeAllowedRoots(_ roots: [String]) throws -> URL? {
+        let configURL = URL(fileURLWithPath: (devSpaceConfigPath as NSString).expandingTildeInPath)
+        let fileManager = FileManager.default
+        try fileManager.createDirectory(at: configURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+
+        var object: [String: Any] = [:]
+        if fileManager.fileExists(atPath: configURL.path) {
+            let existingData = try Data(contentsOf: configURL)
+            guard let existingObject = try JSONSerialization.jsonObject(with: existingData) as? [String: Any] else {
+                throw NSError(
+                    domain: "DevSpaceTool.Config",
+                    code: 1,
+                    userInfo: [NSLocalizedDescriptionKey: "~/.devspace/config.json is not a JSON object"]
+                )
+            }
+            object = existingObject
+        }
+
+        var backupURL: URL?
+        if fileManager.fileExists(atPath: configURL.path) {
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.dateFormat = "yyyyMMdd_HHmmss_SSS"
+            let candidate = configURL.deletingLastPathComponent()
+                .appendingPathComponent("config.json.bak.\(formatter.string(from: Date()))")
+            try fileManager.copyItem(at: configURL, to: candidate)
+            backupURL = candidate
+        }
+
+        object["allowedRoots"] = compactRoots(roots)
+        let data = try JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: configURL, options: .atomic)
+        try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: configURL.path)
+        return backupURL
     }
 
     private static func portIsListening(_ port: Int) -> Bool {

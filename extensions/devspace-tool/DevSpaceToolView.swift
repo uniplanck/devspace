@@ -31,6 +31,9 @@ struct DevSpaceToolView: View {
 
     @State private var section: AppSection = .overview
     @State private var didApplyDefaultSection = false
+    @State private var showingPathInput = false
+    @State private var pathInput = ""
+    @State private var pendingRootRemoval: String?
 
     private let timer = Timer.publish(every: 5, on: .main, in: .common).autoconnect()
     private let settingsControlWidth: CGFloat = 420
@@ -109,6 +112,25 @@ struct DevSpaceToolView: View {
             guard autoRefreshSeconds > 0,
                   Date().timeIntervalSince(model.lastUpdated) >= Double(autoRefreshSeconds) else { return }
             model.refresh(settings: settings)
+        }
+        .alert(
+            japanese ? "許可フォルダを削除しますか？" : "Remove approved folder?",
+            isPresented: Binding(
+                get: { pendingRootRemoval != nil },
+                set: { if !$0 { pendingRootRemoval = nil } }
+            )
+        ) {
+            Button(japanese ? "キャンセル" : "Cancel", role: .cancel) {
+                pendingRootRemoval = nil
+            }
+            Button(japanese ? "削除" : "Remove", role: .destructive) {
+                if let root = pendingRootRemoval {
+                    model.removeRoot(root, settings: settings, japanese: japanese)
+                }
+                pendingRootRemoval = nil
+            }
+        } message: {
+            Text(pendingRootRemoval ?? "")
         }
     }
 
@@ -355,21 +377,126 @@ struct DevSpaceToolView: View {
     }
 
     private var folders: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            if model.roots.isEmpty {
-                Text(japanese ? "許可フォルダがありません。~/.devspace/config.json を設定してください。" : "No allowed roots. Configure ~/.devspace/config.json.")
-                    .foregroundStyle(palette.secondaryText)
-            } else {
-                ForEach(model.roots, id: \.self) { root in
-                    HStack(spacing: 12) {
-                        Image(systemName: "folder.fill").foregroundStyle(palette.accent)
-                        Text(root).font(.system(size: 11, weight: .semibold, design: .monospaced)).lineLimit(1).truncationMode(.middle)
-                        Spacer()
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .top, spacing: 14) {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(japanese ? "許可フォルダ" : "Approved folders")
+                        .font(.system(size: 18, weight: .black, design: theme == .minimal ? .default : .rounded))
+                    Text(japanese
+                         ? "登録したフォルダと、その配下すべてにDevSpaceからアクセスできます。必要な範囲だけを追加してください。"
+                         : "DevSpace can access each approved folder and everything below it. Add only the directories you need.")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(palette.secondaryText)
+                }
+                Spacer()
+                HStack(spacing: 9) {
+                    Button {
+                        model.chooseFolderAndAdd(settings: settings, japanese: japanese)
+                    } label: {
+                        Label(japanese ? "Finderから追加" : "Add from Finder", systemImage: "folder.badge.plus")
                     }
-                    .padding(13)
-                    .background(panelBackground)
+                    .buttonStyle(ActionButtonStyle(primary: true, palette: palette))
+
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.16)) {
+                            showingPathInput.toggle()
+                        }
+                    } label: {
+                        Label(japanese ? "パスで追加" : "Add path", systemImage: "terminal")
+                    }
+                    .buttonStyle(ActionButtonStyle(primary: false, palette: palette))
                 }
             }
+            .padding(16)
+            .background(panelBackground)
+
+            if showingPathInput {
+                HStack(spacing: 10) {
+                    TextField(japanese ? "/Users/.../Project" : "/Users/.../Project", text: $pathInput)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(size: 11, weight: .medium, design: .monospaced))
+                        .onSubmit {
+                            model.addRoot(pathInput, settings: settings, japanese: japanese)
+                            pathInput = ""
+                        }
+                    Button(japanese ? "追加" : "Add") {
+                        model.addRoot(pathInput, settings: settings, japanese: japanese)
+                        pathInput = ""
+                    }
+                    .buttonStyle(ActionButtonStyle(primary: true, palette: palette))
+                    Button(japanese ? "閉じる" : "Close") {
+                        pathInput = ""
+                        withAnimation(.easeInOut(duration: 0.16)) { showingPathInput = false }
+                    }
+                    .buttonStyle(ActionButtonStyle(primary: false, palette: palette))
+                }
+                .padding(14)
+                .background(panelBackground)
+            }
+
+            if model.roots.isEmpty {
+                VStack(spacing: 10) {
+                    Image(systemName: "folder.badge.plus")
+                        .font(.system(size: 30, weight: .semibold))
+                        .foregroundStyle(palette.accent)
+                    Text(japanese ? "許可フォルダはまだありません" : "No approved folders yet")
+                        .font(.system(size: 15, weight: .bold))
+                    Text(japanese
+                         ? "Finderから作業対象のプロジェクトフォルダを追加してください。ホームフォルダ全体や秘密情報を含む場所は追加しないでください。"
+                         : "Add a specific project folder from Finder. Do not approve your entire home folder or directories containing secrets.")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(palette.secondaryText)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: 560)
+                }
+                .frame(maxWidth: .infinity, minHeight: 210)
+                .padding(20)
+                .background(panelBackground)
+            } else {
+                VStack(spacing: 9) {
+                    ForEach(model.roots, id: \.self) { root in
+                        HStack(spacing: 12) {
+                            Image(systemName: "folder.fill")
+                                .foregroundStyle(palette.accent)
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(URL(fileURLWithPath: root).lastPathComponent)
+                                    .font(.system(size: 13, weight: .bold))
+                                Text(root)
+                                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                                    .foregroundStyle(palette.secondaryText)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                            }
+                            Spacer()
+                            Button {
+                                NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: root)])
+                            } label: {
+                                Image(systemName: "arrow.forward.circle")
+                            }
+                            .buttonStyle(GlassButtonStyle(palette: palette))
+                            .help(japanese ? "Finderで表示" : "Reveal in Finder")
+
+                            Button {
+                                pendingRootRemoval = root
+                            } label: {
+                                Image(systemName: "trash")
+                            }
+                            .buttonStyle(GlassButtonStyle(palette: palette))
+                            .help(japanese ? "許可から削除" : "Remove approval")
+                        }
+                        .padding(13)
+                        .background(panelBackground)
+                    }
+                }
+            }
+
+            Text(model.logText)
+                .font(.system(size: 10, weight: .medium, design: .monospaced))
+                .foregroundStyle(palette.secondaryText)
+                .textSelection(.enabled)
+                .padding(14)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(panelBackground)
         }
     }
 

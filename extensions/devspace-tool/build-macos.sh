@@ -6,6 +6,7 @@ BUILD_DIR="${BUILD_DIR:-$ROOT/.build}"
 APP_DIR="$BUILD_DIR/DevSpace Tool.app"
 EXECUTABLE="$APP_DIR/Contents/MacOS/DevSpaceTool"
 ICON_SOURCE="$ROOT/../../docs/assets/devspace-logo-light.png"
+GENERATED_ICON_SOURCE="$BUILD_DIR/DevSpaceToolIcon.png"
 ICONSET_DIR="$BUILD_DIR/DevSpaceTool.iconset"
 ICON_FILE="$APP_DIR/Contents/Resources/DevSpaceTool.icns"
 
@@ -23,6 +24,11 @@ mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
   -o "$EXECUTABLE"
 
 /bin/cp "$ROOT/Info.plist" "$APP_DIR/Contents/Info.plist"
+
+if [[ ! -f "$ICON_SOURCE" && -f "$ROOT/GenerateIcon.swift" ]]; then
+  /usr/bin/swift "$ROOT/GenerateIcon.swift" "$GENERATED_ICON_SOURCE"
+  ICON_SOURCE="$GENERATED_ICON_SOURCE"
+fi
 
 if [[ -f "$ICON_SOURCE" ]]; then
   mkdir -p "$ICONSET_DIR"
