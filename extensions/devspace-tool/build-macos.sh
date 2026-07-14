@@ -18,6 +18,7 @@ mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
   -O \
   -framework SwiftUI \
   -framework AppKit \
+  "$ROOT/ModelPricing.swift" \
   "$ROOT/UsageCore.swift" \
   "$ROOT/DevSpaceToolView.swift" \
   "$ROOT/DevSpaceTool.swift" \

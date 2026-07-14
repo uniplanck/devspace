@@ -189,14 +189,26 @@ struct CostBreakdown: Hashable {
 
 struct PeriodUsage: Hashable {
     var tokens: Int = 0
+    var inputTokens: Int = 0
+    var outputTokens: Int = 0
     var calls: Int = 0
     var cost = CostBreakdown()
     var averageCostPerCall: Double { calls > 0 ? cost.total / Double(calls) : 0 }
 
-    mutating func add(tokens: Int, cost: CostBreakdown) {
+    mutating func add(tokens: Int, inputTokens: Int = 0, outputTokens: Int = 0, cost: CostBreakdown) {
         self.tokens += tokens
+        self.inputTokens += inputTokens
+        self.outputTokens += outputTokens
         calls += 1
         self.cost.add(cost)
+    }
+
+    mutating func add(_ other: PeriodUsage) {
+        tokens += other.tokens
+        inputTokens += other.inputTokens
+        outputTokens += other.outputTokens
+        calls += other.calls
+        cost.add(other.cost)
     }
 }
 
@@ -204,6 +216,7 @@ struct UsageEvent: Hashable {
     let date: Date
     let workspaceRoot: String
     let workspaceName: String
+    let modelID: String?
     let inputTokens: Double
     let outputTokens: Double
 }
@@ -245,6 +258,16 @@ final class DevSpaceToolModel: ObservableObject {
     var toolConfig = ToolConfig()
 
     func refresh(settings: AnalysisSettings) {
+        if ProcessInfo.processInfo.environment["DEVSPACE_TOOL_DEMO"] == "1" {
+            toolConfig = ToolConfig(host: "127.0.0.1", port: 7676, runtimeCommand: "", runtimeProcessMatch: "")
+            roots = ["/Users/demo/Projects", "/Users/demo/Automation", "/Users/demo/Web"]
+            runtimeOnline = true
+            summary = Self.demoSummary(settings: settings, now: Date())
+            logText = "Demo data · no local paths or credentials are displayed."
+            lastUpdated = Date()
+            return
+        }
+
         toolConfig = Self.readToolConfig()
         let devConfig = Self.readDevSpaceConfig()
         if let host = devConfig.host, !host.isEmpty { toolConfig.host = host }
@@ -392,6 +415,41 @@ final class DevSpaceToolModel: ObservableObject {
         NSWorkspace.shared.activateFileViewerSelecting([url])
     }
 
+    static func demoSummary(settings: AnalysisSettings, now: Date) -> UsageSummary {
+        let calendar = settings.calendar
+        let today = businessDayStart(for: now, settings: settings)
+        let demoRows: [(String, String, Int, Int, Int, Int)] = [
+            ("Atlas Web", "/Users/demo/Projects/atlas-web", 241_000, 52_000, 431, 0),
+            ("Board Manager", "/Users/demo/Projects/board-manager", 116_000, 28_000, 186, 0),
+            ("Automation Core", "/Users/demo/Automation/core", 83_000, 19_000, 124, -1),
+            ("Commerce API", "/Users/demo/Projects/commerce-api", 58_000, 15_000, 91, -2),
+            ("Design System", "/Users/demo/Web/design-system", 39_000, 11_000, 68, -3),
+            ("Docs", "/Users/demo/Projects/docs", 22_000, 7_000, 37, -4)
+        ]
+        var events: [UsageEvent] = []
+        for row in demoRows {
+            let (name, path, input, output, calls, dayOffset) = row
+            let baseDate = calendar.date(byAdding: .day, value: dayOffset, to: today) ?? today
+            let callCount = max(1, calls)
+            let inputPerCall = Double(input) / Double(callCount)
+            let outputPerCall = Double(output) / Double(callCount)
+            for index in 0..<callCount {
+                let seconds = Double(8 * 60 * 60 + index % (10 * 60 * 60))
+                events.append(
+                    UsageEvent(
+                        date: baseDate.addingTimeInterval(seconds),
+                        workspaceRoot: path,
+                        workspaceName: name,
+                        modelID: nil,
+                        inputTokens: inputPerCall,
+                        outputTokens: outputPerCall
+                    )
+                )
+            }
+        }
+        return makeSummary(events: events, settings: settings, now: now)
+    }
+
     static func makeSummary(events: [UsageEvent], settings: AnalysisSettings, now: Date) -> UsageSummary {
         var summary = UsageSummary()
         let todayRange = range(for: .today, now: now, settings: settings)
@@ -407,16 +465,16 @@ final class DevSpaceToolModel: ObservableObject {
 
         for event in events {
             let usage = usage(for: event, settings: settings)
-            summary.total.add(tokens: usage.tokens, cost: usage.cost)
-            if contains(event.date, in: todayRange) { summary.today.add(tokens: usage.tokens, cost: usage.cost) }
-            if contains(event.date, in: weekRange) { summary.week.add(tokens: usage.tokens, cost: usage.cost) }
-            if contains(event.date, in: monthRange) { summary.month.add(tokens: usage.tokens, cost: usage.cost) }
-            if contains(event.date, in: yearRange) { summary.year.add(tokens: usage.tokens, cost: usage.cost) }
-            if contains(event.date, in: customRange) { summary.custom.add(tokens: usage.tokens, cost: usage.cost) }
+            summary.total.add(usage)
+            if contains(event.date, in: todayRange) { summary.today.add(usage) }
+            if contains(event.date, in: weekRange) { summary.week.add(usage) }
+            if contains(event.date, in: monthRange) { summary.month.add(usage) }
+            if contains(event.date, in: yearRange) { summary.year.add(usage) }
+            if contains(event.date, in: customRange) { summary.custom.add(usage) }
 
             let selected = settings.selectedPeriod == .all || contains(event.date, in: selectedRange)
             guard selected else { continue }
-            summary.selected.add(tokens: usage.tokens, cost: usage.cost)
+            summary.selected.add(usage)
 
             let unknown = event.workspaceRoot == "legacy:unknown"
             if !(settings.hideUnknownFolders && unknown) {
@@ -425,13 +483,13 @@ final class DevSpaceToolModel: ObservableObject {
                     name: event.workspaceName,
                     path: event.workspaceRoot
                 )
-                folder.usage.add(tokens: usage.tokens, cost: usage.cost)
+                folder.usage.add(usage)
                 folders[event.workspaceRoot] = folder
             }
 
             let day = businessDayStart(for: event.date, settings: settings)
             var dayUsage = daily[day] ?? PeriodUsage()
-            dayUsage.add(tokens: usage.tokens, cost: usage.cost)
+            dayUsage.add(usage)
             daily[day] = dayUsage
         }
 
@@ -532,14 +590,22 @@ final class DevSpaceToolModel: ObservableObject {
     }
 
     private static func usage(for event: UsageEvent, settings: AnalysisSettings) -> PeriodUsage {
-        let inputUsd = event.inputTokens * max(0, settings.inputUsdPerMillion) / 1_000_000
-        let outputUsd = event.outputTokens * max(0, settings.outputUsdPerMillion) / 1_000_000
+        let eventProfile = event.modelID.flatMap { ModelPricingService.profile(prefix: "devspaceTool", modelID: $0) }
+        let inputRate = eventProfile?.inputUsdPerMillion ?? settings.inputUsdPerMillion
+        let outputRate = eventProfile?.outputUsdPerMillion ?? settings.outputUsdPerMillion
+        let inputUsd = event.inputTokens * max(0, inputRate) / 1_000_000
+        let outputUsd = event.outputTokens * max(0, outputRate) / 1_000_000
         let cost = CostBreakdown(
             input: inputUsd * settings.currencyRate,
             output: outputUsd * settings.currencyRate
         )
         var usage = PeriodUsage()
-        usage.add(tokens: max(0, Int(event.inputTokens + event.outputTokens)), cost: cost)
+        usage.add(
+            tokens: max(0, Int(event.inputTokens + event.outputTokens)),
+            inputTokens: max(0, Int(event.inputTokens)),
+            outputTokens: max(0, Int(event.outputTokens)),
+            cost: cost
+        )
         return usage
     }
 
@@ -566,10 +632,15 @@ final class DevSpaceToolModel: ObservableObject {
             let fallbackName = normalizedRoot == "legacy:unknown" ? "Unknown" : URL(fileURLWithPath: normalizedRoot).lastPathComponent
             let rawName = ((object["workspaceName"] as? String) ?? fallbackName).trimmingCharacters(in: .whitespacesAndNewlines)
             let name = rawName.isEmpty ? fallbackName : rawName
+            let modelID = ["model", "modelId", "modelID", "modelName"]
+                .compactMap { object[$0] as? String }
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+                .first { !$0.isEmpty }
             events.append(UsageEvent(
                 date: date,
                 workspaceRoot: normalizedRoot,
                 workspaceName: name,
+                modelID: modelID,
                 inputTokens: max(0, pair.input),
                 outputTokens: max(0, pair.output)
             ))
