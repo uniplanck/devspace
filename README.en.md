@@ -1,12 +1,13 @@
 <p align="center">
   <picture>
-    <img src="https://raw.githubusercontent.com/Waishnav/devspace/main/docs/assets/devspace-logo-light.png" alt="DevSpace logo" width="140">
+    <img src="https://raw.githubusercontent.com/uniplanck/devspace/main/docs/assets/devspace-logo-light.png" alt="DevSpace logo" width="140">
   </picture>
 </p>
 
 <h1 align="center">DevSpace</h1>
 
-<p align="center">A self-hosted MCP server that lets ChatGPT work with approved development folders on your Mac or Linux machine.</p>
+<p align="center"><strong>Turn ChatGPT from an adviser into an operator that can work in your real development environment.</strong></p>
+<p align="center">A self-hosted MCP server for reading local code, making scoped edits, running Terminal checks, and inspecting Git changes.</p>
 
 <p align="center">
   <a href="README.md">日本語</a> ｜ <strong>English</strong>
@@ -15,7 +16,40 @@
 > [!IMPORTANT]
 > DevSpace can read, edit, search, and run Terminal commands inside approved local folders. Start with one specific project folder. Do not allow your entire home directory or folders containing credentials.
 
-## What it does
+## What changes after installing DevSpace
+
+Without DevSpace, you copy code into ChatGPT, paste suggested commands into a Terminal, and return the output to the chat. DevSpace removes much of that handoff by letting ChatGPT inspect and operate on an approved real project directly.
+
+| Before | With DevSpace |
+|---|---|
+| Paste snippets and ask ChatGPT to guess the context | ChatGPT inspects the actual files, dependencies, and Git state |
+| Apply suggested code manually | ChatGPT makes scoped edits to the relevant files |
+| Paste test and build output back into the chat | ChatGPT runs the command and reads the result |
+| Risk branch conflicts across parallel tasks | Use isolated Git worktrees for separate sessions |
+| Repeat project rules in every conversation | Load `AGENTS.md` / `CLAUDE.md` automatically |
+
+A typical request can be as direct as:
+
+```text
+Inspect this repository and identify the cause of the layout regression.
+Make the smallest change limited to the related files, run one build,
+and report the diff and remaining risks. Do not commit, push, or deploy.
+```
+
+DevSpace is not an opaque autonomous agent that runs without visibility. File operations and shell commands are exposed as tool calls, making the scope and result of the work easier to inspect.
+
+## Enhancements in this fork
+
+This repository builds on [Waishnav/devspace](https://github.com/Waishnav/devspace) and adds changes developed from day-to-day production use.
+
+- **Japanese-first onboarding** with a macOS Tailscale Funnel quickstart and bilingual recovery guidance
+- **Compatibility fixes for recent ChatGPT model updates** to reduce tool-call latency and failures
+- **DevSpace Tool for macOS** for runtime status, approved folders, usage analytics, and cost estimates
+- **Safer local operation** through approved roots, Owner Password approval, and PID-validated control scripts
+- **Production-oriented workflows** including Git worktrees, project instructions, skills, subagents, and job/browser/computer-use foundations
+- **Usage visibility** for tokens, calls, estimated API cost, time periods, and workspace-level analysis
+
+## Core capabilities
 
 After connecting DevSpace, ChatGPT can:
 
@@ -36,6 +70,11 @@ The optional macOS **DevSpace Tool** provides:
 - token, call, and estimated API-cost analytics
 - Aurora, Monochrome, and Minimal themes
 - safe copy actions for the MCP URL, diagnostics command, and Owner Password retrieval command
+
+<p align="center">
+  <img src="docs/assets/devspace-tool/settings-en.png" alt="DevSpace Tool settings in English" width="900">
+</p>
+<p align="center"><sub>Configure language, aggregation periods, pricing conversion, appearance, and runtime behavior from the macOS UI.</sub></p>
 
 ## Fastest setup: macOS + Tailscale Funnel
 
@@ -209,7 +248,7 @@ cd ~/devspace && bash ./scripts/devspace-control.sh owner-cmd
 ## DevSpace Tool for macOS
 
 ```bash
-cd ~/devspace/extensions/devspace-tool && bash ./build-macos.sh && open ".build/DevSpace Tool.app"
+cd ~/devspace/extensions/devspace-tool && zsh ./build-macos.sh && open ".build/DevSpace Tool.app"
 ```
 
 Use **Settings → Language** to switch between `Automatic / English / 日本語` immediately.
