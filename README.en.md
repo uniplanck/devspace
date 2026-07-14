@@ -71,7 +71,10 @@ The optional macOS **DevSpace Tool** provides:
 - Aurora, Monochrome, and Minimal themes
 - safe copy actions for the MCP URL, diagnostics command, and Owner Password retrieval command
 
-<!-- DevSpace Tool screenshots will be added from docs/assets/devspace-tool/ after capture. -->
+<p align="center">
+  <img src="docs/assets/devspace-tool/settings-en.png" alt="DevSpace Tool settings in English" width="900">
+</p>
+<p align="center"><sub>Configure language, aggregation periods, pricing conversion, appearance, and runtime behavior from the macOS UI.</sub></p>
 
 ## Fastest setup: macOS + Tailscale Funnel
 

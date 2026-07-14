@@ -71,7 +71,15 @@ macOS向けの **DevSpace Tool** では、次のUIを利用できます。
 - Aurora / Monochrome / Minimalテーマ
 - MCP URL、診断コマンド、安全なOwner Password取得コマンドのコピー
 
-<!-- DevSpace Tool screenshots will be added from docs/assets/devspace-tool/ after capture. -->
+<p align="center">
+  <img src="docs/assets/devspace-tool/settings-ja.png" alt="DevSpace Toolの日本語設定画面" width="900">
+</p>
+<p align="center"><sub>日本語・英語切替、集計期間、料金換算、表示テーマをGUIから設定。</sub></p>
+
+<p align="center">
+  <img src="docs/assets/devspace-tool/runtime-ja.png" alt="DevSpace Toolのランタイム画面" width="900">
+</p>
+<p align="center"><sub>DevSpaceの稼働状態、Host、Port、起動・停止、設定ファイルを一画面で確認。</sub></p>
 
 ## 最短セットアップ：macOS + Tailscale Funnel
 
