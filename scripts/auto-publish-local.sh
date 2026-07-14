@@ -58,6 +58,7 @@ npm --prefix "$TEMP_ROOT/devspace" run typecheck
 npm --prefix "$TEMP_ROOT/devspace" test
 npm --prefix "$TEMP_ROOT/devspace" run build
 /usr/bin/swiftc -parse-as-library -typecheck -framework SwiftUI -framework AppKit \
+  "$TEMP_ROOT/devspace/extensions/devspace-tool/ModelPricing.swift" \
   "$TEMP_ROOT/devspace/extensions/devspace-tool/UsageCore.swift" \
   "$TEMP_ROOT/devspace/extensions/devspace-tool/DevSpaceToolView.swift" \
   "$TEMP_ROOT/devspace/extensions/devspace-tool/DevSpaceTool.swift"

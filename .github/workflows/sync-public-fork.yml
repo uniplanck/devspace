@@ -81,6 +81,7 @@ jobs:
           npm test
           npm run build
           swiftc -parse-as-library -typecheck -framework SwiftUI -framework AppKit \
+            extensions/devspace-tool/ModelPricing.swift \
             extensions/devspace-tool/UsageCore.swift \
             extensions/devspace-tool/DevSpaceToolView.swift \
             extensions/devspace-tool/DevSpaceTool.swift
