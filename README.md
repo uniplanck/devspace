@@ -66,7 +66,8 @@ macOS向けの **DevSpace Tool** では、次のUIを利用できます。
 - 日本語 / English / OS言語への自動切替
 - Overview / Analytics / Runtime / Folders / Settings
 - DevSpaceのONLINE/OFFLINE確認と起動・停止
-- 許可フォルダ一覧
+- 許可フォルダの一覧・Finder追加・パス追加・削除
+- 設定変更前の自動バックアップと、稼働中ランタイムへの自動反映
 - token・呼出回数・概算API費用の期間別集計
 - Aurora / Monochrome / Minimalテーマ
 - MCP URL、診断コマンド、安全なOwner Password取得コマンドのコピー
