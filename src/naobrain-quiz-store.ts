@@ -140,6 +140,7 @@ export interface QuizAnswerInput {
 
 export interface QuizGenerationResult {
   generated: boolean;
+  queued?: boolean;
   reason: string;
   generationId?: string;
   added?: number;
@@ -151,6 +152,7 @@ export interface QuizGenerationResult {
 export interface QuizDriveSyncResult {
   configured: boolean;
   synced: boolean;
+  queued?: boolean;
   destination?: string;
   error?: string;
 }
@@ -174,6 +176,9 @@ interface QuizGenerationMeta {
 export class NaoBrainQuizStore {
   private readonly config: NaoBrainQuizConfig;
   private queue: Promise<unknown> = Promise.resolve();
+  private generationTask: Promise<QuizGenerationResult> | null = null;
+  private driveSyncTask: Promise<QuizDriveSyncResult> | null = null;
+  private driveSyncRequested = false;
 
   constructor(config: NaoBrainQuizConfig) {
     this.config = config;
@@ -230,7 +235,7 @@ export class NaoBrainQuizStore {
         answers: [],
       };
       await this.writeSession(session);
-      await this.syncToDrive();
+      this.scheduleDriveSync();
       return buildPublicState(bank, stats, session);
     });
   }
@@ -297,7 +302,7 @@ export class NaoBrainQuizStore {
         generation = await this.maybeGenerateAfterCycle(session, bank, updatedStats);
       }
       const finalBank = generation.generated ? await this.readBank() : bank;
-      const drive = await this.syncToDrive();
+      const drive = this.scheduleDriveSync();
       return {
         ok: true,
         answer,
@@ -310,6 +315,23 @@ export class NaoBrainQuizStore {
 
   async generate(reason = "manual", force = false): Promise<QuizGenerationResult> {
     return this.enqueue(async () => this.generateUnlocked(reason, force));
+  }
+
+  async queueGeneration(reason = "manual", force = false): Promise<QuizGenerationResult> {
+    await this.ensureLayout();
+    if (this.generationTask) {
+      return { generated: false, queued: true, reason: "generation-already-running" };
+    }
+    this.generationTask = this.generate(reason, force)
+      .catch((error) => ({
+        generated: false,
+        reason,
+        error: safeError(error, "Quiz generation failed"),
+      }))
+      .finally(() => {
+        this.generationTask = null;
+      });
+    return { generated: false, queued: true, reason };
   }
 
   async digest(): Promise<string> {
@@ -378,7 +400,7 @@ export class NaoBrainQuizStore {
       : 0;
     if (!stale && sessionWrongRate < 0.25) return { generated: false, reason: "generation-not-due" };
 
-    return this.generateUnlocked(
+    return this.queueGeneration(
       `cycle-${meta.completedCycles}; wrong-rate=${Math.round(sessionWrongRate * 100)}%; weak=${stats.filter((item) => wrongRate(item) >= 0.3).length}`,
       true,
     );
@@ -587,6 +609,37 @@ export class NaoBrainQuizStore {
     const path = join(this.config.dataDir, "sessions", date.slice(0, 4), date.slice(5, 7), `${date}.jsonl`);
     await mkdir(dirname(path), { recursive: true });
     await appendFile(path, `${JSON.stringify(answer)}\n`, { encoding: "utf8", mode: 0o600 });
+  }
+
+  private scheduleDriveSync(): QuizDriveSyncResult {
+    if (!this.config.driveRemote) return { configured: false, synced: false };
+    const destination = `${redactRemote(this.config.driveRemote)}${this.config.driveBasePath}`;
+    this.driveSyncRequested = true;
+
+    if (!this.driveSyncTask) {
+      this.driveSyncTask = (async () => {
+        let result: QuizDriveSyncResult = {
+          configured: true,
+          synced: false,
+          destination,
+        };
+        while (this.driveSyncRequested) {
+          this.driveSyncRequested = false;
+          result = await this.syncToDrive();
+        }
+        return result;
+      })().finally(() => {
+        this.driveSyncTask = null;
+        if (this.driveSyncRequested) this.scheduleDriveSync();
+      });
+    }
+
+    return {
+      configured: true,
+      synced: false,
+      queued: true,
+      destination,
+    };
   }
 
   private async syncToDrive(): Promise<QuizDriveSyncResult> {
