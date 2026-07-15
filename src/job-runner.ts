@@ -330,7 +330,11 @@ async function runBrowserLoopJob(
   const input = readBrowserLoopInput(job.input);
   if (!injectedRuntime) {
     const browser = await startBrowserSession();
-    store.appendEvent(job.id, "info", `Browser session: ${browser.status}.`);
+    store.appendEvent(
+      job.id,
+      "info",
+      `Browser session: ${browser.status} (${browser.session.backgroundMode}).`,
+    );
     const downloadDirectory = await configureBrowserDownloadDirectory({
       group: input.downloadGroup ?? "browser",
       taskId: `${job.title}-${job.id}`,
@@ -435,7 +439,7 @@ async function runChatGptTaskJob(store: JobStore, job: JobRecord): Promise<JobRe
           state: state as unknown as Record<string, unknown>,
           progress: Math.max(requireJob(store, job.id).progress, progress),
           currentStep: phase === "opening"
-            ? "Opening isolated ChatGPT tab"
+            ? "Opening isolated ChatGPT browser target"
             : phase === "waiting-approval"
               ? "Waiting for local submit approval"
               : phase === "waiting-response"
@@ -473,6 +477,11 @@ async function runChatGptTaskJob(store: JobStore, job: JobRecord): Promise<JobRe
     finishedAt: new Date().toISOString(),
   });
   store.appendEvent(job.id, "info", `ChatGPT response captured (${result.responseText.length} characters).`);
+  store.appendEvent(
+    job.id,
+    "info",
+    `ChatGPT model: ${result.state.selectedModelLabel ?? result.state.selectedModel ?? result.state.requestedModel ?? "unverified"} (${result.state.modelSelectionStatus ?? "url-only"}).`,
+  );
   store.appendEvent(job.id, "info", `Resume URL: ${result.conversationUrl}`);
   if (result.state.tabClosed) store.appendEvent(job.id, "info", "Unused child tab closed after result capture.");
   return completed;

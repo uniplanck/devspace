@@ -6,9 +6,11 @@ import {
   approveBrowserAction,
   browserStatus,
   classifyBrowserElementRisk,
+  isManagedAutomationBrowserSession,
   listBrowserApprovals,
   resolveBrowserDownloadDirectory,
   type BrowserElementDescriptor,
+  type BrowserSessionRecord,
 } from "./browser-computer.js";
 import { defaultComputerUsePolicy } from "./computer-use.js";
 
@@ -18,6 +20,23 @@ try {
   assert.equal(status.active, false);
   assert.deepEqual(status.pages, []);
   assert.deepEqual(listBrowserApprovals(home), []);
+
+  const legacyManualSession: BrowserSessionRecord = {
+    schemaVersion: 1,
+    pid: 123,
+    port: 456,
+    browserName: "Brave Browser",
+    browserExecutable: "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+    browserWebSocketPath: "/devtools/browser/manual",
+    profileDirectory: join(home, "manual-brave-profile"),
+    backgroundMode: "window",
+    startedAt: new Date(0).toISOString(),
+  };
+  assert.equal(isManagedAutomationBrowserSession(legacyManualSession), false);
+  assert.equal(
+    isManagedAutomationBrowserSession({ ...legacyManualSession, managedBy: "gpt-agent-automation" }),
+    true,
+  );
 
   const policy = defaultComputerUsePolicy(home);
   const downloadDirectory = resolveBrowserDownloadDirectory({
