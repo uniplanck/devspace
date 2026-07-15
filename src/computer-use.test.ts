@@ -3,9 +3,11 @@ import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  chromeForTestingExecutable,
   defaultComputerUsePolicy,
   diagnoseComputerUse,
   enableChatGptBrowserPolicy,
+  findAutomationBrowser,
   initializeComputerUsePolicy,
   isAllowedBrowserHost,
   loadComputerUsePolicy,
@@ -19,6 +21,13 @@ assert.equal(initialized.created, true);
 assert.equal(initialized.policy.enabled, false);
 assert.equal(initialized.policy.confirmations.purchase, true);
 assert.equal(initialized.policy.browser.downloadDirectory, join(root, "Downloads", "GPT-Agent"));
+assert.equal(initialized.policy.browser.backgroundMode, "background-window");
+assert.equal(initialized.policy.browser.profileDirectory, join(root, ".devspace", "chrome-for-testing-profile"));
+assert.equal(
+  chromeForTestingExecutable(root, "darwin"),
+  join(root, ".devspace", "browsers", "chrome-for-testing", "current", "Google Chrome for Testing.app", "Contents", "MacOS", "Google Chrome for Testing"),
+);
+assert.equal(findAutomationBrowser((path) => path.includes("Chrome for Testing"), root, "darwin")?.name, "Chrome for Testing");
 
 const loaded = loadComputerUsePolicy(policyPath, root);
 assert.equal(loaded.valid, true);
@@ -28,10 +37,10 @@ const disabledDoctor = diagnoseComputerUse({
   policyPath,
   home: root,
   platform: "darwin",
-  fileExists: (path) => path.includes("Brave Browser") || path.endsWith("screencapture") || path.endsWith("osascript"),
+  fileExists: (path) => path.includes("Chrome for Testing") || path.endsWith("screencapture") || path.endsWith("osascript"),
   packageAvailable: () => true,
 });
-assert.equal(disabledDoctor.browser.name, "Brave Browser");
+assert.equal(disabledDoctor.browser.name, "Chrome for Testing");
 assert.equal(disabledDoctor.browser.adapter, "native-cdp");
 assert.equal(disabledDoctor.browser.nativeCdpAvailable, true);
 assert.equal(disabledDoctor.browser.ready, false);
@@ -42,6 +51,8 @@ assert.equal(chatGptEnabled.policy.enabled, true);
 assert.equal(chatGptEnabled.policy.browser.enabled, true);
 assert.deepEqual(chatGptEnabled.policy.browser.allowedDomains, ["chatgpt.com"]);
 assert.equal(chatGptEnabled.policy.browser.allowDownloads, true);
+assert.equal(chatGptEnabled.policy.browser.backgroundMode, "background-window");
+assert.equal(chatGptEnabled.policy.browser.profileDirectory, join(root, ".devspace", "chrome-for-testing-profile"));
 assert.equal(chatGptEnabled.policy.confirmations.purchase, true);
 assert.equal(chatGptEnabled.policy.confirmations.externalCommunication, true);
 
@@ -54,7 +65,7 @@ const readyDoctor = diagnoseComputerUse({
   policyPath,
   home: root,
   platform: "darwin",
-  fileExists: (path) => path.includes("Brave Browser") || path.endsWith("screencapture") || path.endsWith("osascript"),
+  fileExists: (path) => path.includes("Chrome for Testing") || path.endsWith("screencapture") || path.endsWith("osascript"),
   packageAvailable: () => false,
 });
 assert.equal(readyDoctor.browser.ready, true);
@@ -71,10 +82,12 @@ assert.throws(() => validateBrowserUrl("https://user:pass@example.com", enabled)
 
 const legacyRaw = JSON.parse(await readFile(policyPath, "utf8"));
 delete legacyRaw.browser.downloadDirectory;
+delete legacyRaw.browser.backgroundMode;
 await writeFile(policyPath, JSON.stringify(legacyRaw));
 const legacyLoaded = loadComputerUsePolicy(policyPath, root);
 assert.equal(legacyLoaded.valid, true);
 assert.equal(legacyLoaded.policy.browser.downloadDirectory, join(root, "Downloads", "GPT-Agent"));
+assert.equal(legacyLoaded.policy.browser.backgroundMode, "background-window");
 
 const raw = JSON.parse(await readFile(policyPath, "utf8"));
 raw.browser.allowedDomains = ["https://invalid.example.com/path"];

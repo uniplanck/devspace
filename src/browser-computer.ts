@@ -12,20 +12,28 @@ import {
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import {
-  findSupportedBrowser,
+  findAutomationBrowser,
   loadComputerUsePolicy,
   type ComputerUsePolicy,
   validateBrowserUrl,
 } from "./computer-use.js";
+import {
+  CHATGPT_MINIMUM_PREFERRED_MODEL,
+  chooseBestChatGptModelCandidate,
+  chooseBestDiscoveredChatGptModel,
+  scoreChatGptModel,
+} from "./chatgpt-model.js";
 
 export interface BrowserSessionRecord {
   schemaVersion: 1;
+  managedBy?: "gpt-agent-automation";
   pid: number;
   port: number;
   browserName: string;
   browserExecutable: string;
   browserWebSocketPath: string;
   profileDirectory: string;
+  backgroundMode: "headless" | "background-window" | "window";
   startedAt: string;
   targetId?: string;
 }
@@ -108,6 +116,15 @@ export interface ChatGptConversationSnapshot {
   errorText: string;
 }
 
+export interface ChatGptModelSelectionResult {
+  status: "selected" | "url-only";
+  targetId: string;
+  currentLabel: string;
+  selectedLabel?: string;
+  selectedModel?: string;
+  candidateCount: number;
+}
+
 export interface ChatGptResponseWaitInput {
   baselineAssistantCount: number;
   expectedMarker?: string;
@@ -176,7 +193,14 @@ function readSession(home: string = homedir()): BrowserSessionRecord | undefined
       || typeof raw.browserWebSocketPath !== "string"
       || typeof raw.profileDirectory !== "string"
     ) return undefined;
-    return raw;
+    return {
+      ...raw,
+      backgroundMode: raw.backgroundMode === "headless"
+        ? "headless"
+        : raw.backgroundMode === "background-window"
+          ? "background-window"
+          : "window",
+    };
   } catch {
     return undefined;
   }
@@ -229,13 +253,17 @@ async function sessionResponds(session: BrowserSessionRecord): Promise<boolean> 
   }
 }
 
+export function isManagedAutomationBrowserSession(session: BrowserSessionRecord): boolean {
+  return session.managedBy === "gpt-agent-automation";
+}
+
 export async function browserStatus(home: string = homedir()): Promise<{
   active: boolean;
   session?: BrowserSessionRecord;
   pages: BrowserTargetInfo[];
 }> {
   const session = readSession(home);
-  if (!session || !await sessionResponds(session)) {
+  if (!session || !isManagedAutomationBrowserSession(session) || !await sessionResponds(session)) {
     if (session) clearSession(home);
     return { active: false, pages: [] };
   }
@@ -249,19 +277,25 @@ export async function startBrowserSession(input: {
 } = {}): Promise<{ status: "started" | "already-running"; session: BrowserSessionRecord }> {
   const home = input.home ?? homedir();
   const policy = loadPolicy(input.policyPath, home);
+  const browser = findAutomationBrowser(undefined, home);
+  if (!browser) {
+    throw new Error("Chrome for Testing was not found. Run npm run browser:install:chrome-for-testing.");
+  }
+  const profileDirectory = resolve(policy.browser.profileDirectory);
   const existing = readSession(home);
   if (existing && await sessionResponds(existing)) {
-    return { status: "already-running", session: existing };
+    const sameManagedBrowser = isManagedAutomationBrowserSession(existing)
+      && existing.browserExecutable === browser.path
+      && resolve(existing.profileDirectory) === profileDirectory;
+    if (sameManagedBrowser) return { status: "already-running", session: existing };
+    clearSession(home);
+  } else if (existing) {
+    clearSession(home);
   }
-  if (existing) clearSession(home);
-
-  const browser = findSupportedBrowser();
-  if (!browser) throw new Error("Brave, Chrome, or Chromium was not found.");
-  const profileDirectory = resolve(policy.browser.profileDirectory);
   ensurePrivateDirectory(profileDirectory);
   rmSync(join(profileDirectory, "DevToolsActivePort"), { force: true });
 
-  const child = spawn(browser.path, [
+  const browserArgs = [
     `--user-data-dir=${profileDirectory}`,
     "--remote-debugging-address=127.0.0.1",
     "--remote-debugging-port=0",
@@ -269,14 +303,28 @@ export async function startBrowserSession(input: {
     "--no-default-browser-check",
     "--disable-sync",
     "--disable-background-networking",
+    "--disable-background-timer-throttling",
+    "--disable-backgrounding-occluded-windows",
+    "--disable-renderer-backgrounding",
     "--disable-component-update",
     "--disable-default-apps",
     "--disable-extensions",
     "--disable-popup-blocking=false",
     "--disable-save-password-bubble",
     "--disable-features=AutofillServerCommunication,MediaRouter,PasswordManagerOnboarding,Translate",
-    "about:blank",
-  ], {
+  ];
+  if (policy.browser.backgroundMode === "headless") {
+    browserArgs.push("--headless=new", "--window-size=1440,1200");
+  } else if (policy.browser.backgroundMode === "background-window") {
+    browserArgs.push(
+      "--disable-background-mode",
+      "--window-position=-32000,-32000",
+      "--window-size=1440,1200",
+    );
+  }
+  browserArgs.push("about:blank");
+
+  const child = spawn(browser.path, browserArgs, {
     detached: true,
     stdio: "ignore",
   });
@@ -304,12 +352,14 @@ export async function startBrowserSession(input: {
 
   const session: BrowserSessionRecord = {
     schemaVersion: 1,
+    managedBy: "gpt-agent-automation",
     pid: child.pid,
     port,
     browserName: browser.name,
     browserExecutable: browser.path,
     browserWebSocketPath,
     profileDirectory,
+    backgroundMode: policy.browser.backgroundMode,
     startedAt: new Date().toISOString(),
   };
   saveSession(session, home);
@@ -420,14 +470,17 @@ export async function launchBrowserLoginSession(
   const policy = loadPolicy(input.policyPath, home);
   const requested = validateBrowserUrl(input.url ?? "https://chatgpt.com/", policy);
   await stopBrowserSession(home);
-  const browser = findSupportedBrowser();
-  if (!browser) throw new Error("Brave, Chrome, or Chromium was not found.");
+  const browser = findAutomationBrowser(undefined, home);
+  if (!browser) {
+    throw new Error("Chrome for Testing was not found. Run npm run browser:install:chrome-for-testing.");
+  }
   const profileDirectory = resolve(policy.browser.profileDirectory);
   ensurePrivateDirectory(profileDirectory);
   const child = spawn(browser.path, [
     `--user-data-dir=${profileDirectory}`,
     "--no-first-run",
     "--no-default-browser-check",
+    "--disable-background-mode",
     requested.toString(),
   ], {
     detached: true,
@@ -447,6 +500,10 @@ export async function launchBrowserLoginSession(
 export async function stopBrowserSession(home: string = homedir()): Promise<{ status: "stopped" | "not-running" }> {
   const session = readSession(home);
   if (!session) return { status: "not-running" };
+  if (!isManagedAutomationBrowserSession(session)) {
+    clearSession(home);
+    return { status: "not-running" };
+  }
   if (await sessionResponds(session)) {
     try {
       const browserClient = await CdpClient.connect(
@@ -467,9 +524,9 @@ export async function stopBrowserSession(home: string = homedir()): Promise<{ st
 
 async function requireActiveSession(home: string = homedir()): Promise<BrowserSessionRecord> {
   const session = readSession(home);
-  if (!session || !await sessionResponds(session)) {
+  if (!session || !isManagedAutomationBrowserSession(session) || !await sessionResponds(session)) {
     if (session) clearSession(home);
-    throw new Error("Browser Computer Use session is not running.");
+    throw new Error("GPT-Agent headless Browser session is not running.");
   }
   return session;
 }
@@ -553,6 +610,33 @@ async function waitForDocument(client: CdpClient): Promise<void> {
   }
 }
 
+async function waitForAllowedPage(
+  client: CdpClient,
+  policy: ComputerUsePolicy,
+  requested: URL,
+): Promise<{ url: string; title: string }> {
+  const deadline = Date.now() + 30_000;
+  let latestUrl = "about:blank";
+  while (Date.now() < deadline) {
+    try {
+      const page = await evaluate<{ url: string; title: string; readyState: string }>(client, `({
+        url: location.href,
+        title: document.title.slice(0, 300),
+        readyState: document.readyState
+      })`);
+      latestUrl = page.url;
+      if (page.url !== "about:blank") {
+        validateBrowserUrl(page.url, policy);
+        return { url: page.url, title: page.title };
+      }
+    } catch (error) {
+      if (latestUrl !== "about:blank") throw error;
+    }
+    await sleep(200);
+  }
+  throw new Error(`Browser did not reach ${requested.origin} after navigation; last URL: ${latestUrl}.`);
+}
+
 export async function openBrowserUrl(
   rawUrl: string,
   input: { policyPath?: string; home?: string } = {},
@@ -562,20 +646,21 @@ export async function openBrowserUrl(
   const requested = validateBrowserUrl(rawUrl, policy);
   return await withPageClient(home, async (client, target) => {
     await client.send("Page.enable");
-    const navigation = await client.send<{ errorText?: string }>("Page.navigate", { url: requested.toString() });
-    if (navigation.errorText) throw new Error(`Browser navigation failed: ${navigation.errorText}`);
-    await waitForDocument(client);
-    const page = await evaluate<{ url: string; title: string }>(client, `({
-      url: location.href,
-      title: document.title.slice(0, 300)
-    })`);
     try {
-      validateBrowserUrl(page.url, policy);
+      const navigation = await client.send<{ errorText?: string }>("Page.navigate", { url: requested.toString() });
+      if (navigation.errorText && navigation.errorText !== "net::ERR_ABORTED") {
+        throw new Error(`Browser navigation failed: ${navigation.errorText}`);
+      }
     } catch (error) {
-      await client.send("Page.navigate", { url: "about:blank" });
-      throw new Error(`Navigation left the allowlist and was stopped: ${error instanceof Error ? error.message : String(error)}`);
+      if (!(error instanceof Error) || !/CDP command timed out: Page\.navigate/u.test(error.message)) throw error;
     }
-    return { targetId: target.id, url: page.url, title: page.title };
+    try {
+      const page = await waitForAllowedPage(client, policy, requested);
+      return { targetId: target.id, url: page.url, title: page.title };
+    } catch (error) {
+      await client.send("Page.navigate", { url: "about:blank" }).catch(() => undefined);
+      throw new Error(`Navigation left the allowlist or did not complete: ${error instanceof Error ? error.message : String(error)}`);
+    }
   });
 }
 
@@ -593,14 +678,15 @@ export async function openBrowserUrlInNewTab(
   const client = await CdpClient.connect(target.webSocketDebuggerUrl);
   try {
     await client.send("Page.enable");
-    const navigation = await client.send<{ errorText?: string }>("Page.navigate", { url: requested.toString() });
-    if (navigation.errorText) throw new Error(`Browser navigation failed: ${navigation.errorText}`);
-    await waitForDocument(client);
-    const page = await evaluate<{ url: string; title: string }>(client, `({
-      url: location.href,
-      title: document.title.slice(0, 300)
-    })`);
-    validateBrowserUrl(page.url, policy);
+    try {
+      const navigation = await client.send<{ errorText?: string }>("Page.navigate", { url: requested.toString() });
+      if (navigation.errorText && navigation.errorText !== "net::ERR_ABORTED") {
+        throw new Error(`Browser navigation failed: ${navigation.errorText}`);
+      }
+    } catch (error) {
+      if (!(error instanceof Error) || !/CDP command timed out: Page\.navigate/u.test(error.message)) throw error;
+    }
+    const page = await waitForAllowedPage(client, policy, requested);
     return { targetId: target.id, url: page.url, title: page.title };
   } catch (error) {
     await closeBrowserTarget(target.id, home).catch(() => undefined);
@@ -747,6 +833,389 @@ export async function inspectChatGptConversation(
     })()`);
     return { targetId: target.id, ...page };
   }, targetId);
+}
+
+export async function selectBestAvailableChatGptModel(
+  input: { home?: string; targetId?: string } = {},
+): Promise<ChatGptModelSelectionResult> {
+  const home = input.home ?? homedir();
+  return await withPageClient(home, async (client, target) => {
+    const discovery = await evaluate<{
+      hostname: string;
+      currentUrl: string;
+      currentPresetLabel: string;
+      reasoningModelSlugs: string[];
+    }>(client, `(async () => {
+      const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+      const visible = (el) => {
+        const r = el.getBoundingClientRect();
+        const style = getComputedStyle(el);
+        return r.width > 1 && r.height > 1 && style.display !== "none" && style.visibility !== "hidden";
+      };
+      const isPresetLabel = (value) => {
+        const text = clean(value);
+        return ["高い", "中程度", "最速", "High", "Medium", "Fast"].includes(text)
+          || [" 高い", " 中程度", " 最速", " High", " Medium", " Fast"].some((suffix) => text.endsWith(suffix));
+      };
+      const presetButton = Array.from(document.querySelectorAll("button"))
+        .find((candidate) => visible(candidate) && isPresetLabel(candidate.innerText));
+      const storedValues = [];
+      for (let index = 0; index < localStorage.length; index += 1) {
+        const key = localStorage.key(index);
+        if (key) storedValues.push(localStorage.getItem(key) || "");
+      }
+      const storedText = storedValues.join("\\n");
+      const storedReasoningSlugs = storedText.match(/gpt-[0-9]+(?:-[0-9]+)+(?:-thinking|-reasoning)/gi) || [];
+      const result = {
+        hostname: location.hostname,
+        currentUrl: location.href,
+        currentPresetLabel: clean(presetButton?.innerText),
+        reasoningModelSlugs: storedReasoningSlugs.map((slug) => slug.toLowerCase())
+      };
+      try {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 3000);
+        const response = await fetch(
+          "/backend-api/models?history_and_training_disabled=false",
+          { credentials: "include", signal: controller.signal }
+        );
+        clearTimeout(timer);
+        if (!response.ok) return { ...result, reasoningModelSlugs: [...new Set(result.reasoningModelSlugs)] };
+        const json = await response.json();
+        const rawModels = Array.isArray(json?.models)
+          ? json.models
+          : json?.models && typeof json.models === "object"
+            ? Object.values(json.models)
+            : [];
+        const explicitReasoningSlugs = rawModels
+          .map((item) => String(item?.slug || item?.id || item?.model_slug || item?.modelSlug || "").trim())
+          .filter((slug) => /thinking|reasoning|high|deep|pro/i.test(slug));
+        const presetReasoningSlugs = (Array.isArray(json?.versions) ? json.versions : [])
+          .flatMap((version) => {
+            if (Array.isArray(version?.intelligence_presets)) return version.intelligence_presets;
+            if (Array.isArray(version?.intelligencePresets)) return version.intelligencePresets;
+            return [];
+          })
+          .filter((preset) => {
+            const descriptor = [
+              preset?.lane,
+              preset?.title,
+              preset?.selected_display_title,
+              preset?.selectedDisplayTitle,
+              preset?.preset_type,
+              preset?.presetType
+            ].map((value) => String(value || "")).join(" ");
+            return /thinking|reasoning|high|deep|pro|思考|推論|高|プロ/i.test(descriptor)
+              && !/unavailable|disabled|利用不可/i.test(descriptor);
+          })
+          .map((preset) => String(preset?.model_slug || preset?.modelSlug || "").trim())
+          .filter(Boolean)
+          .map((slug) => /thinking|reasoning|high|deep|pro/i.test(slug) ? slug : slug + "-thinking");
+        result.reasoningModelSlugs = [...new Set([
+          ...result.reasoningModelSlugs,
+          ...explicitReasoningSlugs,
+          ...presetReasoningSlugs
+        ].map((slug) => slug.toLowerCase()))];
+      } catch {}
+      return { ...result, reasoningModelSlugs: [...new Set(result.reasoningModelSlugs)] };
+    })()`);
+    if (discovery.hostname !== "chatgpt.com" && !discovery.hostname.endsWith(".chatgpt.com")) {
+      throw new Error(`ChatGPT model selector requires chatgpt.com, got ${discovery.hostname || "unknown host"}.`);
+    }
+    const currentModel = new URL(discovery.currentUrl).searchParams.get("model")
+      ?? CHATGPT_MINIMUM_PREFERRED_MODEL;
+    const currentScore = scoreChatGptModel(currentModel);
+    const discovered = chooseBestDiscoveredChatGptModel(discovery.reasoningModelSlugs);
+    const currentPresetIsHigh = discovery.currentPresetLabel === "高い"
+      || discovery.currentPresetLabel === "High"
+      || discovery.currentPresetLabel.endsWith(" 高い")
+      || discovery.currentPresetLabel.endsWith(" High");
+    if (currentPresetIsHigh && discovered?.modelSlug
+      && discovered.score >= scoreChatGptModel(CHATGPT_MINIMUM_PREFERRED_MODEL)) {
+      return {
+        status: "selected",
+        targetId: target.id,
+        currentLabel: discovery.currentPresetLabel,
+        selectedLabel: discovery.currentPresetLabel,
+        selectedModel: discovered.modelSlug,
+        candidateCount: discovery.reasoningModelSlugs.length,
+      };
+    }
+    if (currentScore > scoreChatGptModel(CHATGPT_MINIMUM_PREFERRED_MODEL)) {
+      return {
+        status: "selected",
+        targetId: target.id,
+        currentLabel: currentModel,
+        selectedLabel: currentModel,
+        selectedModel: currentModel,
+        candidateCount: discovery.reasoningModelSlugs.length,
+      };
+    }
+
+    const menu = await evaluate<{
+      hostname: string;
+      currentLabel: string;
+      x?: number;
+      y?: number;
+    }>(client, `(() => {
+      const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+      const visible = (el) => {
+        const r = el.getBoundingClientRect();
+        const style = getComputedStyle(el);
+        return r.width > 1 && r.height > 1 && style.display !== "none" && style.visibility !== "hidden";
+      };
+      const direct = document.querySelector("[data-testid='model-switcher-dropdown-button']");
+      const isPresetLabel = (value) => {
+        const text = clean(value);
+        return ["高い", "中程度", "最速", "High", "Medium", "Fast"].includes(text)
+          || [" 高い", " 中程度", " 最速", " High", " Medium", " Fast"].some((suffix) => text.endsWith(suffix));
+      };
+      const preset = Array.from(document.querySelectorAll("button"))
+        .find((candidate) => visible(candidate) && isPresetLabel(candidate.innerText));
+      const fallback = Array.from(document.querySelectorAll("button[aria-haspopup='menu'],button[aria-haspopup='listbox']"))
+        .find((candidate) => {
+          const descriptor = clean(candidate.innerText || candidate.getAttribute("aria-label"));
+          const testId = candidate.getAttribute("data-testid") || "";
+          return visible(candidate)
+            && /gpt|model|モデル|thinking|思考|推論/i.test(descriptor)
+            && !/会話オプション|プロジェクトオプション|conversation options|project options/i.test(descriptor)
+            && !/history-item/i.test(testId);
+        });
+      const button = direct || preset || fallback;
+      if (!(button instanceof HTMLElement)) {
+        return { hostname: location.hostname, currentLabel: "" };
+      }
+      const r = button.getBoundingClientRect();
+      return {
+        hostname: location.hostname,
+        currentLabel: clean(button.innerText || button.getAttribute("aria-label")),
+        x: Math.round(r.x + r.width / 2),
+        y: Math.round(r.y + r.height / 2)
+      };
+    })()`);
+    if (menu.hostname !== "chatgpt.com" && !menu.hostname.endsWith(".chatgpt.com")) {
+      throw new Error(`ChatGPT model selector requires chatgpt.com, got ${menu.hostname || "unknown host"}.`);
+    }
+    if (menu.x === undefined || menu.y === undefined) {
+      return {
+        status: "url-only",
+        targetId: target.id,
+        currentLabel: menu.currentLabel,
+        candidateCount: 0,
+      };
+    }
+
+    await dispatchClick(client, menu.x, menu.y);
+    await sleep(350);
+    const candidates = await evaluate<Array<{
+      label: string;
+      href?: string;
+      disabled: boolean;
+      domIndex: number;
+    }>>(client, `(() => {
+      const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+      const visible = (el) => {
+        const r = el.getBoundingClientRect();
+        const style = getComputedStyle(el);
+        return r.width > 1 && r.height > 1 && style.display !== "none" && style.visibility !== "hidden";
+      };
+      const nodes = Array.from(document.querySelectorAll(
+        "[role='menuitem'],[role='menuitemradio'],[role='option'],a[href*='model=']"
+      )).filter(visible);
+      return nodes.map((el, domIndex) => {
+        const link = el instanceof HTMLAnchorElement ? el : el.closest("a[href]");
+        return {
+          label: clean(el.innerText || el.textContent || el.getAttribute("aria-label")),
+          href: link instanceof HTMLAnchorElement ? link.href : undefined,
+          disabled: el.getAttribute("aria-disabled") === "true"
+            || el.hasAttribute("disabled")
+            || /upgrade|unavailable|利用不可|アップグレード/i.test(clean(el.innerText || el.textContent)),
+          domIndex
+        };
+      }).filter((candidate) => candidate.label);
+    })()`);
+    const highPreset = candidates.find((candidate) => !candidate.disabled
+      && (candidate.label === "高い"
+        || candidate.label === "High"
+        || candidate.label.endsWith(" 高い")
+        || candidate.label.endsWith(" High")));
+    const best = highPreset
+      ? {
+          ...highPreset,
+          score: discovered?.score ?? scoreChatGptModel(highPreset.label),
+          ...(discovered?.modelSlug ? { modelSlug: discovered.modelSlug } : {}),
+        }
+      : chooseBestChatGptModelCandidate(candidates);
+    if (!best || best.domIndex === undefined) {
+      await client.send("Input.dispatchKeyEvent", { type: "keyDown", key: "Escape", code: "Escape" });
+      await client.send("Input.dispatchKeyEvent", { type: "keyUp", key: "Escape", code: "Escape" });
+      return {
+        status: "url-only",
+        targetId: target.id,
+        currentLabel: menu.currentLabel,
+        candidateCount: candidates.length,
+      };
+    }
+
+    const point = await evaluate<{ x: number; y: number } | undefined>(client, `(() => {
+      const visible = (el) => {
+        const r = el.getBoundingClientRect();
+        const style = getComputedStyle(el);
+        return r.width > 1 && r.height > 1 && style.display !== "none" && style.visibility !== "hidden";
+      };
+      const nodes = Array.from(document.querySelectorAll(
+        "[role='menuitem'],[role='menuitemradio'],[role='option'],a[href*='model=']"
+      )).filter(visible);
+      const el = nodes[${best.domIndex}];
+      if (!(el instanceof HTMLElement)) return undefined;
+      const r = el.getBoundingClientRect();
+      return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) };
+    })()`);
+    if (!point) {
+      return {
+        status: "url-only",
+        targetId: target.id,
+        currentLabel: menu.currentLabel,
+        candidateCount: candidates.length,
+      };
+    }
+
+    await dispatchClick(client, point.x, point.y);
+    await sleep(500);
+    const selectedLabel = await evaluate<string>(client, `(() => {
+      const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+      const preset = Array.from(document.querySelectorAll("button"))
+        .find((candidate) => {
+          const text = clean(candidate.innerText);
+          return ["高い", "中程度", "最速", "High", "Medium", "Fast"].includes(text)
+            || [" 高い", " 中程度", " 最速", " High", " Medium", " Fast"].some((suffix) => text.endsWith(suffix));
+        });
+      const button = document.querySelector("[data-testid='model-switcher-dropdown-button']") || preset;
+      return clean(button?.innerText || button?.getAttribute("aria-label"));
+    })()`);
+    return {
+      status: "selected",
+      targetId: target.id,
+      currentLabel: menu.currentLabel,
+      selectedLabel: selectedLabel || best.label,
+      ...(best.modelSlug ? { selectedModel: best.modelSlug } : {}),
+      candidateCount: candidates.length,
+    };
+  }, input.targetId);
+}
+
+export interface PreferredChatGptTaskTarget {
+  targetId: string;
+  url: string;
+  title: string;
+  reusedPreferredTarget: boolean;
+}
+
+export async function acquirePreferredChatGptTaskTarget(
+  rawUrl: string,
+  home: string = homedir(),
+): Promise<PreferredChatGptTaskTarget> {
+  const policy = loadPolicy(undefined, home);
+  const requested = validateBrowserUrl(rawUrl, policy);
+  const isNewChatRoot = requested.hostname === "chatgpt.com"
+    && requested.pathname === "/"
+    && !requested.search;
+  if (isNewChatRoot) {
+    const session = await requireActiveSession(home);
+    const targets = await listTargets(session);
+    for (const target of targets) {
+      if (target.type !== "page" || !target.webSocketDebuggerUrl) continue;
+      let current: Awaited<ReturnType<typeof inspectChatGptConversation>>;
+      try {
+        current = await inspectChatGptConversation(home, target.id);
+      } catch {
+        continue;
+      }
+      if (
+        current.url !== "https://chatgpt.com/"
+        || !current.composerPresent
+        || current.composerText.trim()
+        || current.userCount > 0
+        || current.assistantCount > 0
+      ) continue;
+      const model = await selectBestAvailableChatGptModel({ home, targetId: target.id }).catch(() => undefined);
+      const highPreset = model?.currentLabel === "高い"
+        || model?.currentLabel === "High"
+        || model?.currentLabel.endsWith(" 高い")
+        || model?.currentLabel.endsWith(" High");
+      if (
+        model?.status !== "selected"
+        || !highPreset
+        || !model.selectedModel
+        || scoreChatGptModel(model.selectedModel) < scoreChatGptModel(CHATGPT_MINIMUM_PREFERRED_MODEL)
+      ) continue;
+      await activateBrowserTarget(target.id, home);
+      return {
+        targetId: target.id,
+        url: current.url,
+        title: current.title,
+        reusedPreferredTarget: true,
+      };
+    }
+  }
+  const opened = await openBrowserUrlInNewTab(requested.toString(), { home });
+  return { ...opened, reusedPreferredTarget: false };
+}
+
+export async function resetPreferredChatGptTaskTarget(
+  targetId: string,
+  home: string = homedir(),
+): Promise<{ status: "reset" | "not-preferred"; model?: string }> {
+  await activateBrowserTarget(targetId, home);
+  const point = await withPageClient(home, async (client) => evaluate<{ x: number; y: number } | undefined>(client, `(() => {
+    const visible = (el) => {
+      const r = el.getBoundingClientRect();
+      const style = getComputedStyle(el);
+      return r.width > 1 && r.height > 1 && style.display !== "none" && style.visibility !== "hidden";
+    };
+    const links = Array.from(document.querySelectorAll("a[href='https://chatgpt.com/'],a[href='/']"))
+      .filter((candidate) => visible(candidate)
+        && /新しいチャット|new chat/i.test(String(candidate.innerText || candidate.getAttribute("aria-label") || "")));
+    const link = links.sort((a, b) => b.getBoundingClientRect().width - a.getBoundingClientRect().width)[0];
+    if (!(link instanceof HTMLElement)) return undefined;
+    const r = link.getBoundingClientRect();
+    return { x: Math.round(r.x + Math.min(r.width / 2, 24)), y: Math.round(r.y + r.height / 2) };
+  })()`), targetId);
+  if (point) {
+    await withPageClient(home, async (client) => dispatchClick(client, point.x, point.y), targetId);
+  }
+  const deadline = Date.now() + 20_000;
+  let current = await inspectChatGptConversation(home, targetId);
+  while (Date.now() < deadline) {
+    current = await inspectChatGptConversation(home, targetId);
+    if (
+      current.url === "https://chatgpt.com/"
+      && current.composerPresent
+      && !current.composerText.trim()
+      && current.userCount === 0
+      && current.assistantCount === 0
+    ) break;
+    await sleep(250);
+  }
+  if (
+    current.url !== "https://chatgpt.com/"
+    || !current.composerPresent
+    || current.composerText.trim()
+    || current.userCount > 0
+    || current.assistantCount > 0
+  ) return { status: "not-preferred" };
+  const model = await selectBestAvailableChatGptModel({ home, targetId }).catch(() => undefined);
+  const highPreset = model?.currentLabel === "高い"
+    || model?.currentLabel === "High"
+    || model?.currentLabel.endsWith(" 高い")
+    || model?.currentLabel.endsWith(" High");
+  if (
+    model?.status !== "selected"
+    || !highPreset
+    || !model.selectedModel
+    || scoreChatGptModel(model.selectedModel) < scoreChatGptModel(CHATGPT_MINIMUM_PREFERRED_MODEL)
+  ) return { status: "not-preferred" };
+  return { status: "reset", model: model.selectedModel };
 }
 
 export async function focusChatGptComposer(
@@ -1215,10 +1684,11 @@ class CdpClient {
   ): Promise<T> {
     const id = this.nextId++;
     return await new Promise<T>((resolveSend, rejectSend) => {
+      const timeoutMs = method === "Runtime.evaluate" ? 30_000 : method === "Page.navigate" ? 12_000 : 10_000;
       const timer = setTimeout(() => {
         this.pending.delete(id);
         rejectSend(new Error(`CDP command timed out: ${method}`));
-      }, 10_000);
+      }, timeoutMs);
       this.pending.set(id, {
         resolve: resolveSend,
         reject: rejectSend,

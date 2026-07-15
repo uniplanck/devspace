@@ -2,6 +2,7 @@ import { mkdirSync, rmSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import {
+  acquirePreferredChatGptTaskTarget,
   activateBrowserTarget,
   closeBrowserTarget,
   focusChatGptComposer,
@@ -9,11 +10,20 @@ import {
   listBrowserApprovals,
   openBrowserUrlInNewTab,
   pressBrowserKey,
+  resetPreferredChatGptTaskTarget,
+  selectBestAvailableChatGptModel,
   startBrowserSession,
   typeBrowserText,
   waitForChatGptResponse,
   type BrowserApprovalRecord,
+  type ChatGptModelSelectionResult,
 } from "./browser-computer.js";
+import {
+  CHATGPT_MINIMUM_PREFERRED_MODEL,
+  CHATGPT_MINIMUM_PREFERRED_URL,
+  prepareChatGptNavigationUrl,
+  prepareChatGptTaskUrl,
+} from "./chatgpt-model.js";
 
 export interface ChatGptTaskInput {
   prompt: string;
@@ -33,6 +43,12 @@ export interface ChatGptTaskState {
   baselineAssistantCount?: number;
   pendingApprovalId?: string;
   responseText?: string;
+  requestedModel?: string;
+  selectedModel?: string;
+  selectedModelLabel?: string;
+  modelSelectionStatus?: "selected" | "url-only";
+  reusedPreferredTarget?: boolean;
+  tabReset?: boolean;
   tabClosed?: boolean;
 }
 
@@ -45,7 +61,7 @@ export interface ChatGptTaskRuntime {
   shouldStop?: () => boolean;
 }
 
-const DEFAULT_URL = "https://chatgpt.com/";
+const DEFAULT_URL = CHATGPT_MINIMUM_PREFERRED_URL;
 
 export async function runChatGptTask(
   rawInput: ChatGptTaskInput,
@@ -74,10 +90,25 @@ export async function runChatGptTask(
     state.phase = "opening";
     runtime.onPhase?.(state.phase, cloneState(state));
     const interaction = await withBrowserInputLock(async () => {
-      const opened = await openBrowserUrlInNewTab(input.url ?? DEFAULT_URL);
+      const requestedUrl = input.url ?? DEFAULT_URL;
+      const opened = await acquirePreferredChatGptTaskTarget(prepareChatGptNavigationUrl(requestedUrl));
       state.targetId = opened.targetId;
       state.conversationUrl = opened.url;
+      state.reusedPreferredTarget = opened.reusedPreferredTarget;
+      state.requestedModel = new URL(requestedUrl).searchParams.get("model")
+        ?? CHATGPT_MINIMUM_PREFERRED_MODEL;
       await activateBrowserTarget(state.targetId);
+      await waitForComposer(state.targetId, runtime.shouldStop);
+      const modelSelection: ChatGptModelSelectionResult = await selectBestAvailableChatGptModel({ targetId: state.targetId })
+        .catch((): ChatGptModelSelectionResult => ({
+          status: "url-only" as const,
+          targetId: state.targetId!,
+          currentLabel: "",
+          candidateCount: 0,
+        }));
+      state.modelSelectionStatus = modelSelection.status;
+      state.selectedModel = modelSelection.selectedModel ?? state.requestedModel;
+      state.selectedModelLabel = modelSelection.selectedLabel || modelSelection.currentLabel || state.selectedModel;
       const before = await waitForComposer(state.targetId, runtime.shouldStop);
       await focusChatGptComposer({ requireEmpty: true, targetId: state.targetId });
       await typeBrowserText(input.prompt, undefined, state.targetId);
@@ -116,8 +147,20 @@ export async function runChatGptTask(
   state.pendingApprovalId = undefined;
 
   if (input.closeWhenDone ?? true) {
-    await closeBrowserTarget(completed.targetId);
-    state.tabClosed = true;
+    if (state.reusedPreferredTarget) {
+      const reset = await resetPreferredChatGptTaskTarget(completed.targetId).catch(() => ({
+        status: "not-preferred" as const,
+      }));
+      if (reset.status === "reset") {
+        state.tabReset = true;
+      } else {
+        await closeBrowserTarget(completed.targetId);
+        state.tabClosed = true;
+      }
+    } else {
+      await closeBrowserTarget(completed.targetId);
+      state.tabClosed = true;
+    }
   }
   runtime.onPhase?.(state.phase, cloneState(state));
   return {
@@ -171,7 +214,7 @@ function validateInput(input: ChatGptTaskInput): ChatGptTaskInput {
   }
   return {
     prompt,
-    ...(input.url?.trim() ? { url: input.url.trim() } : {}),
+    url: prepareChatGptTaskUrl(input.url),
     ...(expectedMarker ? { expectedMarker } : {}),
     timeoutMs,
     closeWhenDone: input.closeWhenDone ?? true,
@@ -191,6 +234,12 @@ function normalizeState(value?: Partial<ChatGptTaskState>): ChatGptTaskState {
       : {}),
     ...(value?.pendingApprovalId ? { pendingApprovalId: value.pendingApprovalId } : {}),
     ...(value?.responseText ? { responseText: value.responseText } : {}),
+    ...(value?.requestedModel ? { requestedModel: value.requestedModel } : {}),
+    ...(value?.selectedModel ? { selectedModel: value.selectedModel } : {}),
+    ...(value?.selectedModelLabel ? { selectedModelLabel: value.selectedModelLabel } : {}),
+    ...(value?.modelSelectionStatus ? { modelSelectionStatus: value.modelSelectionStatus } : {}),
+    ...(value?.reusedPreferredTarget ? { reusedPreferredTarget: true } : {}),
+    ...(value?.tabReset ? { tabReset: true } : {}),
     ...(value?.tabClosed ? { tabClosed: true } : {}),
   };
 }

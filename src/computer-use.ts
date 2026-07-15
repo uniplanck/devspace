@@ -11,6 +11,7 @@ export interface ComputerUsePolicy {
     profileDirectory: string;
     downloadDirectory: string;
     allowDownloads: boolean;
+    backgroundMode: "headless" | "background-window" | "window";
   };
   desktop: {
     enabled: boolean;
@@ -43,6 +44,7 @@ export interface ComputerUseDoctorResult {
     allowedDomainCount: number;
     profileDirectory: string;
     downloadDirectory: string;
+    backgroundMode: "headless" | "background-window" | "window";
     ready: boolean;
   };
   desktop: {
@@ -77,6 +79,38 @@ export const browserCandidates = [
   },
 ] as const;
 
+export function chromeForTestingExecutable(
+  home: string = homedir(),
+  platform: NodeJS.Platform = process.platform,
+): string | undefined {
+  const override = process.env.DEVSPACE_CHROME_FOR_TESTING_EXECUTABLE?.trim();
+  if (override) return resolve(expandHome(override, home));
+  const root = join(home, ".devspace", "browsers", "chrome-for-testing", "current");
+  if (platform === "darwin") {
+    return join(root, "Google Chrome for Testing.app", "Contents", "MacOS", "Google Chrome for Testing");
+  }
+  if (platform === "linux") return join(root, "chrome");
+  return undefined;
+}
+
+export function findAutomationBrowser(
+  fileExists: (path: string) => boolean = existsSync,
+  home: string = homedir(),
+  platform: NodeJS.Platform = process.platform,
+): { name: string; path: string } | undefined {
+  const managedExecutables = [...new Set([home, homedir()])]
+    .map((candidateHome) => chromeForTestingExecutable(candidateHome, platform))
+    .filter((path): path is string => Boolean(path));
+  const candidates = [
+    ...managedExecutables.map((path) => ({ name: "Chrome for Testing", path })),
+    ...(platform === "darwin" ? [{
+      name: "Chrome for Testing",
+      path: "/Applications/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+    }] : []),
+  ];
+  return candidates.find((candidate) => fileExists(candidate.path));
+}
+
 export function computerUsePolicyPath(
   env: NodeJS.ProcessEnv = process.env,
   home: string = homedir(),
@@ -91,9 +125,10 @@ export function defaultComputerUsePolicy(home: string = homedir()): ComputerUseP
     browser: {
       enabled: false,
       allowedDomains: [],
-      profileDirectory: join(home, ".devspace", "computer-browser-profile"),
+      profileDirectory: join(home, ".devspace", "chrome-for-testing-profile"),
       downloadDirectory: join(home, "Downloads", "GPT-Agent"),
       allowDownloads: false,
+      backgroundMode: "background-window",
     },
     desktop: {
       enabled: false,
@@ -142,8 +177,10 @@ export function enableChatGptBrowserPolicy(
       ...loaded.policy.browser,
       enabled: true,
       allowedDomains: ["chatgpt.com"],
+      profileDirectory: join(home, ".devspace", "chrome-for-testing-profile"),
       downloadDirectory: join(home, "Downloads", "GPT-Agent"),
       allowDownloads: true,
+      backgroundMode: "background-window",
     },
     desktop: {
       ...loaded.policy.desktop,
@@ -200,7 +237,7 @@ export function diagnoseComputerUse(input: {
   const packageAvailable = input.packageAvailable ?? isPackageAvailable;
   const loaded = loadComputerUsePolicy(path, home);
   const policy = loaded.policy;
-  const browser = browserCandidates.find((candidate) => fileExists(candidate.path));
+  const browser = findAutomationBrowser(fileExists, home, platform);
   const playwrightAvailable = packageAvailable("playwright") || packageAvailable("playwright-core");
   const nativeCdpAvailable = typeof WebSocket === "function" && typeof fetch === "function";
   const screenCaptureTool = fileExists("/usr/sbin/screencapture") || fileExists("/usr/bin/screencapture");
@@ -211,7 +248,9 @@ export function diagnoseComputerUse(input: {
   if (!loaded.exists) missingRequirements.push("Initialize the Computer Use policy file.");
   if (!loaded.valid) missingRequirements.push("Repair the invalid Computer Use policy file.");
   if (!policy.enabled) diagnostics.push("Computer Use is disabled by policy.");
-  if (!browser) missingRequirements.push("Install Brave, Chrome, or Chromium.");
+  if (!browser) {
+    missingRequirements.push("Install Chrome for Testing with npm run browser:install:chrome-for-testing.");
+  }
   if (!nativeCdpAvailable) missingRequirements.push("Node.js WebSocket/fetch support is required for the native CDP adapter.");
   if (policy.browser.enabled && policy.browser.allowedDomains.length === 0) {
     missingRequirements.push("Add at least one allowed browser domain.");
@@ -260,6 +299,7 @@ export function diagnoseComputerUse(input: {
       allowedDomainCount: policy.browser.allowedDomains.length,
       profileDirectory: resolve(expandHome(policy.browser.profileDirectory, home)),
       downloadDirectory: resolve(expandHome(policy.browser.downloadDirectory, home)),
+      backgroundMode: policy.browser.backgroundMode,
       ready: browserReady,
     },
     desktop: {
@@ -319,6 +359,7 @@ function validatePolicy(value: unknown, home: string): ComputerUsePolicy {
       profileDirectory,
       downloadDirectory,
       allowDownloads: readBoolean(value.browser.allowDownloads, "browser.allowDownloads"),
+      backgroundMode: readBackgroundMode(value.browser.backgroundMode),
     },
     desktop: {
       enabled: readBoolean(value.desktop.enabled, "desktop.enabled"),
@@ -394,6 +435,12 @@ function readStringArray(value: unknown, label: string, max: number): string[] {
 function readBoolean(value: unknown, label: string): boolean {
   if (typeof value !== "boolean") throw new Error(`${label} must be a boolean.`);
   return value;
+}
+
+function readBackgroundMode(value: unknown): "headless" | "background-window" | "window" {
+  if (value === undefined) return "background-window";
+  if (value === "headless" || value === "background-window" || value === "window") return value;
+  throw new Error("browser.backgroundMode must be headless, background-window, or window.");
 }
 
 function readString(value: unknown, label: string): string {
