@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { expandHomePath } from "./roots.js";
@@ -33,6 +34,17 @@ export interface ServerConfig {
   // PRIVATE_GEX_START
   gexLearningDir: string;
   // PRIVATE_GEX_END
+  naobrainTodayDir: string;
+  naobrainTodayPromptFile: string;
+  naobrainQuizDir: string;
+  naobrainQuizPromptFile: string;
+  naobrainQuizSourceRoots: string[];
+  naobrainQuizDriveBasePath: string;
+  naobrainBridgeToken: string | null;
+  naobrainGeminiApiKey: string | null;
+  naobrainGeminiModel: string;
+  naobrainDriveRemote: string | null;
+  naobrainDriveBasePath: string;
   worktreeRoot: string;
   skillsEnabled: boolean;
   skillPaths: string[];
@@ -214,6 +226,35 @@ function parseRequiredSecret(value: string | undefined, name: string): string {
   return secret;
 }
 
+function parseOptionalSecret(value: string | undefined, name: string): string | null {
+  const secret = value?.trim();
+  if (!secret) return null;
+  if (secret.length < 32) {
+    throw new Error(`${name} must be at least 32 characters long.`);
+  }
+  return secret;
+}
+
+function loadOptionalSecret(
+  env: NodeJS.ProcessEnv,
+  valueName: string,
+  fileName: string,
+): string | null {
+  const direct = parseOptionalSecret(env[valueName], valueName);
+  if (direct) return direct;
+
+  const filePath = env[fileName]?.trim();
+  if (!filePath) return null;
+  let value: string;
+  try {
+    value = readFileSync(resolve(expandHomePath(filePath)), "utf8");
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new Error(`Unable to read ${fileName}: ${reason}`);
+  }
+  return parseOptionalSecret(value, fileName);
+}
+
 function parseOAuthConfig(env: NodeJS.ProcessEnv, ownerToken: string | undefined): OAuthConfig {
   return {
     ownerToken: parseRequiredSecret(env.DEVSPACE_OAUTH_OWNER_TOKEN ?? ownerToken, "DEVSPACE_OAUTH_OWNER_TOKEN"),
@@ -264,6 +305,20 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
       ?? join(stateDir, "gex-learning"),
   ));
   // PRIVATE_GEX_END
+  const naobrainTodayDir = resolve(expandHomePath(
+    env.DEVSPACE_NAOBRAIN_TODAY_DIR ?? join(stateDir, "naobrain-today"),
+  ));
+  const naobrainTodayPromptFile = resolve(expandHomePath(
+    env.DEVSPACE_NAOBRAIN_TODAY_PROMPT_FILE ?? join(naobrainTodayDir, "config", "prompt.md"),
+  ));
+  const naobrainQuizDir = resolve(expandHomePath(
+    env.DEVSPACE_NAOBRAIN_QUIZ_DIR ?? join(stateDir, "naobrain-quiz"),
+  ));
+  const naobrainQuizPromptFile = resolve(expandHomePath(
+    env.DEVSPACE_NAOBRAIN_QUIZ_PROMPT_FILE ?? join(naobrainQuizDir, "config", "prompt.md"),
+  ));
+  const defaultBrainRoot = join(homedir(), "GPT-Agent", "workspaces", "world-home-fusion", "admin", "brain");
+  const naobrainQuizSourceRoots = parsePathList(env.DEVSPACE_NAOBRAIN_QUIZ_SOURCE_ROOTS);
   const derivedAllowedHosts = [
     "localhost",
     "127.0.0.1",
@@ -302,6 +357,28 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     // PRIVATE_GEX_START
     gexLearningDir,
     // PRIVATE_GEX_END
+    naobrainTodayDir,
+    naobrainTodayPromptFile,
+    naobrainQuizDir,
+    naobrainQuizPromptFile,
+    naobrainQuizSourceRoots: (naobrainQuizSourceRoots.length > 0
+      ? naobrainQuizSourceRoots
+      : [join(defaultBrainRoot, "知"), join(defaultBrainRoot, "人生"), naobrainTodayDir])
+      .map((root) => resolve(expandHomePath(root))),
+    naobrainQuizDriveBasePath: env.DEVSPACE_NAOBRAIN_QUIZ_DRIVE_BASE_PATH?.trim() || "NaoBrain/Quiz",
+    naobrainBridgeToken: loadOptionalSecret(
+      env,
+      "DEVSPACE_NAOBRAIN_BRIDGE_TOKEN",
+      "DEVSPACE_NAOBRAIN_BRIDGE_TOKEN_FILE",
+    ),
+    naobrainGeminiApiKey: loadOptionalSecret(
+      env,
+      "DEVSPACE_NAOBRAIN_GEMINI_API_KEY",
+      "DEVSPACE_NAOBRAIN_GEMINI_API_KEY_FILE",
+    ),
+    naobrainGeminiModel: env.DEVSPACE_NAOBRAIN_GEMINI_MODEL?.trim() || "gemini-3.1-flash-lite",
+    naobrainDriveRemote: env.DEVSPACE_NAOBRAIN_DRIVE_REMOTE?.trim() || null,
+    naobrainDriveBasePath: env.DEVSPACE_NAOBRAIN_DRIVE_BASE_PATH?.trim() || "NaoBrain/Today",
     worktreeRoot: resolve(expandHomePath(env.DEVSPACE_WORKTREE_ROOT ?? files.config.worktreeRoot ?? defaultWorktreeRoot())),
     skillsEnabled: env.DEVSPACE_SKILLS === undefined ? true : parseBoolean(env.DEVSPACE_SKILLS),
     skillPaths: parsePathList(env.DEVSPACE_SKILL_PATHS),
