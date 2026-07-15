@@ -905,9 +905,13 @@ function createMcpServer(
       },
     },
     async ({ reason, force }) => {
-      const result = await quizStore.generate(reason || "GAE requested question refresh", force === true);
+      const result = await quizStore.queueGeneration(reason || "GAE requested question refresh", force === true);
       return {
-        content: [textBlock(result.generated ? `NaoBrain Quizへ${result.added || 0}問追加しました。` : `問題生成は実行されませんでした: ${result.error || result.reason}`)],
+        content: [textBlock(result.queued
+          ? "NaoBrain Quizの問題生成をバックグラウンドで開始しました。"
+          : result.generated
+            ? `NaoBrain Quizへ${result.added || 0}問追加しました。`
+            : `問題生成は実行されませんでした: ${result.error || result.reason}`)],
         structuredContent: { ...result },
       };
     },
@@ -2624,7 +2628,7 @@ export function createServer(config = loadConfig()): RunningServer {
         return;
       }
       try {
-        res.json({ ok: true, ...(await quizStore.generate(String(req.body?.reason || "web requested question refresh"), req.body?.force === true)) });
+        res.json({ ok: true, ...(await quizStore.queueGeneration(String(req.body?.reason || "web requested question refresh"), req.body?.force === true)) });
       } catch (error) {
         res.status(400).json({ ok: false, error: error instanceof Error ? error.message : "request failed" });
       }
