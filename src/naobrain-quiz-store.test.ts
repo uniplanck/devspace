@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { NaoBrainQuizStore } from "./naobrain-quiz-store.js";
+import { NaoBrainQuizStore, parseGeneratedQuestions } from "./naobrain-quiz-store.js";
 
 const root = await mkdtemp(join(tmpdir(), "naobrain-quiz-test-"));
 
@@ -14,6 +14,10 @@ try {
     driveBasePath: "NaoBrain/Quiz",
     sourceRoots: [],
   });
+
+  const generated = parseGeneratedQuestions('{"questions":[{"question":"追加JSONに強い？","choices":["はい","いいえ","不明","無関係"],"answer":0,"explanation":"最初の完全なJSON文書だけを安全に抽出する。","labels":["JSON"],"sourceType":"application","sourceRefs":["parser"],"difficulty":2}]}\n{"ignored":true}', "test-generation");
+  assert.equal(generated.length, 1);
+  assert.equal(generated[0]?.answer, 0);
 
   const initial = await store.getState();
   assert.equal(initial.bank.active, 8);

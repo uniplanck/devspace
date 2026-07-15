@@ -785,9 +785,8 @@ function questionView(question: QuizQuestion): QuizQuestionView {
   };
 }
 
-function parseGeneratedQuestions(raw: string, generationId: string): QuizQuestion[] {
-  const clean = raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
-  const parsed = JSON.parse(clean) as { questions?: unknown[] } | unknown[];
+export function parseGeneratedQuestions(raw: string, generationId: string): QuizQuestion[] {
+  const parsed = parseJsonDocument(raw) as { questions?: unknown[] } | unknown[];
   const list = Array.isArray(parsed) ? parsed : parsed.questions;
   if (!Array.isArray(list)) throw new Error("Gemini response does not contain a questions array.");
   const now = new Date().toISOString();
@@ -822,6 +821,42 @@ function parseGeneratedQuestions(raw: string, generationId: string): QuizQuestio
       generationId,
     } satisfies QuizQuestion;
   });
+}
+
+function parseJsonDocument(raw: string): unknown {
+  const clean = raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
+  try {
+    return JSON.parse(clean);
+  } catch (originalError) {
+    const objectStart = clean.indexOf("{");
+    const arrayStart = clean.indexOf("[");
+    const candidates = [objectStart, arrayStart].filter((value) => value >= 0);
+    const start = candidates.length ? Math.min(...candidates) : -1;
+    if (start < 0) throw originalError;
+
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    for (let index = start; index < clean.length; index += 1) {
+      const character = clean[index];
+      if (inString) {
+        if (escaped) escaped = false;
+        else if (character === "\\") escaped = true;
+        else if (character === '"') inString = false;
+        continue;
+      }
+      if (character === '"') {
+        inString = true;
+        continue;
+      }
+      if (character === "{" || character === "[") depth += 1;
+      else if (character === "}" || character === "]") {
+        depth -= 1;
+        if (depth === 0) return JSON.parse(clean.slice(start, index + 1));
+      }
+    }
+    throw originalError;
+  }
 }
 
 async function collectSourceFiles(
