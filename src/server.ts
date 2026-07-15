@@ -66,7 +66,9 @@ import { GexLearningStore, type GexLearningSyncPayload } from "./gex-learning-st
 // PRIVATE_GEX_END
 import {
   NaoBrainTodayStore,
+  type TodayAnalysisInput,
   type TodayEntryInput,
+  type TodayEntryUpdateInput,
 } from "./naobrain-today-store.js";
 import {
   NaoBrainQuizStore,
@@ -811,8 +813,13 @@ function createMcpServer(
         status: z.enum(["done", "doing", "blocked", "planned", "note"]).optional(),
         kind: z.enum(["progress", "result", "plan", "journal", "note"]).optional(),
         project: z.string().max(120).optional(),
-        tags: z.array(z.string().max(40)).max(10).optional(),
+        projectId: z.string().max(80).optional(),
+        tags: z.array(z.string().max(40)).max(20).optional(),
         occurredAt: z.string().optional(),
+        startAt: z.string().optional(),
+        endAt: z.string().optional(),
+        startApproximate: z.boolean().optional(),
+        endApproximate: z.boolean().optional(),
         runAi: z.boolean().optional(),
       },
       annotations: {
@@ -827,6 +834,97 @@ function createMcpServer(
       return {
         content: [textBlock(`NaoBrain Todayへ記録しました: ${result.entry.title}`)],
         structuredContent: { ...result },
+      };
+    },
+  );
+
+  server.registerTool(
+    "naobrain_today_update",
+    {
+      title: "Update NaoBrain Today entry",
+      description: "Create a new revision of an existing Today entry while preserving every previous version. Use when the user corrects a journal, project, status, date, time range, tags, or result.",
+      inputSchema: {
+        id: z.string().min(1).max(80),
+        title: z.string().min(1).max(140).optional(),
+        body: z.string().min(1).max(8_000).optional(),
+        status: z.enum(["done", "doing", "blocked", "planned", "note"]).optional(),
+        kind: z.enum(["progress", "result", "plan", "journal", "note"]).optional(),
+        project: z.string().max(120).optional(),
+        projectId: z.string().max(80).optional(),
+        tags: z.array(z.string().max(40)).max(20).optional(),
+        occurredAt: z.string().optional(),
+        startAt: z.string().optional(),
+        endAt: z.string().optional(),
+        startApproximate: z.boolean().optional(),
+        endApproximate: z.boolean().optional(),
+        revisionNote: z.string().max(240).optional(),
+        runAi: z.boolean().optional(),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
+    },
+    async (input) => {
+      const result = await todayStore.update({ ...input, source: "gae" } as TodayEntryUpdateInput);
+      return {
+        content: [textBlock(`NaoBrain Todayをv${result.entry.version}へ修正し、旧版を履歴へ保存しました: ${result.entry.title}`)],
+        structuredContent: { ...result },
+      };
+    },
+  );
+
+  server.registerTool(
+    "naobrain_today_history",
+    {
+      title: "Read NaoBrain Today version history",
+      description: "Read every preserved version of a Today entry before correcting it or when the user asks what changed.",
+      inputSchema: { id: z.string().min(1).max(80) },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async ({ id }) => {
+      const history = await todayStore.history(id);
+      return {
+        content: [textBlock(history.length
+          ? history.map((entry) => `v${entry.version} · ${entry.updatedAt} · ${entry.title}${entry.revisionNote ? `\n修正メモ: ${entry.revisionNote}` : ""}`).join("\n\n")
+          : "指定されたToday記録の履歴はありません。")],
+        structuredContent: { id, history },
+      };
+    },
+  );
+
+  server.registerTool(
+    "naobrain_today_projects",
+    {
+      title: "Manage NaoBrain Today projects",
+      description: "List, create, rename, or remove Today Project dropdown items. Removing a Project never deletes historical journal entries.",
+      inputSchema: {
+        action: z.enum(["list", "create", "update", "delete"]).optional(),
+        id: z.string().max(80).optional(),
+        name: z.string().max(120).optional(),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
+    },
+    async ({ action = "list", id, name }) => {
+      if (action === "create") await todayStore.createProject(name || "");
+      if (action === "update") await todayStore.updateProject(id || "", name || "");
+      if (action === "delete") await todayStore.deleteProject(id || "");
+      const projects = await todayStore.listProjects();
+      return {
+        content: [textBlock(projects.length ? projects.map((project) => `- ${project.name} (${project.id})`).join("\n") : "Projectはまだありません。")],
+        structuredContent: { action, projects },
       };
     },
   );
@@ -847,6 +945,42 @@ function createMcpServer(
     async ({ date }) => {
       const digest = await todayStore.digest(date);
       return { content: [textBlock(digest)], structuredContent: { digest, date: date || null } };
+    },
+  );
+
+  server.registerTool(
+    "naobrain_today_analyze",
+    {
+      title: "Analyze NaoBrain Today records",
+      description: "Analyze accumulated Today records by day, project, tag, kind, status, or a date range using Gemini. Use for progress reviews, pattern analysis, wall-bouncing, and deciding next actions.",
+      inputSchema: {
+        scope: z.enum(["all", "day", "project", "tag", "kind", "status"]).optional(),
+        value: z.string().max(140).optional(),
+        dateFrom: z.string().optional(),
+        dateTo: z.string().optional(),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
+    },
+    async (input) => {
+      const analysis = await todayStore.analyzeScope(input as TodayAnalysisInput);
+      return {
+        content: [textBlock([
+          "# NaoBrain Today Analysis",
+          `- Scope: ${analysis.scope}${analysis.value ? ` / ${analysis.value}` : ""}`,
+          `- Period: ${analysis.dateFrom} — ${analysis.dateTo}`,
+          `- Entries: ${analysis.entryCount}`,
+          "",
+          analysis.summary,
+          "",
+          ...analysis.nextActions.map((action) => `- ${action}`),
+        ].join("\n"))],
+        structuredContent: { analysis },
+      };
     },
   );
 
@@ -2419,6 +2553,7 @@ export function createServer(config = loadConfig()): RunningServer {
     promptFile: config.naobrainTodayPromptFile,
     geminiApiKey: config.naobrainGeminiApiKey || undefined,
     geminiModel: config.naobrainGeminiModel,
+    geminiFallbackKeysFile: config.naobrainGeminiFallbackKeysFile,
     driveRemote: config.naobrainDriveRemote || undefined,
     driveBasePath: config.naobrainDriveBasePath,
   });
@@ -2427,10 +2562,22 @@ export function createServer(config = loadConfig()): RunningServer {
     promptFile: config.naobrainQuizPromptFile,
     geminiApiKey: config.naobrainGeminiApiKey || undefined,
     geminiModel: config.naobrainGeminiModel,
+    geminiFallbackKeysFile: config.naobrainGeminiFallbackKeysFile,
     driveRemote: config.naobrainDriveRemote || undefined,
     driveBasePath: config.naobrainQuizDriveBasePath,
     sourceRoots: config.naobrainQuizSourceRoots,
   });
+  const runTodayDailyAnalysis = () => {
+    todayStore.runScheduledDailyAnalyses().catch((error) => {
+      logEvent(config.logging, "warn", "naobrain_today_daily_analysis_error", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
+  };
+  const todayDailyAnalysisInitialTimer = setTimeout(runTodayDailyAnalysis, 20_000);
+  const todayDailyAnalysisTimer = setInterval(runTodayDailyAnalysis, 30 * 60 * 1000);
+  todayDailyAnalysisInitialTimer.unref?.();
+  todayDailyAnalysisTimer.unref?.();
 
   if (config.logging.trustProxy) {
     app.set("trust proxy", true);
@@ -2491,24 +2638,35 @@ export function createServer(config = loadConfig()): RunningServer {
   );
   // PRIVATE_GEX_END
 
-  app.get("/naobrain-today/health", async (req, res) => {
+  const authorizeToday = (req: Request, res: Response): boolean => {
     res.setHeader("cache-control", "no-store");
     if (!isAuthorizedNaoBrainRequest(req, config.naobrainBridgeToken)) {
       res.sendStatus(404);
-      return;
+      return false;
     }
-    res.json(todayStore.health());
+    return true;
+  };
+
+  app.get("/naobrain-today/health", async (req, res) => {
+    if (!authorizeToday(req, res)) return;
+    res.json(await todayStore.health());
   });
 
   app.get("/naobrain-today/entries", async (req, res) => {
-    res.setHeader("cache-control", "no-store");
-    if (!isAuthorizedNaoBrainRequest(req, config.naobrainBridgeToken)) {
-      res.sendStatus(404);
-      return;
-    }
+    if (!authorizeToday(req, res)) return;
     try {
       const date = typeof req.query.date === "string" ? req.query.date : undefined;
       res.json({ ok: true, snapshot: await todayStore.list(date) });
+    } catch (error) {
+      res.status(400).json({ ok: false, error: error instanceof Error ? error.message : "request failed" });
+    }
+  });
+
+  app.get("/naobrain-today/entries/history", async (req, res) => {
+    if (!authorizeToday(req, res)) return;
+    try {
+      const id = typeof req.query.id === "string" ? req.query.id : "";
+      res.json({ ok: true, history: await todayStore.history(id) });
     } catch (error) {
       res.status(400).json({ ok: false, error: error instanceof Error ? error.message : "request failed" });
     }
@@ -2518,11 +2676,7 @@ export function createServer(config = loadConfig()): RunningServer {
     "/naobrain-today/entries",
     express.json({ limit: "256kb" }),
     async (req, res) => {
-      res.setHeader("cache-control", "no-store");
-      if (!isAuthorizedNaoBrainRequest(req, config.naobrainBridgeToken)) {
-        res.sendStatus(404);
-        return;
-      }
+      if (!authorizeToday(req, res)) return;
       try {
         const result = await todayStore.append({
           ...(req.body || {}) as TodayEntryInput,
@@ -2539,14 +2693,123 @@ export function createServer(config = loadConfig()): RunningServer {
   );
 
   app.post(
+    "/naobrain-today/entries/update",
+    express.json({ limit: "256kb" }),
+    async (req, res) => {
+      if (!authorizeToday(req, res)) return;
+      try {
+        const result = await todayStore.update({
+          ...(req.body || {}) as TodayEntryUpdateInput,
+          source: (req.body?.source || "web") as TodayEntryInput["source"],
+        });
+        res.json({ ok: true, ...result });
+      } catch (error) {
+        logEvent(config.logging, "error", "naobrain_today_update_error", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+        res.status(400).json({ ok: false, error: error instanceof Error ? error.message : "request failed" });
+      }
+    },
+  );
+
+  app.get("/naobrain-today/projects", async (req, res) => {
+    if (!authorizeToday(req, res)) return;
+    try {
+      res.json({ ok: true, projects: await todayStore.listProjects(req.query.includeDeleted === "1") });
+    } catch (error) {
+      res.status(400).json({ ok: false, error: error instanceof Error ? error.message : "request failed" });
+    }
+  });
+
+  app.post(
+    "/naobrain-today/projects",
+    express.json({ limit: "32kb" }),
+    async (req, res) => {
+      if (!authorizeToday(req, res)) return;
+      try {
+        const action = String(req.body?.action || "create");
+        const project = action === "update"
+          ? await todayStore.updateProject(String(req.body?.id || ""), String(req.body?.name || ""))
+          : action === "delete"
+            ? await todayStore.deleteProject(String(req.body?.id || ""))
+            : await todayStore.createProject(String(req.body?.name || ""));
+        res.json({ ok: true, project, projects: await todayStore.listProjects() });
+      } catch (error) {
+        res.status(400).json({ ok: false, error: error instanceof Error ? error.message : "request failed" });
+      }
+    },
+  );
+
+  app.get("/naobrain-today/analyses", async (req, res) => {
+    if (!authorizeToday(req, res)) return;
+    try {
+      const limit = Number(req.query.limit || 20);
+      res.json({ ok: true, analyses: await todayStore.listAnalyses(limit) });
+    } catch (error) {
+      res.status(400).json({ ok: false, error: error instanceof Error ? error.message : "request failed" });
+    }
+  });
+
+  app.post(
+    "/naobrain-today/analyses",
+    express.json({ limit: "256kb" }),
+    async (req, res) => {
+      if (!authorizeToday(req, res)) return;
+      try {
+        const analysis = await todayStore.analyzeScope((req.body || {}) as TodayAnalysisInput);
+        res.json({ ok: true, analysis });
+      } catch (error) {
+        res.status(400).json({ ok: false, error: error instanceof Error ? error.message : "request failed" });
+      }
+    },
+  );
+
+  app.get("/naobrain-today/ai-settings", async (req, res) => {
+    if (!authorizeToday(req, res)) return;
+    try {
+      res.json({ ok: true, settings: await todayStore.aiSettings() });
+    } catch (error) {
+      res.status(400).json({ ok: false, error: error instanceof Error ? error.message : "request failed" });
+    }
+  });
+
+  app.post(
+    "/naobrain-today/ai-settings",
+    express.json({ limit: "16kb" }),
+    async (req, res) => {
+      if (!authorizeToday(req, res)) return;
+      try {
+        const settings = await todayStore.updateAiSettings({
+          fallback2: typeof req.body?.fallback2 === "string" ? req.body.fallback2 : undefined,
+          fallback3: typeof req.body?.fallback3 === "string" ? req.body.fallback3 : undefined,
+          clearFallback2: req.body?.clearFallback2 === true,
+          clearFallback3: req.body?.clearFallback3 === true,
+        });
+        res.json({ ok: true, settings });
+      } catch (error) {
+        res.status(400).json({ ok: false, error: error instanceof Error ? error.message : "request failed" });
+      }
+    },
+  );
+
+  app.post(
+    "/naobrain-today/daily-analysis",
+    express.json({ limit: "16kb" }),
+    async (req, res) => {
+      if (!authorizeToday(req, res)) return;
+      try {
+        res.json({ ok: true, results: await todayStore.runScheduledDailyAnalyses() });
+      } catch (error) {
+        res.status(400).json({ ok: false, error: error instanceof Error ? error.message : "request failed" });
+      }
+    },
+  );
+
+  app.post(
     "/naobrain-today/sync",
     express.json({ limit: "32kb" }),
     async (req, res) => {
-      res.setHeader("cache-control", "no-store");
-      if (!isAuthorizedNaoBrainRequest(req, config.naobrainBridgeToken)) {
-        res.sendStatus(404);
-        return;
-      }
+      if (!authorizeToday(req, res)) return;
       try {
         const result = await todayStore.sync(req.body?.date);
         res.json({ ok: true, ...result });
@@ -2785,6 +3048,8 @@ export function createServer(config = loadConfig()): RunningServer {
     close: () => {
       if (closed) return;
       closed = true;
+      clearTimeout(todayDailyAnalysisInitialTimer);
+      clearInterval(todayDailyAnalysisTimer);
       processSessions.shutdown();
       oauthProvider.close();
       workspaceStore.close?.();

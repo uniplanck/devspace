@@ -11,44 +11,84 @@ try {
     dataDir: root,
     promptFile: join(root, "config", "prompt.md"),
     geminiModel: "gemini-test",
+    geminiFallbackKeysFile: join(root, "secrets", "gemini-fallback-keys.json"),
     driveBasePath: "NaoBrain/Today",
   });
 
+  const project = await store.createProject("uniplanck.com");
   const first = await store.append({
     title: "LP構成を確定",
     body: "ファーストビューとCTAの構成を確定した。",
     status: "done",
     kind: "result",
-    project: "uniplanck.com",
+    projectId: project.id,
     source: "gae",
-    occurredAt: "2026-07-14T01:30:00.000Z",
+    startAt: "2026-07-14T01:30:00.000Z",
+    endAt: "2026-07-14T02:45:00.000Z",
+    startApproximate: true,
     runAi: false,
   });
 
   assert.equal(first.entry.date, "2026-07-14");
+  assert.equal(first.entry.version, 1);
+  assert.equal(first.entry.project, "uniplanck.com");
   assert.equal(first.snapshot.summary.total, 1);
   assert.equal(first.snapshot.summary.done, 1);
+  assert.equal(first.snapshot.summary.trackedMinutes, 75);
   assert.equal(first.drive.configured, false);
 
+  const updated = await store.update({
+    id: first.entry.id,
+    title: "LP構成とCTAを確定",
+    body: "ファーストビューとCTAを確定し、公開前QAへ進んだ。",
+    status: "doing",
+    revisionNote: "実行状況を更新",
+    runAi: false,
+  });
+  assert.equal(updated.entry.version, 2);
+  assert.equal(updated.entry.previousRevisionId, first.entry.revisionId);
+  assert.equal(updated.snapshot.summary.total, 1);
+  assert.equal(updated.snapshot.summary.doing, 1);
+
+  const history = await store.history(first.entry.id);
+  assert.equal(history.length, 2);
+  assert.equal(history[0].title, "LP構成を確定");
+  assert.equal(history[1].title, "LP構成とCTAを確定");
+
   await store.append({
-    title: "公開前QA",
+    title: "明日の公開前QA",
     body: "SP幅390pxで見切れを確認する。",
     status: "planned",
     kind: "plan",
     source: "web",
-    occurredAt: "2026-07-14T02:00:00.000Z",
+    occurredAt: "2026-07-15T02:00:00.000Z",
     runAi: false,
   });
 
   const snapshot = await store.list("2026-07-14");
-  assert.equal(snapshot.summary.total, 2);
-  assert.equal(snapshot.summary.planned, 1);
-  assert.deepEqual(snapshot.entries.map((entry) => entry.title), ["LP構成を確定", "公開前QA"]);
+  assert.equal(snapshot.summary.total, 1);
+  assert.deepEqual(snapshot.entries.map((entry) => entry.title), ["LP構成とCTAを確定"]);
+
+  const projects = await store.listProjects();
+  assert.equal(projects.length, 1);
+  assert.equal(projects[0].name, "uniplanck.com");
+  await store.updateProject(project.id, "uniplanck / Web");
+  assert.equal((await store.listProjects())[0].name, "uniplanck / Web");
+  await store.deleteProject(project.id);
+  assert.equal((await store.listProjects()).length, 0);
+  assert.equal((await store.listProjects(true))[0].active, false);
+
+  const settings = await store.updateAiSettings({ fallback2: "test-fallback-key-2" });
+  assert.equal(settings.fallback2Configured, true);
+  assert.equal(settings.configuredCount, 1);
+  const secretsRaw = await readFile(join(root, "secrets", "gemini-fallback-keys.json"), "utf8");
+  assert.match(secretsRaw, /test-fallback-key-2/);
 
   const digest = await store.digest("2026-07-14");
   assert.match(digest, /# Today \/ 2026-07-14/);
-  assert.match(digest, /LP構成を確定/);
-  assert.match(digest, /公開前QA/);
+  assert.match(digest, /LP構成とCTAを確定/);
+  assert.match(digest, /Version: 2/);
+  assert.match(digest, /約10:30–11:45/);
 
   const prompt = await readFile(join(root, "config", "prompt.md"), "utf8");
   assert.match(prompt, /NOW \/ NEXT \/ LATER/);

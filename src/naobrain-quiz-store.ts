@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { appendFile, mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, extname, join, relative } from "node:path";
 import { promisify } from "node:util";
+import { NaoBrainGeminiClient } from "./naobrain-gemini-client.js";
 
 const execFileAsync = promisify(execFile);
 const JST_TIME_ZONE = "Asia/Tokyo";
@@ -162,6 +163,7 @@ export interface NaoBrainQuizConfig {
   promptFile: string;
   geminiApiKey?: string;
   geminiModel: string;
+  geminiFallbackKeysFile: string;
   driveRemote?: string;
   driveBasePath: string;
   sourceRoots: string[];
@@ -175,6 +177,7 @@ interface QuizGenerationMeta {
 
 export class NaoBrainQuizStore {
   private readonly config: NaoBrainQuizConfig;
+  private readonly gemini: NaoBrainGeminiClient;
   private queue: Promise<unknown> = Promise.resolve();
   private generationTask: Promise<QuizGenerationResult> | null = null;
   private driveSyncTask: Promise<QuizDriveSyncResult> | null = null;
@@ -182,6 +185,11 @@ export class NaoBrainQuizStore {
 
   constructor(config: NaoBrainQuizConfig) {
     this.config = config;
+    this.gemini = new NaoBrainGeminiClient({
+      primaryApiKey: config.geminiApiKey,
+      model: config.geminiModel,
+      fallbackKeysFile: config.geminiFallbackKeysFile,
+    });
   }
 
   health() {
@@ -487,33 +495,14 @@ export class NaoBrainQuizStore {
   }
 
   private async callGemini(prompt: string): Promise<string> {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(this.config.geminiModel)}:generateContent`;
-    const response = await fetch(url, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-goog-api-key": this.config.geminiApiKey || "",
-      },
-      body: JSON.stringify({
-        contents: [{ role: "user", parts: [{ text: prompt }] }],
-        generationConfig: {
-          responseMimeType: "application/json",
-          temperature: 0.45,
-          maxOutputTokens: 6_000,
-        },
-      }),
-      signal: AbortSignal.timeout(45_000),
+    const result = await this.gemini.generateJson({
+      systemInstruction: DEFAULT_PROMPT,
+      userPayload: { prompt },
+      temperature: 0.45,
+      maxOutputTokens: 6_000,
+      timeoutMs: 45_000,
     });
-    if (!response.ok) {
-      const body = await response.text();
-      throw new Error(`Gemini request failed (${response.status}): ${body.slice(0, 220)}`);
-    }
-    const json = await response.json() as {
-      candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
-    };
-    const text = json.candidates?.[0]?.content?.parts?.map((part) => part.text || "").join("").trim();
-    if (!text) throw new Error("Gemini returned an empty response.");
-    return text;
+    return JSON.stringify(result.value);
   }
 
   private async collectSourceDigest(): Promise<string> {

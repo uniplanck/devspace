@@ -36,6 +36,7 @@ export interface ServerConfig {
   // PRIVATE_GEX_END
   naobrainTodayDir: string;
   naobrainTodayPromptFile: string;
+  naobrainGeminiFallbackKeysFile: string;
   naobrainQuizDir: string;
   naobrainQuizPromptFile: string;
   naobrainQuizSourceRoots: string[];
@@ -311,6 +312,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
   const naobrainTodayPromptFile = resolve(expandHomePath(
     env.DEVSPACE_NAOBRAIN_TODAY_PROMPT_FILE ?? join(naobrainTodayDir, "config", "prompt.md"),
   ));
+  const naobrainGeminiFallbackKeysFile = resolve(expandHomePath(
+    env.DEVSPACE_NAOBRAIN_GEMINI_FALLBACK_KEYS_FILE ?? join(stateDir, "naobrain-secrets", "gemini-fallback-keys.json"),
+  ));
   const naobrainQuizDir = resolve(expandHomePath(
     env.DEVSPACE_NAOBRAIN_QUIZ_DIR ?? join(stateDir, "naobrain-quiz"),
   ));
@@ -359,6 +363,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     // PRIVATE_GEX_END
     naobrainTodayDir,
     naobrainTodayPromptFile,
+    naobrainGeminiFallbackKeysFile,
     naobrainQuizDir,
     naobrainQuizPromptFile,
     naobrainQuizSourceRoots: (naobrainQuizSourceRoots.length > 0
