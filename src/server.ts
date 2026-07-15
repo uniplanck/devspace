@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { access, realpath } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
@@ -64,6 +64,15 @@ import { registerV11Tools } from "./register-v11-tools.js";
 // PRIVATE_GEX_START
 import { GexLearningStore, type GexLearningSyncPayload } from "./gex-learning-store.js";
 // PRIVATE_GEX_END
+import {
+  NaoBrainTodayStore,
+  type TodayEntryInput,
+} from "./naobrain-today-store.js";
+import {
+  NaoBrainQuizStore,
+  type QuizAnswerInput,
+  type QuizSessionMode,
+} from "./naobrain-quiz-store.js";
 
 type Transport = StreamableHTTPServerTransport;
 // PRIVATE_GEX_START
@@ -775,6 +784,8 @@ function createMcpServer(
   reviewCheckpoints: ReturnType<typeof createReviewCheckpointManager>,
   processSessions: ProcessSessionManager,
   localAgentProviders: LocalAgentProviderAvailability[],
+  todayStore: NaoBrainTodayStore,
+  quizStore: NaoBrainQuizStore,
 ): McpServer {
   const server = new McpServer(
     {
@@ -786,6 +797,141 @@ function createMcpServer(
     },
     {
       instructions: serverInstructions(config),
+    },
+  );
+
+  server.registerTool(
+    "naobrain_today_append",
+    {
+      title: "Append NaoBrain Today entry",
+      description: "Record a journal, today movement, progress, result, blockage, or plan in NaoBrain Today. Use when the user reports what they did today or asks to save the current movement.",
+      inputSchema: {
+        title: z.string().min(1).max(140),
+        body: z.string().min(1).max(8_000),
+        status: z.enum(["done", "doing", "blocked", "planned", "note"]).optional(),
+        kind: z.enum(["progress", "result", "plan", "journal", "note"]).optional(),
+        project: z.string().max(120).optional(),
+        tags: z.array(z.string().max(40)).max(10).optional(),
+        occurredAt: z.string().optional(),
+        runAi: z.boolean().optional(),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
+    },
+    async (input) => {
+      const result = await todayStore.append({ ...input, source: "gae" } as TodayEntryInput);
+      return {
+        content: [textBlock(`NaoBrain Todayへ記録しました: ${result.entry.title}`)],
+        structuredContent: { ...result },
+      };
+    },
+  );
+
+  server.registerTool(
+    "naobrain_today_digest",
+    {
+      title: "Read NaoBrain Today digest",
+      description: "Read a NaoBrain Today daily digest. Use when the user asks to sync progress, review today, wall-bounce, or decide tomorrow's actions.",
+      inputSchema: { date: z.string().optional() },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async ({ date }) => {
+      const digest = await todayStore.digest(date);
+      return { content: [textBlock(digest)], structuredContent: { digest, date: date || null } };
+    },
+  );
+
+  server.registerTool(
+    "naobrain_today_sync",
+    {
+      title: "Sync NaoBrain Today",
+      description: "Rebuild and sync a NaoBrain Today day to Google Drive.",
+      inputSchema: { date: z.string().optional() },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    async ({ date }) => {
+      const result = await todayStore.sync(date);
+      return {
+        content: [textBlock(result.synced ? "NaoBrain Todayを同期しました。" : `同期結果: ${result.error || "未設定"}`)],
+        structuredContent: { ...result },
+      };
+    },
+  );
+
+  server.registerTool(
+    "naobrain_quiz_digest",
+    {
+      title: "Read NaoBrain Quiz digest",
+      description: "Read quiz progress, wrong answers, due reviews, and the recommended memory-retention action.",
+      inputSchema: {},
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async () => {
+      const digest = await quizStore.digest();
+      return { content: [textBlock(digest)], structuredContent: { digest } };
+    },
+  );
+
+  server.registerTool(
+    "naobrain_quiz_generate",
+    {
+      title: "Generate NaoBrain Quiz questions",
+      description: "Generate new questions from NaoBrain knowledge, journals, Today logs, and weak-answer history using Gemini.",
+      inputSchema: { reason: z.string().max(240).optional(), force: z.boolean().optional() },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
+    },
+    async ({ reason, force }) => {
+      const result = await quizStore.generate(reason || "GAE requested question refresh", force === true);
+      return {
+        content: [textBlock(result.generated ? `NaoBrain Quizへ${result.added || 0}問追加しました。` : `問題生成は実行されませんでした: ${result.error || result.reason}`)],
+        structuredContent: { ...result },
+      };
+    },
+  );
+
+  server.registerTool(
+    "naobrain_quiz_sync",
+    {
+      title: "Sync NaoBrain Quiz to Drive",
+      description: "Synchronize the question bank, answer history, session state, and spaced-repetition statistics to Google Drive.",
+      inputSchema: {},
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    async () => {
+      const result = await quizStore.sync();
+      return {
+        content: [textBlock(result.synced ? `NaoBrain QuizをGoogle Driveへ同期しました。${result.destination || ""}` : result.configured ? `Google Drive同期に失敗しました: ${result.error || "unknown error"}` : "Google Drive同期先が未設定です。")],
+        structuredContent: { ...result },
+      };
     },
   );
 
@@ -2229,6 +2375,14 @@ function denyGexLearningRequest(res: Response): void {
 }
 // PRIVATE_GEX_END
 
+function isAuthorizedNaoBrainRequest(req: Request, configuredSecret: string | null): boolean {
+  if (!configuredSecret) return false;
+  const suppliedSecret = req.header("x-naobrain-bridge-token") ?? "";
+  const expected = Buffer.from(configuredSecret);
+  const supplied = Buffer.from(suppliedSecret);
+  return expected.length === supplied.length && timingSafeEqual(expected, supplied);
+}
+
 export function createServer(config = loadConfig()): RunningServer {
   const allowedHosts = config.allowedHosts.includes("*")
     ? undefined
@@ -2256,6 +2410,23 @@ export function createServer(config = loadConfig()): RunningServer {
   // PRIVATE_GEX_START
   const gexLearningStore = new GexLearningStore(config.gexLearningDir);
   // PRIVATE_GEX_END
+  const todayStore = new NaoBrainTodayStore({
+    dataDir: config.naobrainTodayDir,
+    promptFile: config.naobrainTodayPromptFile,
+    geminiApiKey: config.naobrainGeminiApiKey || undefined,
+    geminiModel: config.naobrainGeminiModel,
+    driveRemote: config.naobrainDriveRemote || undefined,
+    driveBasePath: config.naobrainDriveBasePath,
+  });
+  const quizStore = new NaoBrainQuizStore({
+    dataDir: config.naobrainQuizDir,
+    promptFile: config.naobrainQuizPromptFile,
+    geminiApiKey: config.naobrainGeminiApiKey || undefined,
+    geminiModel: config.naobrainGeminiModel,
+    driveRemote: config.naobrainDriveRemote || undefined,
+    driveBasePath: config.naobrainQuizDriveBasePath,
+    sourceRoots: config.naobrainQuizSourceRoots,
+  });
 
   if (config.logging.trustProxy) {
     app.set("trust proxy", true);
@@ -2315,6 +2486,167 @@ export function createServer(config = loadConfig()): RunningServer {
     },
   );
   // PRIVATE_GEX_END
+
+  app.get("/naobrain-today/health", async (req, res) => {
+    res.setHeader("cache-control", "no-store");
+    if (!isAuthorizedNaoBrainRequest(req, config.naobrainBridgeToken)) {
+      res.sendStatus(404);
+      return;
+    }
+    res.json(todayStore.health());
+  });
+
+  app.get("/naobrain-today/entries", async (req, res) => {
+    res.setHeader("cache-control", "no-store");
+    if (!isAuthorizedNaoBrainRequest(req, config.naobrainBridgeToken)) {
+      res.sendStatus(404);
+      return;
+    }
+    try {
+      const date = typeof req.query.date === "string" ? req.query.date : undefined;
+      res.json({ ok: true, snapshot: await todayStore.list(date) });
+    } catch (error) {
+      res.status(400).json({ ok: false, error: error instanceof Error ? error.message : "request failed" });
+    }
+  });
+
+  app.post(
+    "/naobrain-today/entries",
+    express.json({ limit: "256kb" }),
+    async (req, res) => {
+      res.setHeader("cache-control", "no-store");
+      if (!isAuthorizedNaoBrainRequest(req, config.naobrainBridgeToken)) {
+        res.sendStatus(404);
+        return;
+      }
+      try {
+        const result = await todayStore.append({
+          ...(req.body || {}) as TodayEntryInput,
+          source: (req.body?.source || "web") as TodayEntryInput["source"],
+        });
+        res.status(201).json({ ok: true, ...result });
+      } catch (error) {
+        logEvent(config.logging, "error", "naobrain_today_append_error", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+        res.status(400).json({ ok: false, error: error instanceof Error ? error.message : "request failed" });
+      }
+    },
+  );
+
+  app.post(
+    "/naobrain-today/sync",
+    express.json({ limit: "32kb" }),
+    async (req, res) => {
+      res.setHeader("cache-control", "no-store");
+      if (!isAuthorizedNaoBrainRequest(req, config.naobrainBridgeToken)) {
+        res.sendStatus(404);
+        return;
+      }
+      try {
+        const result = await todayStore.sync(req.body?.date);
+        res.json({ ok: true, ...result });
+      } catch (error) {
+        res.status(400).json({ ok: false, error: error instanceof Error ? error.message : "request failed" });
+      }
+    },
+  );
+
+  app.get("/naobrain-today/quiz/health", async (req, res) => {
+    res.setHeader("cache-control", "no-store");
+    if (!isAuthorizedNaoBrainRequest(req, config.naobrainBridgeToken)) {
+      res.sendStatus(404);
+      return;
+    }
+    res.json(quizStore.health());
+  });
+
+  app.get("/naobrain-today/quiz/state", async (req, res) => {
+    res.setHeader("cache-control", "no-store");
+    if (!isAuthorizedNaoBrainRequest(req, config.naobrainBridgeToken)) {
+      res.sendStatus(404);
+      return;
+    }
+    try {
+      res.json(await quizStore.getState());
+    } catch (error) {
+      res.status(400).json({ ok: false, error: error instanceof Error ? error.message : "request failed" });
+    }
+  });
+
+  app.post(
+    "/naobrain-today/quiz/session/start",
+    express.json({ limit: "32kb" }),
+    async (req, res) => {
+      res.setHeader("cache-control", "no-store");
+      if (!isAuthorizedNaoBrainRequest(req, config.naobrainBridgeToken)) {
+        res.sendStatus(404);
+        return;
+      }
+      try {
+        const allowedModes = new Set<QuizSessionMode>(["resume", "restart", "wrong", "due", "recommended"]);
+        const mode = allowedModes.has(req.body?.mode) ? req.body.mode as QuizSessionMode : "recommended";
+        const limit = Number.isInteger(req.body?.limit) ? req.body.limit : undefined;
+        res.json(await quizStore.start(mode, limit));
+      } catch (error) {
+        res.status(400).json({ ok: false, error: error instanceof Error ? error.message : "request failed" });
+      }
+    },
+  );
+
+  app.post(
+    "/naobrain-today/quiz/answer",
+    express.json({ limit: "32kb" }),
+    async (req, res) => {
+      res.setHeader("cache-control", "no-store");
+      if (!isAuthorizedNaoBrainRequest(req, config.naobrainBridgeToken)) {
+        res.sendStatus(404);
+        return;
+      }
+      try {
+        res.json(await quizStore.answer(req.body as QuizAnswerInput));
+      } catch (error) {
+        logEvent(config.logging, "error", "naobrain_quiz_answer_error", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+        res.status(400).json({ ok: false, error: error instanceof Error ? error.message : "request failed" });
+      }
+    },
+  );
+
+  app.post(
+    "/naobrain-today/quiz/generate",
+    express.json({ limit: "32kb" }),
+    async (req, res) => {
+      res.setHeader("cache-control", "no-store");
+      if (!isAuthorizedNaoBrainRequest(req, config.naobrainBridgeToken)) {
+        res.sendStatus(404);
+        return;
+      }
+      try {
+        res.json({ ok: true, ...(await quizStore.generate(String(req.body?.reason || "web requested question refresh"), req.body?.force === true)) });
+      } catch (error) {
+        res.status(400).json({ ok: false, error: error instanceof Error ? error.message : "request failed" });
+      }
+    },
+  );
+
+  app.post(
+    "/naobrain-today/quiz/sync",
+    express.json({ limit: "16kb" }),
+    async (req, res) => {
+      res.setHeader("cache-control", "no-store");
+      if (!isAuthorizedNaoBrainRequest(req, config.naobrainBridgeToken)) {
+        res.sendStatus(404);
+        return;
+      }
+      try {
+        res.json({ ok: true, ...(await quizStore.sync()) });
+      } catch (error) {
+        res.status(400).json({ ok: false, error: error instanceof Error ? error.message : "request failed" });
+      }
+    },
+  );
 
   app.use(
     mcpAuthRouter({
@@ -2417,6 +2749,8 @@ export function createServer(config = loadConfig()): RunningServer {
           reviewCheckpoints,
           processSessions,
           localAgentProviders,
+          todayStore,
+          quizStore,
         );
         await server.connect(transport);
       } else {
