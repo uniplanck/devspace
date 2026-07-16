@@ -26,6 +26,7 @@ try {
     startAt: "2026-07-14T01:30:00.000Z",
     endAt: "2026-07-14T02:45:00.000Z",
     startApproximate: true,
+    tags: ["LP", "クロさん"],
     runAi: false,
   });
 
@@ -77,6 +78,18 @@ try {
   await store.deleteProject(project.id);
   assert.equal((await store.listProjects()).length, 0);
   assert.equal((await store.listProjects(true))[0].active, false);
+
+  const importedTags = await store.listTags();
+  assert.deepEqual(importedTags.map((tag) => tag.name).sort(), ["LP", "クロさん"]);
+  assert.equal(importedTags.find((tag) => tag.name === "LP")?.usageCount, 1);
+  const personTag = await store.createTag("クロさん", "関係者", "person");
+  await store.updateTag(personTag.id, { name: "クロさん", category: "一緒にいた人", kind: "person" });
+  assert.equal((await store.listTags()).find((tag) => tag.name === "クロさん")?.kind, "person");
+  assert.equal((await store.listTags()).find((tag) => tag.name === "クロさん")?.category, "一緒にいた人");
+  const temporaryTag = await store.createTag("削除予定", "運用", "general");
+  await store.deleteTag(temporaryTag.id);
+  assert.equal((await store.listTags()).some((tag) => tag.name === "削除予定"), false);
+  assert.equal((await store.listTags(true)).find((tag) => tag.name === "削除予定")?.active, false);
 
   const settings = await store.updateAiSettings({ fallback2: "test-fallback-key-2" });
   assert.equal(settings.fallback2Configured, true);
