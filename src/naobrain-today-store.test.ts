@@ -77,6 +77,10 @@ try {
   const deletedHistory = await store.history(planned.entry.id);
   assert.equal(deletedHistory.length, 2);
   assert.equal(deletedHistory[1].revisionNote, "予定を取り消し");
+  const deletedAgain = await store.delete(planned.entry.id, "再削除");
+  assert.equal(deletedAgain.snapshot.summary.total, 0);
+  assert.equal(deletedAgain.entry.version, deleted.entry.version);
+  assert.equal((await store.list("2026-07-15")).summary.total, 0);
   await assert.rejects(() => store.update({ id: planned.entry.id, title: "復活", runAi: false }), /Deleted entries cannot be edited/);
 
   const projects = await store.listProjects();

@@ -317,7 +317,10 @@ export class NaoBrainTodayStore {
       await this.ensureLayout();
       const current = await this.latestEntry(id);
       if (!current) throw new Error("Entry was not found.");
-      if (current.deletedAt) throw new Error("Entry is already deleted.");
+      if (current.deletedAt) {
+        const snapshot = await this.rebuildSnapshot(current.date);
+        return { entry: current, snapshot, drive: this.scheduleDateSync(current.date) };
+      }
       const now = new Date().toISOString();
       const entry: TodayEntry = {
         ...current,
@@ -347,14 +350,7 @@ export class NaoBrainTodayStore {
 
   async list(date = jstDate(new Date().toISOString())): Promise<TodayDaySnapshot> {
     await this.ensureLayout();
-    const normalizedDate = normalizeDateOnly(date);
-    try {
-      const raw = await readFile(this.snapshotPath(normalizedDate), "utf8");
-      return JSON.parse(raw) as TodayDaySnapshot;
-    } catch (error) {
-      if (isMissing(error)) return this.rebuildSnapshot(normalizedDate);
-      throw error;
-    }
+    return this.rebuildSnapshot(normalizeDateOnly(date));
   }
 
   async digest(date = jstDate(new Date().toISOString())): Promise<string> {
