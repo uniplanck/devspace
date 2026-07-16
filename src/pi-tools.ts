@@ -128,7 +128,8 @@ async function runBuiltinRuntimeCommand(
       "  devspace-runtime finder <workspace-relative-path>",
       "  devspace-runtime jobs start <preset> [--title <title>]",
       "  devspace-runtime jobs start browser-loop --goal <goal> --provider <non-codex-provider> [--max-steps <1-60>] [--model <model>] [--download-group <group>]",
-      "  devspace-runtime jobs start chatgpt-task --prompt <prompt> [--url <chat-url>] [--expect <marker>] [--timeout-seconds <5-600>] [--keep-tab]",
+      "  devspace-runtime jobs start chatgpt-task --prompt <prompt> [--url <chat-url>] [--expect <marker>] [--images <1-4>] [--auto-submit] [--timeout-seconds <5-600>] [--keep-tab]",
+      "  devspace-runtime jobs start image-to-drive --prompt <prompt> [--count <1-4>] [--transparent] [--drive-remote <remote:>] [--drive-path <path>] [--file-prefix <name>] [--manual-submit] [--keep-tab]",
       "  devspace-runtime jobs list",
       "  devspace-runtime jobs show <id> [--events]",
       "  devspace-runtime jobs cancel <id>",
@@ -326,7 +327,11 @@ function runRuntimeJobsCommand(rawCommand: string, context: ToolContext): ToolRe
     const title = runtimeOption(tokens, "--title");
     const input = preset === "browser-loop"
       ? runtimeBrowserLoopInput(tokens)
-      : preset === "chatgpt-task" ? runtimeChatGptTaskInput(tokens) : undefined;
+      : preset === "chatgpt-task"
+        ? runtimeChatGptTaskInput(tokens)
+        : preset === "image-to-drive"
+          ? runtimeImageToDriveInput(tokens)
+          : undefined;
     return jsonResponse(startJob(config, {
       workspaceId: context.workspaceId,
       workspaceRoot: context.root,
@@ -391,6 +396,11 @@ function runtimeChatGptTaskInput(tokens: string[]): Record<string, unknown> {
   if (!prompt) throw new Error("ChatGPT task jobs require --prompt <prompt>.");
   const url = runtimeOption(tokens, "--url");
   const expectedMarker = runtimeOption(tokens, "--expect");
+  const expectedImagesValue = runtimeOption(tokens, "--images");
+  const expectedImageCount = expectedImagesValue === undefined ? undefined : Number(expectedImagesValue);
+  if (expectedImageCount !== undefined && (!Number.isInteger(expectedImageCount) || expectedImageCount < 1 || expectedImageCount > 4)) {
+    throw new Error("--images must be an integer from 1 to 4.");
+  }
   const timeoutSecondsValue = runtimeOption(tokens, "--timeout-seconds");
   const timeoutSeconds = timeoutSecondsValue === undefined ? undefined : Number(timeoutSecondsValue);
   if (timeoutSeconds !== undefined && (!Number.isFinite(timeoutSeconds) || timeoutSeconds < 5 || timeoutSeconds > 600)) {
@@ -400,7 +410,38 @@ function runtimeChatGptTaskInput(tokens: string[]): Record<string, unknown> {
     prompt,
     ...(url ? { url } : {}),
     ...(expectedMarker ? { expectedMarker } : {}),
+    ...(expectedImageCount === undefined ? {} : { expectedImageCount }),
     ...(timeoutSeconds === undefined ? {} : { timeoutMs: Math.round(timeoutSeconds * 1000) }),
+    closeWhenDone: !tokens.includes("--keep-tab"),
+    autoSubmit: tokens.includes("--auto-submit"),
+  };
+}
+
+function runtimeImageToDriveInput(tokens: string[]): Record<string, unknown> {
+  const prompt = runtimeOption(tokens, "--prompt");
+  if (!prompt) throw new Error("Image-to-Drive jobs require --prompt <prompt>.");
+  const countValue = runtimeOption(tokens, "--count");
+  const count = countValue === undefined ? 1 : Number(countValue);
+  if (!Number.isInteger(count) || count < 1 || count > 4) throw new Error("--count must be an integer from 1 to 4.");
+  const timeoutSecondsValue = runtimeOption(tokens, "--timeout-seconds");
+  const timeoutSeconds = timeoutSecondsValue === undefined ? undefined : Number(timeoutSecondsValue);
+  if (timeoutSeconds !== undefined && (!Number.isFinite(timeoutSeconds) || timeoutSeconds < 30 || timeoutSeconds > 600)) {
+    throw new Error("--timeout-seconds must be from 30 to 600 for image-to-drive.");
+  }
+  const driveRemote = runtimeOption(tokens, "--drive-remote");
+  const drivePath = runtimeOption(tokens, "--drive-path");
+  const filePrefix = runtimeOption(tokens, "--file-prefix");
+  const url = runtimeOption(tokens, "--url");
+  return {
+    prompt,
+    count,
+    transparent: tokens.includes("--transparent"),
+    ...(driveRemote ? { driveRemote } : {}),
+    ...(drivePath ? { drivePath } : {}),
+    ...(filePrefix ? { filePrefix } : {}),
+    ...(url ? { url } : {}),
+    ...(timeoutSeconds === undefined ? {} : { timeoutMs: Math.round(timeoutSeconds * 1000) }),
+    autoSubmit: !tokens.includes("--manual-submit"),
     closeWhenDone: !tokens.includes("--keep-tab"),
   };
 }

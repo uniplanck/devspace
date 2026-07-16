@@ -6,11 +6,13 @@ import {
   lstatSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import {
   findAutomationBrowser,
   loadComputerUsePolicy,
@@ -114,6 +116,7 @@ export interface ChatGptConversationSnapshot {
   composerPresent: boolean;
   generating: boolean;
   errorText: string;
+  assistantImageUrls: string[];
 }
 
 export interface ChatGptModelSelectionResult {
@@ -128,6 +131,8 @@ export interface ChatGptModelSelectionResult {
 export interface ChatGptResponseWaitInput {
   baselineAssistantCount: number;
   expectedMarker?: string;
+  baselineImageCount?: number;
+  expectedImageCount?: number;
   timeoutMs?: number;
   pollIntervalMs?: number;
   shouldStop?: () => boolean;
@@ -383,6 +388,16 @@ export interface BrowserDownloadDirectoryResult {
   relativePath: string;
 }
 
+export interface ChatGptImageDownloadResult {
+  targetId: string;
+  files: Array<{
+    url: string;
+    fileName: string;
+    path: string;
+    bytes: number;
+  }>;
+}
+
 export function resolveBrowserDownloadDirectory(
   input: { group?: string; taskId?: string; now?: Date } = {},
   policy: ComputerUsePolicy,
@@ -425,6 +440,111 @@ export async function configureBrowserDownloadDirectory(
     browserClient.close();
   }
   return directory;
+}
+
+export async function downloadChatGptImages(
+  input: {
+    urls: string[];
+    directory: string;
+    fileNames?: string[];
+    targetId?: string;
+    timeoutMs?: number;
+    home?: string;
+  },
+): Promise<ChatGptImageDownloadResult> {
+  const home = input.home ?? homedir();
+  const policy = loadPolicy(undefined, home);
+  const directory = resolve(input.directory);
+  const downloadsRoot = resolve(policy.browser.downloadDirectory);
+  if (directory !== downloadsRoot && !directory.startsWith(`${downloadsRoot}${sep}`)) {
+    throw new Error("ChatGPT image download directory must remain inside the configured browser download root.");
+  }
+  const urls = [...new Set(input.urls.map((value) => value.trim()).filter(Boolean))];
+  if (urls.length < 1 || urls.length > 4) throw new Error("ChatGPT image download requires 1 to 4 unique URLs.");
+  for (const rawUrl of urls) {
+    const url = new URL(rawUrl);
+    if (url.protocol !== "https:" || url.hostname !== "chatgpt.com" || !url.pathname.startsWith("/backend-api/estuary/content")) {
+      throw new Error("Only authenticated ChatGPT generated-image URLs may be downloaded.");
+    }
+  }
+  const names = urls.map((_, index) => sanitizeImageFileName(
+    input.fileNames?.[index] ?? `chatgpt-image-${String(index + 1).padStart(2, "0")}.png`,
+  ));
+  if (new Set(names).size !== names.length) throw new Error("ChatGPT image filenames must be unique.");
+  ensurePrivateDirectory(directory);
+  for (const name of names) {
+    if (existsSync(join(directory, name))) throw new Error(`Refusing to overwrite existing browser download: ${name}`);
+  }
+  const session = await requireActiveSession(home);
+  const browserClient = await CdpClient.connect(
+    `ws://127.0.0.1:${session.port}${session.browserWebSocketPath}`,
+  );
+  try {
+    await browserClient.send("Browser.setDownloadBehavior", {
+      behavior: "allow",
+      downloadPath: directory,
+      eventsEnabled: true,
+    });
+  } finally {
+    browserClient.close();
+  }
+  const payload = urls.map((url, index) => ({ url, fileName: names[index]! }));
+  const targetId = await withPageClient(home, async (client, target) => {
+    const result = await evaluate<{ ok: boolean; error?: string }>(client, `(async () => {
+      try {
+        const files = ${JSON.stringify(payload)};
+        for (const file of files) {
+          const response = await fetch(file.url, { credentials: "include" });
+          if (!response.ok) throw new Error("Image request failed with HTTP " + response.status);
+          const blob = await response.blob();
+          const objectUrl = URL.createObjectURL(blob);
+          const anchor = document.createElement("a");
+          anchor.href = objectUrl;
+          anchor.download = file.fileName;
+          anchor.style.display = "none";
+          document.body.append(anchor);
+          anchor.click();
+          anchor.remove();
+          await new Promise((resolveDelay) => setTimeout(resolveDelay, 250));
+          URL.revokeObjectURL(objectUrl);
+        }
+        return { ok: true };
+      } catch (error) {
+        return { ok: false, error: String(error?.message || error) };
+      }
+    })()`);
+    if (!result.ok) throw new Error(`ChatGPT image browser download failed: ${result.error ?? "unknown error"}`);
+    return target.id;
+  }, input.targetId);
+  const timeoutMs = Math.min(120_000, Math.max(5_000, input.timeoutMs ?? 60_000));
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const pending = readdirSync(directory).some((name) => name.endsWith(".crdownload"));
+    const complete = names.every((name) => existsSync(join(directory, name)) && statSync(join(directory, name)).size > 0);
+    if (!pending && complete) {
+      return {
+        targetId,
+        files: urls.map((url, index) => {
+          const fileName = names[index]!;
+          const path = join(directory, fileName);
+          return { url, fileName, path, bytes: statSync(path).size };
+        }),
+      };
+    }
+    await sleep(250);
+  }
+  throw new Error("Timed out waiting for ChatGPT image downloads to complete.");
+}
+
+function sanitizeImageFileName(value: string): string {
+  const normalized = value
+    .normalize("NFKC")
+    .trim()
+    .replace(/[^\p{L}\p{N}._-]+/gu, "-")
+    .replace(/^-+|-+$/gu, "")
+    .slice(0, 120);
+  const stem = normalized.replace(/\.png$/iu, "") || "chatgpt-image";
+  return `${stem}.png`;
 }
 
 function sanitizeDownloadPath(value: string): string[] {
@@ -819,6 +939,16 @@ export async function inspectChatGptConversation(
       const error = document.querySelector(
         "[data-testid='conversation-turn-error'],[role='alert']"
       );
+      const generatedImages = Array.from(document.querySelectorAll("img"))
+        .map((image) => ({
+          src: image instanceof HTMLImageElement ? image.currentSrc || image.src : "",
+          width: image instanceof HTMLImageElement ? image.naturalWidth : 0,
+          height: image instanceof HTMLImageElement ? image.naturalHeight : 0,
+        }))
+        .filter((image) => image.src.includes("/backend-api/estuary/content")
+          && image.width >= 512
+          && image.height >= 256)
+        .map((image) => image.src);
       return {
         url: location.href,
         title: document.title.slice(0, 300),
@@ -829,6 +959,7 @@ export async function inspectChatGptConversation(
         composerPresent: Boolean(composer),
         generating: Boolean(stopButton),
         errorText: clean(error?.innerText || error?.textContent).slice(0, 500),
+        assistantImageUrls: [...new Set(generatedImages)],
       };
     })()`);
     return { targetId: target.id, ...page };
@@ -1259,6 +1390,35 @@ export async function focusChatGptComposer(
   }, input.targetId);
 }
 
+export async function submitTrustedChatGptComposer(
+  input: { home?: string; targetId?: string } = {},
+): Promise<{ status: "pressed"; targetId: string; key: "Enter" }> {
+  const home = input.home ?? homedir();
+  return await withPageClient(home, async (client, target) => {
+    const composer = await evaluate<{ valid: boolean; text: string; host: string }>(client, `(() => {
+      const host = location.hostname;
+      const element = document.querySelector(
+        "#prompt-textarea,[data-testid='composer-input'],[contenteditable='true'][role='textbox'],textarea[placeholder]"
+      );
+      if (!(element instanceof HTMLElement)) return { valid: false, text: "", host };
+      const text = String(element.innerText || element.textContent || element.value || "").trim();
+      const active = document.activeElement;
+      const focused = active === element || (active instanceof Node && element.contains(active));
+      if (!focused) element.focus();
+      return {
+        valid: (host === "chatgpt.com" || host.endsWith(".chatgpt.com")) && Boolean(text),
+        text,
+        host,
+      };
+    })()`);
+    if (!composer.valid) {
+      throw new Error(`Trusted ChatGPT submit requires a non-empty focused composer on chatgpt.com; host=${composer.host || "unknown"}.`);
+    }
+    await dispatchKey(client, "Enter");
+    return { status: "pressed" as const, targetId: target.id, key: "Enter" as const };
+  }, input.targetId);
+}
+
 export async function waitForChatGptResponse(
   input: ChatGptResponseWaitInput,
   home: string = homedir(),
@@ -1267,7 +1427,9 @@ export async function waitForChatGptResponse(
   const pollIntervalMs = Math.min(5_000, Math.max(250, input.pollIntervalMs ?? 750));
   const deadline = Date.now() + timeoutMs;
   let lastText = "";
+  let lastImageSignature = "";
   let stablePolls = 0;
+  let imageStablePolls = 0;
   let incompleteStablePolls = 0;
   let hydrationAttempts = 0;
   let latest = await inspectChatGptConversation(home, input.targetId);
@@ -1280,12 +1442,29 @@ export async function waitForChatGptResponse(
     }
     const hasNewAssistant = latest.assistantCount > input.baselineAssistantCount;
     const hasExpectedMarker = !input.expectedMarker || latest.lastAssistantText.includes(input.expectedMarker);
-    if (hasNewAssistant && latest.lastAssistantText && hasExpectedMarker && !latest.generating) {
+    const baselineImageCount = Math.max(0, input.baselineImageCount ?? 0);
+    const expectedImageCount = Math.max(0, input.expectedImageCount ?? 0);
+    const newImageCount = Math.max(0, latest.assistantImageUrls.length - baselineImageCount);
+    const imageSignature = latest.assistantImageUrls.slice(baselineImageCount).join("\n");
+    const imageReady = expectedImageCount > 0
+      && newImageCount >= expectedImageCount
+      && hasExpectedMarker
+      && !latest.generating;
+    if (imageReady) {
+      imageStablePolls = imageSignature === lastImageSignature ? imageStablePolls + 1 : 0;
+      stablePolls = 0;
+      incompleteStablePolls = 0;
+      lastImageSignature = imageSignature;
+      lastText = latest.lastAssistantText;
+      if (imageStablePolls >= 1) return latest;
+    } else if (expectedImageCount === 0 && hasNewAssistant && latest.lastAssistantText && hasExpectedMarker && !latest.generating) {
       stablePolls = latest.lastAssistantText === lastText ? stablePolls + 1 : 0;
+      imageStablePolls = 0;
       incompleteStablePolls = 0;
       lastText = latest.lastAssistantText;
       if (stablePolls >= 1) return latest;
     } else {
+      imageStablePolls = 0;
       stablePolls = 0;
       const incompleteAndStable = hasNewAssistant
         && Boolean(latest.lastAssistantText)
@@ -1305,7 +1484,10 @@ export async function waitForChatGptResponse(
   }
 
   const markerDetail = input.expectedMarker ? ` Expected marker: ${input.expectedMarker}.` : "";
-  throw new Error(`Timed out waiting for a completed ChatGPT response.${markerDetail}`);
+  const imageDetail = input.expectedImageCount
+    ? ` Expected ${input.expectedImageCount} new image(s), found ${Math.max(0, latest.assistantImageUrls.length - (input.baselineImageCount ?? 0))}.`
+    : "";
+  throw new Error(`Timed out waiting for a completed ChatGPT response.${markerDetail}${imageDetail}`);
 }
 
 export async function captureBrowserScreenshot(home: string = homedir()): Promise<BrowserScreenshotResult> {
