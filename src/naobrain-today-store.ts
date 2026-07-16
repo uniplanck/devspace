@@ -9,6 +9,7 @@ import {
   type GeminiKeySettings,
 } from "./naobrain-gemini-client.js";
 import { NaoBrainProjectStore, type TodayProject } from "./naobrain-project-store.js";
+import { NaoBrainTagStore, type TodayTag, type TodayTagKind } from "./naobrain-tag-store.js";
 
 const execFileAsync = promisify(execFile);
 const JST_TIME_ZONE = "Asia/Tokyo";
@@ -88,6 +89,7 @@ export interface TodayEntry {
   endApproximate: boolean;
   createdAt: string;
   updatedAt: string;
+  deletedAt?: string;
   revisionNote?: string;
   title: string;
   body: string;
@@ -139,6 +141,11 @@ export interface TodayAggregateAnalysis {
   automatic: boolean;
 }
 
+export interface TodayTagWithUsage extends TodayTag {
+  usageCount: number;
+  lastUsedAt?: string;
+}
+
 export interface TodayAnalysisInput {
   scope?: TodayAnalysisScope;
   value?: string;
@@ -160,6 +167,7 @@ export interface NaoBrainTodayConfig {
 export interface DriveSyncResult {
   configured: boolean;
   synced: boolean;
+  queued?: boolean;
   destination?: string;
   error?: string;
 }
@@ -167,13 +175,17 @@ export interface DriveSyncResult {
 export class NaoBrainTodayStore {
   private readonly config: NaoBrainTodayConfig;
   private readonly projects: NaoBrainProjectStore;
+  private readonly tags: NaoBrainTagStore;
   private readonly gemini: NaoBrainGeminiClient;
   private queue: Promise<unknown> = Promise.resolve();
   private schedulerRunning = false;
+  private driveSyncTask: Promise<void> | null = null;
+  private readonly pendingDriveDates = new Set<string>();
 
   constructor(config: NaoBrainTodayConfig) {
     this.config = config;
     this.projects = new NaoBrainProjectStore(config.dataDir);
+    this.tags = new NaoBrainTagStore(config.dataDir);
     this.gemini = new NaoBrainGeminiClient({
       primaryApiKey: config.geminiApiKey,
       model: config.geminiModel,
@@ -242,6 +254,7 @@ export class NaoBrainTodayStore {
       await this.ensureLayout();
       const current = await this.latestEntry(input.id);
       if (!current) throw new Error("Entry was not found.");
+      if (current.deletedAt) throw new Error("Deleted entries cannot be edited.");
 
       const merged: TodayEntryInput = {
         title: input.title ?? current.title,
@@ -295,6 +308,38 @@ export class NaoBrainTodayStore {
     });
   }
 
+  async delete(id: string, revisionNote?: string): Promise<{
+    entry: TodayEntry;
+    snapshot: TodayDaySnapshot;
+    drive: DriveSyncResult;
+  }> {
+    return this.enqueue(async () => {
+      await this.ensureLayout();
+      const current = await this.latestEntry(id);
+      if (!current) throw new Error("Entry was not found.");
+      if (current.deletedAt) {
+        const snapshot = await this.rebuildSnapshot(current.date);
+        return { entry: current, snapshot, drive: this.scheduleDateSync(current.date) };
+      }
+      const now = new Date().toISOString();
+      const entry: TodayEntry = {
+        ...current,
+        revisionId: randomUUID(),
+        previousRevisionId: current.revisionId,
+        version: current.version + 1,
+        updatedAt: now,
+        deletedAt: now,
+        revisionNote: cleanText(revisionNote || "記録を削除", 240),
+        ai: undefined,
+        aiError: undefined,
+      };
+      await this.appendRevision(entry);
+      const snapshot = await this.rebuildSnapshot(current.date);
+      const drive = this.scheduleDateSync(current.date);
+      return { entry, snapshot, drive };
+    });
+  }
+
   async history(id: string): Promise<TodayEntry[]> {
     await this.ensureLayout();
     const normalizedId = normalizeEntryId(id);
@@ -305,14 +350,7 @@ export class NaoBrainTodayStore {
 
   async list(date = jstDate(new Date().toISOString())): Promise<TodayDaySnapshot> {
     await this.ensureLayout();
-    const normalizedDate = normalizeDateOnly(date);
-    try {
-      const raw = await readFile(this.snapshotPath(normalizedDate), "utf8");
-      return JSON.parse(raw) as TodayDaySnapshot;
-    } catch (error) {
-      if (isMissing(error)) return this.rebuildSnapshot(normalizedDate);
-      throw error;
-    }
+    return this.rebuildSnapshot(normalizeDateOnly(date));
   }
 
   async digest(date = jstDate(new Date().toISOString())): Promise<string> {
@@ -354,6 +392,50 @@ export class NaoBrainTodayStore {
       const project = await this.projects.delete(id);
       await this.syncMetadataFiles();
       return project;
+    });
+  }
+
+  async listTags(includeDeleted = false): Promise<TodayTagWithUsage[]> {
+    await this.ensureLayout();
+    const entries = (await this.latestEntries()).filter((entry) => !entry.deletedAt);
+    await this.tags.ensureFromNames(entries.flatMap((entry) => entry.tags));
+    const usage = new Map<string, { count: number; lastUsedAt?: string }>();
+    for (const entry of entries) {
+      for (const name of entry.tags) {
+        const key = name.toLocaleLowerCase("ja");
+        const current = usage.get(key) || { count: 0 };
+        current.count += 1;
+        if (!current.lastUsedAt || entry.occurredAt > current.lastUsedAt) current.lastUsedAt = entry.occurredAt;
+        usage.set(key, current);
+      }
+    }
+    return (await this.tags.list(includeDeleted)).map((tag) => {
+      const stats = usage.get(tag.name.toLocaleLowerCase("ja"));
+      return { ...tag, usageCount: stats?.count || 0, lastUsedAt: stats?.lastUsedAt };
+    });
+  }
+
+  async createTag(name: string, category?: string, kind?: TodayTagKind): Promise<TodayTag> {
+    return this.enqueue(async () => {
+      const tag = await this.tags.create(name, category, kind);
+      await this.syncMetadataFiles();
+      return tag;
+    });
+  }
+
+  async updateTag(id: string, input: { name: string; category?: string; kind?: TodayTagKind }): Promise<TodayTag> {
+    return this.enqueue(async () => {
+      const tag = await this.tags.update(id, input);
+      await this.syncMetadataFiles();
+      return tag;
+    });
+  }
+
+  async deleteTag(id: string): Promise<TodayTag> {
+    return this.enqueue(async () => {
+      const tag = await this.tags.delete(id);
+      await this.syncMetadataFiles();
+      return tag;
     });
   }
 
@@ -436,7 +518,7 @@ export class NaoBrainTodayStore {
     const dateTo = normalizeDateOnly(input.dateTo || (scope === "day" && value ? value : today));
     if (dateFrom > dateTo) throw new Error("dateFrom must be before dateTo.");
 
-    const allEntries = await this.latestEntries();
+    const allEntries = (await this.latestEntries()).filter((entry) => !entry.deletedAt);
     const entries = allEntries.filter((entry) => {
       if (entry.date < dateFrom || entry.date > dateTo) return false;
       if (scope === "all") return true;
@@ -561,6 +643,9 @@ export class NaoBrainTodayStore {
       projectId = found.id;
     }
 
+    const tags = Array.from(new Set((input.tags || []).map((tag) => cleanText(tag, 40)).filter(Boolean))).slice(0, 20);
+    await this.tags.ensureFromNames(tags);
+
     const startAt = normalizeOptionalIsoDate(input.startAt);
     const endAt = normalizeOptionalIsoDate(input.endAt);
     if (startAt && endAt && Date.parse(endAt) < Date.parse(startAt)) {
@@ -574,7 +659,7 @@ export class NaoBrainTodayStore {
       kind: normalizeEnum(input.kind, ["progress", "result", "plan", "journal", "note"] as const, "note"),
       project,
       projectId,
-      tags: Array.from(new Set((input.tags || []).map((tag) => cleanText(tag, 40)).filter(Boolean))).slice(0, 20),
+      tags,
       source: normalizeEnum(input.source, ["web", "gae", "journal", "import"] as const, "gae"),
       occurredAt: input.occurredAt,
       startAt,
@@ -624,7 +709,7 @@ export class NaoBrainTodayStore {
   private async rebuildSnapshot(date: string): Promise<TodayDaySnapshot> {
     const normalizedDate = normalizeDateOnly(date);
     const entries = (await this.latestEntries())
-      .filter((entry) => entry.date === normalizedDate)
+      .filter((entry) => !entry.deletedAt && entry.date === normalizedDate)
       .sort((left, right) => left.occurredAt.localeCompare(right.occurredAt) || left.createdAt.localeCompare(right.createdAt));
     const snapshot = buildSnapshot(normalizedDate, entries);
     await Promise.all([
@@ -650,6 +735,29 @@ export class NaoBrainTodayStore {
       writeFile(path, content, { encoding: "utf8", mode: 0o600 }),
       writeFile(latest, content, { encoding: "utf8", mode: 0o600 }),
     ]);
+  }
+
+  private scheduleDateSync(date: string): DriveSyncResult {
+    if (!this.config.driveRemote) return { configured: false, synced: false };
+    this.pendingDriveDates.add(date);
+    if (!this.driveSyncTask) {
+      this.driveSyncTask = (async () => {
+        while (this.pendingDriveDates.size > 0) {
+          const dates = Array.from(this.pendingDriveDates);
+          this.pendingDriveDates.clear();
+          for (const pendingDate of dates) await this.syncDateFiles(pendingDate);
+        }
+      })().finally(() => {
+        this.driveSyncTask = null;
+        if (this.pendingDriveDates.size > 0) this.scheduleDateSync(Array.from(this.pendingDriveDates)[0]);
+      });
+    }
+    return {
+      configured: true,
+      synced: false,
+      queued: true,
+      destination: `${redactRemote(this.config.driveRemote)}${this.config.driveBasePath}`,
+    };
   }
 
   private async syncDates(dates: string[]): Promise<DriveSyncResult> {
@@ -679,11 +787,14 @@ export class NaoBrainTodayStore {
   private async syncMetadataFiles(): Promise<DriveSyncResult> {
     if (!this.config.driveRemote) return { configured: false, synced: false };
     const remoteProjectsRoot = joinRemote(this.config.driveRemote, this.config.driveBasePath, "projects");
+    const remoteTagsRoot = joinRemote(this.config.driveRemote, this.config.driveBasePath, "tags");
     const files = [
       { local: join(this.config.dataDir, "projects", "projects.json"), remote: `${remoteProjectsRoot}/projects.json` },
       { local: join(this.config.dataDir, "projects", "history.jsonl"), remote: `${remoteProjectsRoot}/history.jsonl` },
+      { local: join(this.config.dataDir, "tags", "tags.json"), remote: `${remoteTagsRoot}/tags.json` },
+      { local: join(this.config.dataDir, "tags", "history.jsonl"), remote: `${remoteTagsRoot}/history.jsonl` },
     ];
-    return this.copyFilesToDrive(files, [remoteProjectsRoot]);
+    return this.copyFilesToDrive(files, [remoteProjectsRoot, remoteTagsRoot]);
   }
 
   private async syncAnalysisFiles(analysis: TodayAggregateAnalysis): Promise<DriveSyncResult> {
@@ -743,6 +854,7 @@ export class NaoBrainTodayStore {
       mkdir(join(this.config.dataDir, "history"), { recursive: true }),
       mkdir(join(this.config.dataDir, "analyses"), { recursive: true }),
       mkdir(join(this.config.dataDir, "projects"), { recursive: true }),
+      mkdir(join(this.config.dataDir, "tags"), { recursive: true }),
     ]);
     await this.readPrompt();
     await this.migrateLegacyEntries();
@@ -778,8 +890,10 @@ export class NaoBrainTodayStore {
     }
     await writeFile(marker, `${new Date().toISOString()}\n`, { encoding: "utf8", mode: 0o600 });
 
-    const projectNames = (await this.latestEntries()).map((entry) => entry.project).filter(Boolean);
+    const latestEntries = (await this.latestEntries()).filter((entry) => !entry.deletedAt);
+    const projectNames = latestEntries.map((entry) => entry.project).filter(Boolean);
     await this.projects.ensureFromNames(projectNames);
+    await this.tags.ensureFromNames(latestEntries.flatMap((entry) => entry.tags));
   }
 
   private revisionsPath(): string {
@@ -823,6 +937,7 @@ function normalizeStoredEntry(value: unknown): TodayEntry {
     endApproximate: raw.endApproximate === true,
     createdAt,
     updatedAt,
+    deletedAt: normalizeOptionalIsoDate(raw.deletedAt),
     revisionNote: cleanText(raw.revisionNote || "", 240) || undefined,
     title: cleanText(raw.title || "無題", 140),
     body: cleanText(raw.body || "", 8_000),

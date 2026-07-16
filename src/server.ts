@@ -871,6 +871,31 @@ function createMcpServer(
   );
 
   server.registerTool(
+    "naobrain_today_delete",
+    {
+      title: "Delete NaoBrain Today entry",
+      description: "Hide a Today entry from timelines and analyses while preserving all versions, including the deletion revision, in history.",
+      inputSchema: {
+        id: z.string().min(1).max(80),
+        revisionNote: z.string().max(240).optional(),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
+    },
+    async ({ id, revisionNote }) => {
+      const result = await todayStore.delete(id, revisionNote);
+      return {
+        content: [textBlock(`NaoBrain Todayから非表示にし、削除履歴を保存しました: ${result.entry.title}`)],
+        structuredContent: { ...result },
+      };
+    },
+  );
+
+  server.registerTool(
     "naobrain_today_history",
     {
       title: "Read NaoBrain Today version history",
@@ -919,6 +944,39 @@ function createMcpServer(
       return {
         content: [textBlock(projects.length ? projects.map((project) => `- ${project.name} (${project.id})`).join("\n") : "Projectはまだありません。")],
         structuredContent: { action, projects },
+      };
+    },
+  );
+
+  server.registerTool(
+    "naobrain_today_tags",
+    {
+      title: "Manage NaoBrain Today tags",
+      description: "List, create, rename, categorize, mark as a person tag, or remove Today tag suggestions. Removing a tag never deletes it from historical entries.",
+      inputSchema: {
+        action: z.enum(["list", "create", "update", "delete"]).optional(),
+        id: z.string().max(80).optional(),
+        name: z.string().max(40).optional(),
+        category: z.string().max(40).optional(),
+        kind: z.enum(["general", "person"]).optional(),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
+    },
+    async ({ action = "list", id, name, category, kind }) => {
+      if (action === "create") await todayStore.createTag(name || "", category, kind);
+      if (action === "update") await todayStore.updateTag(id || "", { name: name || "", category, kind });
+      if (action === "delete") await todayStore.deleteTag(id || "");
+      const tags = await todayStore.listTags();
+      return {
+        content: [textBlock(tags.length
+          ? tags.map((tag) => `- ${tag.kind === "person" ? "@" : "#"}${tag.name} / ${tag.category} / ${tag.usageCount}件`).join("\n")
+          : "タグはまだありません。")],
+        structuredContent: { action, tags },
       };
     },
   );
@@ -2651,6 +2709,23 @@ export function createServer(config = loadConfig()): RunningServer {
     },
   );
 
+  app.post(
+    "/naobrain-today/entries/delete",
+    express.json({ limit: "32kb" }),
+    async (req, res) => {
+      if (!authorizeToday(req, res)) return;
+      try {
+        const result = await todayStore.delete(String(req.body?.id || ""), String(req.body?.revisionNote || ""));
+        res.json({ ok: true, ...result });
+      } catch (error) {
+        logEvent(config.logging, "error", "naobrain_today_delete_error", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+        res.status(400).json({ ok: false, error: error instanceof Error ? error.message : "request failed" });
+      }
+    },
+  );
+
   app.get("/naobrain-today/projects", async (req, res) => {
     if (!authorizeToday(req, res)) return;
     try {
@@ -2673,6 +2748,39 @@ export function createServer(config = loadConfig()): RunningServer {
             ? await todayStore.deleteProject(String(req.body?.id || ""))
             : await todayStore.createProject(String(req.body?.name || ""));
         res.json({ ok: true, project, projects: await todayStore.listProjects() });
+      } catch (error) {
+        res.status(400).json({ ok: false, error: error instanceof Error ? error.message : "request failed" });
+      }
+    },
+  );
+
+  app.get("/naobrain-today/tags", async (req, res) => {
+    if (!authorizeToday(req, res)) return;
+    try {
+      res.json({ ok: true, tags: await todayStore.listTags(req.query.includeDeleted === "1") });
+    } catch (error) {
+      res.status(400).json({ ok: false, error: error instanceof Error ? error.message : "request failed" });
+    }
+  });
+
+  app.post(
+    "/naobrain-today/tags",
+    express.json({ limit: "32kb" }),
+    async (req, res) => {
+      if (!authorizeToday(req, res)) return;
+      try {
+        const action = String(req.body?.action || "create");
+        const kind = req.body?.kind === "person" ? "person" : "general";
+        const tag = action === "update"
+          ? await todayStore.updateTag(String(req.body?.id || ""), {
+            name: String(req.body?.name || ""),
+            category: String(req.body?.category || ""),
+            kind,
+          })
+          : action === "delete"
+            ? await todayStore.deleteTag(String(req.body?.id || ""))
+            : await todayStore.createTag(String(req.body?.name || ""), String(req.body?.category || ""), kind);
+        res.json({ ok: true, tag, tags: await todayStore.listTags() });
       } catch (error) {
         res.status(400).json({ ok: false, error: error instanceof Error ? error.message : "request failed" });
       }
