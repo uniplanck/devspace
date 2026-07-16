@@ -81,7 +81,22 @@ try {
   assert.equal(deletedAgain.snapshot.summary.total, 0);
   assert.equal(deletedAgain.entry.version, deleted.entry.version);
   assert.equal((await store.list("2026-07-15")).summary.total, 0);
+  assert.equal((await store.listDeleted()).length, 1);
   await assert.rejects(() => store.update({ id: planned.entry.id, title: "復活", runAi: false }), /Deleted entries cannot be edited/);
+
+  const restored = await store.restore(planned.entry.id, undefined, "削除履歴から復元");
+  assert.equal(restored.entry.version, 3);
+  assert.equal(restored.entry.deletedAt, undefined);
+  assert.equal(restored.snapshot.summary.total, 1);
+  assert.equal((await store.listDeleted()).length, 0);
+  const restoredHistory = await store.history(planned.entry.id);
+  assert.equal(restoredHistory.length, 3);
+  assert.equal(restoredHistory[2].revisionNote, "削除履歴から復元");
+
+  const reverted = await store.restore(first.entry.id, first.entry.revisionId, "初版へ戻す");
+  assert.equal(reverted.entry.version, 3);
+  assert.equal(reverted.entry.title, "LP構成を確定");
+  assert.equal(reverted.entry.revisionNote, "初版へ戻す");
 
   const projects = await store.listProjects();
   assert.equal(projects.length, 1);
@@ -112,8 +127,8 @@ try {
 
   const digest = await store.digest("2026-07-14");
   assert.match(digest, /# Today \/ 2026-07-14/);
-  assert.match(digest, /LP構成とCTAを確定/);
-  assert.match(digest, /Version: 2/);
+  assert.match(digest, /LP構成を確定/);
+  assert.match(digest, /Version: 3/);
   assert.match(digest, /約10:30–11:45/);
 
   const prompt = await readFile(join(root, "config", "prompt.md"), "utf8");

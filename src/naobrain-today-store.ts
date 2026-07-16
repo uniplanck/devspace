@@ -340,6 +340,56 @@ export class NaoBrainTodayStore {
     });
   }
 
+  async restore(id: string, revisionId?: string, revisionNote?: string): Promise<{
+    entry: TodayEntry;
+    snapshot: TodayDaySnapshot;
+    previousDate: string;
+    drive: DriveSyncResult;
+  }> {
+    return this.enqueue(async () => {
+      await this.ensureLayout();
+      const history = await this.history(id);
+      const current = history.at(-1);
+      if (!current) throw new Error("Entry was not found.");
+      const source = revisionId
+        ? history.find((entry) => entry.revisionId === revisionId)
+        : [...history].reverse().find((entry) => !entry.deletedAt);
+      if (!source) throw new Error("Restorable revision was not found.");
+      if (source.deletedAt) throw new Error("Deleted revision cannot be restored.");
+      if (!current.deletedAt && !revisionId) {
+        const snapshot = await this.rebuildSnapshot(current.date);
+        return { entry: current, snapshot, previousDate: current.date, drive: this.scheduleDateSync(current.date) };
+      }
+
+      const entry: TodayEntry = {
+        ...source,
+        id: current.id,
+        revisionId: randomUUID(),
+        previousRevisionId: current.revisionId,
+        version: current.version + 1,
+        createdAt: current.createdAt,
+        updatedAt: new Date().toISOString(),
+        deletedAt: undefined,
+        revisionNote: cleanText(revisionNote || `v${source.version}から復元`, 240),
+      };
+      await this.appendRevision(entry);
+      if (current.date !== entry.date) await this.rebuildSnapshot(current.date);
+      const snapshot = await this.rebuildSnapshot(entry.date);
+      this.scheduleDateSync(current.date);
+      const drive = this.scheduleDateSync(entry.date);
+      return { entry, snapshot, previousDate: current.date, drive };
+    });
+  }
+
+  async listDeleted(limit = 100): Promise<TodayEntry[]> {
+    await this.ensureLayout();
+    const capped = Math.max(1, Math.min(500, Math.floor(limit)));
+    return (await this.latestEntries())
+      .filter((entry) => Boolean(entry.deletedAt))
+      .sort((left, right) => String(right.deletedAt).localeCompare(String(left.deletedAt)))
+      .slice(0, capped);
+  }
+
   async history(id: string): Promise<TodayEntry[]> {
     await this.ensureLayout();
     const normalizedId = normalizeEntryId(id);

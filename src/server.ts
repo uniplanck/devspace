@@ -902,6 +902,32 @@ function createMcpServer(
   );
 
   server.registerTool(
+    "naobrain_today_restore",
+    {
+      title: "Restore NaoBrain Today entry",
+      description: "Restore a deleted Today entry or revert an active entry to a selected preserved revision. The restore itself is appended as a new version.",
+      inputSchema: {
+        id: z.string().min(1).max(80),
+        revisionId: z.string().max(80).optional(),
+        revisionNote: z.string().max(240).optional(),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
+    },
+    async ({ id, revisionId, revisionNote }) => {
+      const result = await todayStore.restore(id, revisionId, revisionNote);
+      return {
+        content: [textBlock(`NaoBrain Todayへ履歴から復元しました: ${result.entry.title} (v${result.entry.version})`)],
+        structuredContent: { ...result },
+      };
+    },
+  );
+
+  server.registerTool(
     "naobrain_today_history",
     {
       title: "Read NaoBrain Today version history",
@@ -2730,6 +2756,16 @@ export function createServer(config = loadConfig()): RunningServer {
     }
   });
 
+  app.get("/naobrain-today/entries/deleted", async (req, res) => {
+    if (!authorizeToday(req, res)) return;
+    try {
+      const limit = typeof req.query.limit === "string" ? Number(req.query.limit) : 100;
+      res.json({ ok: true, entries: await todayStore.listDeleted(limit) });
+    } catch (error) {
+      res.status(400).json({ ok: false, error: error instanceof Error ? error.message : "request failed" });
+    }
+  });
+
   app.post(
     "/naobrain-today/entries",
     express.json({ limit: "256kb" }),
@@ -2780,6 +2816,27 @@ export function createServer(config = loadConfig()): RunningServer {
         res.json({ ok: true, ...result });
       } catch (error) {
         logEvent(config.logging, "error", "naobrain_today_delete_error", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+        res.status(400).json({ ok: false, error: error instanceof Error ? error.message : "request failed" });
+      }
+    },
+  );
+
+  app.post(
+    "/naobrain-today/entries/restore",
+    express.json({ limit: "32kb" }),
+    async (req, res) => {
+      if (!authorizeToday(req, res)) return;
+      try {
+        const result = await todayStore.restore(
+          String(req.body?.id || ""),
+          req.body?.revisionId ? String(req.body.revisionId) : undefined,
+          req.body?.revisionNote ? String(req.body.revisionNote) : undefined,
+        );
+        res.json({ ok: true, ...result });
+      } catch (error) {
+        logEvent(config.logging, "error", "naobrain_today_restore_error", {
           error: error instanceof Error ? error.message : String(error),
         });
         res.status(400).json({ ok: false, error: error instanceof Error ? error.message : "request failed" });
