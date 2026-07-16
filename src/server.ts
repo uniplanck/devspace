@@ -877,6 +877,31 @@ function createMcpServer(
   );
 
   server.registerTool(
+    "naobrain_today_delete",
+    {
+      title: "Delete NaoBrain Today entry",
+      description: "Hide a Today entry from timelines and analyses while preserving all versions, including the deletion revision, in history.",
+      inputSchema: {
+        id: z.string().min(1).max(80),
+        revisionNote: z.string().max(240).optional(),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
+    },
+    async ({ id, revisionNote }) => {
+      const result = await todayStore.delete(id, revisionNote);
+      return {
+        content: [textBlock(`NaoBrain Todayから非表示にし、削除履歴を保存しました: ${result.entry.title}`)],
+        structuredContent: { ...result },
+      };
+    },
+  );
+
+  server.registerTool(
     "naobrain_today_history",
     {
       title: "Read NaoBrain Today version history",
@@ -2738,6 +2763,23 @@ export function createServer(config = loadConfig()): RunningServer {
         res.json({ ok: true, ...result });
       } catch (error) {
         logEvent(config.logging, "error", "naobrain_today_update_error", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+        res.status(400).json({ ok: false, error: error instanceof Error ? error.message : "request failed" });
+      }
+    },
+  );
+
+  app.post(
+    "/naobrain-today/entries/delete",
+    express.json({ limit: "32kb" }),
+    async (req, res) => {
+      if (!authorizeToday(req, res)) return;
+      try {
+        const result = await todayStore.delete(String(req.body?.id || ""), String(req.body?.revisionNote || ""));
+        res.json({ ok: true, ...result });
+      } catch (error) {
+        logEvent(config.logging, "error", "naobrain_today_delete_error", {
           error: error instanceof Error ? error.message : String(error),
         });
         res.status(400).json({ ok: false, error: error instanceof Error ? error.message : "request failed" });
