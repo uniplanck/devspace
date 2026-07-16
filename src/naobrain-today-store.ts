@@ -9,6 +9,7 @@ import {
   type GeminiKeySettings,
 } from "./naobrain-gemini-client.js";
 import { NaoBrainProjectStore, type TodayProject } from "./naobrain-project-store.js";
+import { NaoBrainTagStore, type TodayTag, type TodayTagKind } from "./naobrain-tag-store.js";
 
 const execFileAsync = promisify(execFile);
 const JST_TIME_ZONE = "Asia/Tokyo";
@@ -139,6 +140,11 @@ export interface TodayAggregateAnalysis {
   automatic: boolean;
 }
 
+export interface TodayTagWithUsage extends TodayTag {
+  usageCount: number;
+  lastUsedAt?: string;
+}
+
 export interface TodayAnalysisInput {
   scope?: TodayAnalysisScope;
   value?: string;
@@ -167,6 +173,7 @@ export interface DriveSyncResult {
 export class NaoBrainTodayStore {
   private readonly config: NaoBrainTodayConfig;
   private readonly projects: NaoBrainProjectStore;
+  private readonly tags: NaoBrainTagStore;
   private readonly gemini: NaoBrainGeminiClient;
   private queue: Promise<unknown> = Promise.resolve();
   private schedulerRunning = false;
@@ -174,6 +181,7 @@ export class NaoBrainTodayStore {
   constructor(config: NaoBrainTodayConfig) {
     this.config = config;
     this.projects = new NaoBrainProjectStore(config.dataDir);
+    this.tags = new NaoBrainTagStore(config.dataDir);
     this.gemini = new NaoBrainGeminiClient({
       primaryApiKey: config.geminiApiKey,
       model: config.geminiModel,
@@ -354,6 +362,50 @@ export class NaoBrainTodayStore {
       const project = await this.projects.delete(id);
       await this.syncMetadataFiles();
       return project;
+    });
+  }
+
+  async listTags(includeDeleted = false): Promise<TodayTagWithUsage[]> {
+    await this.ensureLayout();
+    const entries = await this.latestEntries();
+    await this.tags.ensureFromNames(entries.flatMap((entry) => entry.tags));
+    const usage = new Map<string, { count: number; lastUsedAt?: string }>();
+    for (const entry of entries) {
+      for (const name of entry.tags) {
+        const key = name.toLocaleLowerCase("ja");
+        const current = usage.get(key) || { count: 0 };
+        current.count += 1;
+        if (!current.lastUsedAt || entry.occurredAt > current.lastUsedAt) current.lastUsedAt = entry.occurredAt;
+        usage.set(key, current);
+      }
+    }
+    return (await this.tags.list(includeDeleted)).map((tag) => {
+      const stats = usage.get(tag.name.toLocaleLowerCase("ja"));
+      return { ...tag, usageCount: stats?.count || 0, lastUsedAt: stats?.lastUsedAt };
+    });
+  }
+
+  async createTag(name: string, category?: string, kind?: TodayTagKind): Promise<TodayTag> {
+    return this.enqueue(async () => {
+      const tag = await this.tags.create(name, category, kind);
+      await this.syncMetadataFiles();
+      return tag;
+    });
+  }
+
+  async updateTag(id: string, input: { name: string; category?: string; kind?: TodayTagKind }): Promise<TodayTag> {
+    return this.enqueue(async () => {
+      const tag = await this.tags.update(id, input);
+      await this.syncMetadataFiles();
+      return tag;
+    });
+  }
+
+  async deleteTag(id: string): Promise<TodayTag> {
+    return this.enqueue(async () => {
+      const tag = await this.tags.delete(id);
+      await this.syncMetadataFiles();
+      return tag;
     });
   }
 
@@ -561,6 +613,9 @@ export class NaoBrainTodayStore {
       projectId = found.id;
     }
 
+    const tags = Array.from(new Set((input.tags || []).map((tag) => cleanText(tag, 40)).filter(Boolean))).slice(0, 20);
+    await this.tags.ensureFromNames(tags);
+
     const startAt = normalizeOptionalIsoDate(input.startAt);
     const endAt = normalizeOptionalIsoDate(input.endAt);
     if (startAt && endAt && Date.parse(endAt) < Date.parse(startAt)) {
@@ -574,7 +629,7 @@ export class NaoBrainTodayStore {
       kind: normalizeEnum(input.kind, ["progress", "result", "plan", "journal", "note"] as const, "note"),
       project,
       projectId,
-      tags: Array.from(new Set((input.tags || []).map((tag) => cleanText(tag, 40)).filter(Boolean))).slice(0, 20),
+      tags,
       source: normalizeEnum(input.source, ["web", "gae", "journal", "import"] as const, "gae"),
       occurredAt: input.occurredAt,
       startAt,
@@ -679,11 +734,14 @@ export class NaoBrainTodayStore {
   private async syncMetadataFiles(): Promise<DriveSyncResult> {
     if (!this.config.driveRemote) return { configured: false, synced: false };
     const remoteProjectsRoot = joinRemote(this.config.driveRemote, this.config.driveBasePath, "projects");
+    const remoteTagsRoot = joinRemote(this.config.driveRemote, this.config.driveBasePath, "tags");
     const files = [
       { local: join(this.config.dataDir, "projects", "projects.json"), remote: `${remoteProjectsRoot}/projects.json` },
       { local: join(this.config.dataDir, "projects", "history.jsonl"), remote: `${remoteProjectsRoot}/history.jsonl` },
+      { local: join(this.config.dataDir, "tags", "tags.json"), remote: `${remoteTagsRoot}/tags.json` },
+      { local: join(this.config.dataDir, "tags", "history.jsonl"), remote: `${remoteTagsRoot}/history.jsonl` },
     ];
-    return this.copyFilesToDrive(files, [remoteProjectsRoot]);
+    return this.copyFilesToDrive(files, [remoteProjectsRoot, remoteTagsRoot]);
   }
 
   private async syncAnalysisFiles(analysis: TodayAggregateAnalysis): Promise<DriveSyncResult> {
@@ -743,6 +801,7 @@ export class NaoBrainTodayStore {
       mkdir(join(this.config.dataDir, "history"), { recursive: true }),
       mkdir(join(this.config.dataDir, "analyses"), { recursive: true }),
       mkdir(join(this.config.dataDir, "projects"), { recursive: true }),
+      mkdir(join(this.config.dataDir, "tags"), { recursive: true }),
     ]);
     await this.readPrompt();
     await this.migrateLegacyEntries();
@@ -778,8 +837,10 @@ export class NaoBrainTodayStore {
     }
     await writeFile(marker, `${new Date().toISOString()}\n`, { encoding: "utf8", mode: 0o600 });
 
-    const projectNames = (await this.latestEntries()).map((entry) => entry.project).filter(Boolean);
+    const latestEntries = await this.latestEntries();
+    const projectNames = latestEntries.map((entry) => entry.project).filter(Boolean);
     await this.projects.ensureFromNames(projectNames);
+    await this.tags.ensureFromNames(latestEntries.flatMap((entry) => entry.tags));
   }
 
   private revisionsPath(): string {
