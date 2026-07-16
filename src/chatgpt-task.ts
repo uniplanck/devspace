@@ -13,6 +13,7 @@ import {
   resetPreferredChatGptTaskTarget,
   selectBestAvailableChatGptModel,
   startBrowserSession,
+  submitTrustedChatGptComposer,
   typeBrowserText,
   waitForChatGptResponse,
   type BrowserApprovalRecord,
@@ -29,8 +30,10 @@ export interface ChatGptTaskInput {
   prompt: string;
   url?: string;
   expectedMarker?: string;
+  expectedImageCount?: number;
   timeoutMs?: number;
   closeWhenDone?: boolean;
+  autoSubmit?: boolean;
 }
 
 export interface ChatGptTaskState {
@@ -41,8 +44,10 @@ export interface ChatGptTaskState {
   targetId?: string;
   conversationUrl?: string;
   baselineAssistantCount?: number;
+  baselineImageCount?: number;
   pendingApprovalId?: string;
   responseText?: string;
+  imageUrls?: string[];
   requestedModel?: string;
   selectedModel?: string;
   selectedModelLabel?: string;
@@ -54,7 +59,7 @@ export interface ChatGptTaskState {
 
 export type ChatGptTaskResult =
   | { status: "waiting-approval"; state: ChatGptTaskState; approval: BrowserApprovalRecord }
-  | { status: "succeeded"; state: ChatGptTaskState; responseText: string; conversationUrl: string };
+  | { status: "succeeded"; state: ChatGptTaskState; responseText: string; imageUrls: string[]; conversationUrl: string };
 
 export interface ChatGptTaskRuntime {
   onPhase?: (phase: ChatGptTaskState["phase"], state: ChatGptTaskState) => void;
@@ -89,36 +94,48 @@ export async function runChatGptTask(
   if (!state.targetId) {
     state.phase = "opening";
     runtime.onPhase?.(state.phase, cloneState(state));
-    const interaction = await withBrowserInputLock(async () => {
-      const requestedUrl = input.url ?? DEFAULT_URL;
-      const opened = await acquirePreferredChatGptTaskTarget(prepareChatGptNavigationUrl(requestedUrl));
-      state.targetId = opened.targetId;
-      state.conversationUrl = opened.url;
-      state.reusedPreferredTarget = opened.reusedPreferredTarget;
-      state.requestedModel = new URL(requestedUrl).searchParams.get("model")
-        ?? CHATGPT_MINIMUM_PREFERRED_MODEL;
-      await activateBrowserTarget(state.targetId);
-      await waitForComposer(state.targetId, runtime.shouldStop);
-      const modelSelection: ChatGptModelSelectionResult = await selectBestAvailableChatGptModel({ targetId: state.targetId })
-        .catch((): ChatGptModelSelectionResult => ({
-          status: "url-only" as const,
-          targetId: state.targetId!,
-          currentLabel: "",
-          candidateCount: 0,
-        }));
-      state.modelSelectionStatus = modelSelection.status;
-      state.selectedModel = modelSelection.selectedModel ?? state.requestedModel;
-      state.selectedModelLabel = modelSelection.selectedLabel || modelSelection.currentLabel || state.selectedModel;
-      const before = await waitForComposer(state.targetId, runtime.shouldStop);
-      await focusChatGptComposer({ requireEmpty: true, targetId: state.targetId });
-      await typeBrowserText(input.prompt, undefined, state.targetId);
-      const submission = await pressBrowserKey("Enter", { targetId: state.targetId });
-      const submitted = submission.status === "pressed"
-        ? await waitForSubmittedMessage(state.targetId, before.userCount, runtime.shouldStop)
-        : before;
-      return { before, submission, submitted };
-    }, runtime.shouldStop);
+    let interaction;
+    try {
+      interaction = await withBrowserInputLock(async () => {
+        const requestedUrl = input.url ?? DEFAULT_URL;
+        const opened = await acquirePreferredChatGptTaskTarget(prepareChatGptNavigationUrl(requestedUrl));
+        state.targetId = opened.targetId;
+        state.conversationUrl = opened.url;
+        state.reusedPreferredTarget = opened.reusedPreferredTarget;
+        state.requestedModel = new URL(requestedUrl).searchParams.get("model")
+          ?? CHATGPT_MINIMUM_PREFERRED_MODEL;
+        await activateBrowserTarget(state.targetId);
+        await waitForComposer(state.targetId, runtime.shouldStop);
+        const modelSelection: ChatGptModelSelectionResult = await selectBestAvailableChatGptModel({ targetId: state.targetId })
+          .catch((): ChatGptModelSelectionResult => ({
+            status: "url-only" as const,
+            targetId: state.targetId!,
+            currentLabel: "",
+            candidateCount: 0,
+          }));
+        state.modelSelectionStatus = modelSelection.status;
+        state.selectedModel = modelSelection.selectedModel ?? state.requestedModel;
+        state.selectedModelLabel = modelSelection.selectedLabel || modelSelection.currentLabel || state.selectedModel;
+        const before = await waitForComposer(state.targetId, runtime.shouldStop);
+        await focusChatGptComposer({ requireEmpty: true, targetId: state.targetId });
+        await typeBrowserText(input.prompt, undefined, state.targetId);
+        const submission = input.autoSubmit
+          ? await submitTrustedChatGptComposer({ targetId: state.targetId })
+          : await pressBrowserKey("Enter", { targetId: state.targetId });
+        const submitted = submission.status === "pressed"
+          ? await waitForSubmittedMessage(state.targetId, before.userCount, runtime.shouldStop)
+          : before;
+        return { before, submission, submitted };
+      }, runtime.shouldStop);
+    } catch (error) {
+      if (state.targetId && state.reusedPreferredTarget) {
+        const reset = await resetPreferredChatGptTaskTarget(state.targetId).catch(() => ({ status: "not-preferred" as const }));
+        if (reset.status === "reset") state.tabReset = true;
+      }
+      throw error;
+    }
     state.baselineAssistantCount = interaction.before.assistantCount;
+    state.baselineImageCount = interaction.before.assistantImageUrls.length;
     state.conversationUrl = interaction.submitted.url;
     const submission = interaction.submission;
     state.phase = submission.status === "approval-required" ? "waiting-approval" : "waiting-response";
@@ -137,12 +154,15 @@ export async function runChatGptTask(
   const completed = await waitForChatGptResponse({
     baselineAssistantCount: state.baselineAssistantCount,
     expectedMarker: input.expectedMarker,
+    baselineImageCount: state.baselineImageCount,
+    expectedImageCount: input.expectedImageCount,
     timeoutMs: input.timeoutMs,
     shouldStop: runtime.shouldStop,
     targetId: state.targetId,
   });
   state.phase = "completed";
   state.responseText = completed.lastAssistantText;
+  state.imageUrls = completed.assistantImageUrls.slice(state.baselineImageCount ?? 0);
   state.conversationUrl = completed.url;
   state.pendingApprovalId = undefined;
 
@@ -167,6 +187,7 @@ export async function runChatGptTask(
     status: "succeeded",
     state,
     responseText: completed.lastAssistantText,
+    imageUrls: state.imageUrls,
     conversationUrl: completed.url,
   };
 }
@@ -208,6 +229,10 @@ function validateInput(input: ChatGptTaskInput): ChatGptTaskInput {
   if (expectedMarker && expectedMarker.length > 500) {
     throw new Error("ChatGPT task expected marker must be at most 500 characters.");
   }
+  const expectedImageCount = input.expectedImageCount ?? 0;
+  if (!Number.isInteger(expectedImageCount) || expectedImageCount < 0 || expectedImageCount > 4) {
+    throw new Error("ChatGPT task expectedImageCount must be an integer from 0 to 4.");
+  }
   const timeoutMs = input.timeoutMs ?? 180_000;
   if (!Number.isFinite(timeoutMs) || timeoutMs < 5_000 || timeoutMs > 600_000) {
     throw new Error("ChatGPT task timeoutMs must be from 5000 to 600000.");
@@ -216,8 +241,10 @@ function validateInput(input: ChatGptTaskInput): ChatGptTaskInput {
     prompt,
     url: prepareChatGptTaskUrl(input.url),
     ...(expectedMarker ? { expectedMarker } : {}),
+    ...(expectedImageCount ? { expectedImageCount } : {}),
     timeoutMs,
     closeWhenDone: input.closeWhenDone ?? true,
+    autoSubmit: input.autoSubmit ?? false,
   };
 }
 
@@ -232,8 +259,14 @@ function normalizeState(value?: Partial<ChatGptTaskState>): ChatGptTaskState {
     ...(typeof value?.baselineAssistantCount === "number"
       ? { baselineAssistantCount: value.baselineAssistantCount }
       : {}),
+    ...(typeof value?.baselineImageCount === "number"
+      ? { baselineImageCount: value.baselineImageCount }
+      : {}),
     ...(value?.pendingApprovalId ? { pendingApprovalId: value.pendingApprovalId } : {}),
     ...(value?.responseText ? { responseText: value.responseText } : {}),
+    ...(Array.isArray(value?.imageUrls)
+      ? { imageUrls: value.imageUrls.filter((url): url is string => typeof url === "string") }
+      : {}),
     ...(value?.requestedModel ? { requestedModel: value.requestedModel } : {}),
     ...(value?.selectedModel ? { selectedModel: value.selectedModel } : {}),
     ...(value?.selectedModelLabel ? { selectedModelLabel: value.selectedModelLabel } : {}),

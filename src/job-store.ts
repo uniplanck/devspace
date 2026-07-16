@@ -11,6 +11,7 @@ export const JOB_PRESETS = [
   "runtime-smoke",
   "browser-loop",
   "chatgpt-task",
+  "image-to-drive",
 ] as const;
 
 export type JobPreset = (typeof JOB_PRESETS)[number];
@@ -346,6 +347,7 @@ export function defaultJobTitle(preset: JobPreset): string {
     case "runtime-smoke": return "GPT-Agent runtime smoke";
     case "browser-loop": return "Browser Computer task";
     case "chatgpt-task": return "ChatGPT deterministic task";
+    case "image-to-drive": return "ChatGPT image to Google Drive";
   }
 }
 
