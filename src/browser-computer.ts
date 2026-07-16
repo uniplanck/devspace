@@ -6,7 +6,6 @@ import {
   lstatSync,
   mkdirSync,
   readFileSync,
-  readdirSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -475,65 +474,58 @@ export async function downloadChatGptImages(
   for (const name of names) {
     if (existsSync(join(directory, name))) throw new Error(`Refusing to overwrite existing browser download: ${name}`);
   }
-  const session = await requireActiveSession(home);
-  const browserClient = await CdpClient.connect(
-    `ws://127.0.0.1:${session.port}${session.browserWebSocketPath}`,
-  );
-  try {
-    await browserClient.send("Browser.setDownloadBehavior", {
-      behavior: "allow",
-      downloadPath: directory,
-      eventsEnabled: true,
-    });
-  } finally {
-    browserClient.close();
-  }
-  const payload = urls.map((url, index) => ({ url, fileName: names[index]! }));
-  const targetId = await withPageClient(home, async (client, target) => {
-    const result = await evaluate<{ ok: boolean; error?: string }>(client, `(async () => {
-      try {
-        const files = ${JSON.stringify(payload)};
-        for (const file of files) {
-          const response = await fetch(file.url, { credentials: "include" });
-          if (!response.ok) throw new Error("Image request failed with HTTP " + response.status);
-          const blob = await response.blob();
-          const objectUrl = URL.createObjectURL(blob);
-          const anchor = document.createElement("a");
-          anchor.href = objectUrl;
-          anchor.download = file.fileName;
-          anchor.style.display = "none";
-          document.body.append(anchor);
-          anchor.click();
-          anchor.remove();
-          await new Promise((resolveDelay) => setTimeout(resolveDelay, 250));
-          URL.revokeObjectURL(objectUrl);
+  const files: ChatGptImageDownloadResult["files"] = [];
+  let targetId = input.targetId;
+  for (let index = 0; index < urls.length; index += 1) {
+    const url = urls[index]!;
+    const fileName = names[index]!;
+    const path = join(directory, fileName);
+    const fetched = await withPageClient(home, async (client, target) => {
+      const result = await evaluate<{
+        ok: boolean;
+        status?: number;
+        contentType?: string;
+        base64?: string;
+        error?: string;
+      }>(client, `(async () => {
+        try {
+          const response = await fetch(${JSON.stringify(url)}, {
+            credentials: "include",
+            redirect: "follow",
+            headers: { accept: "image/png,image/*;q=0.9,*/*;q=0.1" }
+          });
+          if (!response.ok) return { ok: false, status: response.status };
+          const contentType = response.headers.get("content-type") || "";
+          const bytes = new Uint8Array(await response.arrayBuffer());
+          let binary = "";
+          const chunkSize = 0x8000;
+          for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+            binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+          }
+          return { ok: true, status: response.status, contentType, base64: btoa(binary) };
+        } catch (error) {
+          return { ok: false, error: String(error?.message || error) };
         }
-        return { ok: true };
-      } catch (error) {
-        return { ok: false, error: String(error?.message || error) };
-      }
-    })()`);
-    if (!result.ok) throw new Error(`ChatGPT image browser download failed: ${result.error ?? "unknown error"}`);
-    return target.id;
-  }, input.targetId);
-  const timeoutMs = Math.min(120_000, Math.max(5_000, input.timeoutMs ?? 60_000));
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const pending = readdirSync(directory).some((name) => name.endsWith(".crdownload"));
-    const complete = names.every((name) => existsSync(join(directory, name)) && statSync(join(directory, name)).size > 0);
-    if (!pending && complete) {
-      return {
-        targetId,
-        files: urls.map((url, index) => {
-          const fileName = names[index]!;
-          const path = join(directory, fileName);
-          return { url, fileName, path, bytes: statSync(path).size };
-        }),
-      };
+      })()`);
+      return { ...result, targetId: target.id };
+    }, targetId);
+    targetId = fetched.targetId;
+    if (!fetched.ok || !fetched.base64) {
+      throw new Error(`ChatGPT image browser fetch failed${fetched.status ? ` with HTTP ${fetched.status}` : ""}: ${fetched.error ?? "missing image data"}.`);
     }
-    await sleep(250);
+    const contentType = fetched.contentType?.toLowerCase() ?? "";
+    if (!contentType.startsWith("image/")) {
+      throw new Error(`ChatGPT image response had unexpected content type: ${contentType || "missing"}.`);
+    }
+    const buffer = Buffer.from(fetched.base64, "base64");
+    if (buffer.length < 8 || !buffer.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) {
+      throw new Error("ChatGPT generated-image response was not a PNG file.");
+    }
+    writeFileSync(path, buffer, { mode: 0o600, flag: "wx" });
+    files.push({ url, fileName, path, bytes: statSync(path).size });
   }
-  throw new Error("Timed out waiting for ChatGPT image downloads to complete.");
+  if (!targetId) throw new Error("ChatGPT image download did not resolve a browser target.");
+  return { targetId, files };
 }
 
 function sanitizeImageFileName(value: string): string {
@@ -1293,6 +1285,55 @@ export async function acquirePreferredChatGptTaskTarget(
   return { ...opened, reusedPreferredTarget: false };
 }
 
+export async function clearChatGptComposer(
+  input: { home?: string; targetId?: string } = {},
+): Promise<{ status: "cleared" | "already-empty"; targetId: string }> {
+  const home = input.home ?? homedir();
+  return await withPageClient(home, async (client, target) => {
+    const result = await evaluate<{ found: boolean; hadText: boolean }>(client, `(() => {
+      const visible = (element) => {
+        const rect = element.getBoundingClientRect();
+        const style = getComputedStyle(element);
+        return rect.width > 1 && rect.height > 1 && style.display !== "none" && style.visibility !== "hidden";
+      };
+      const selectors = [
+        "#prompt-textarea",
+        "[data-testid='composer-input']",
+        "[contenteditable='true'][role='textbox']",
+        "textarea[placeholder]"
+      ];
+      const element = selectors
+        .map((selector) => Array.from(document.querySelectorAll(selector)).find((candidate) => visible(candidate)))
+        .find(Boolean);
+      if (!(element instanceof HTMLElement)) return { found: false, hadText: false };
+      const currentText = String(element.innerText || element.textContent || element.value || "").trim();
+      element.focus();
+      if (element instanceof HTMLTextAreaElement || element instanceof HTMLInputElement) {
+        const prototype = element instanceof HTMLTextAreaElement
+          ? HTMLTextAreaElement.prototype
+          : HTMLInputElement.prototype;
+        const setter = Object.getOwnPropertyDescriptor(prototype, "value")?.set;
+        setter?.call(element, "");
+      } else {
+        element.replaceChildren();
+      }
+      element.dispatchEvent(new InputEvent("input", {
+        bubbles: true,
+        composed: true,
+        inputType: "deleteContentBackward",
+        data: null,
+      }));
+      element.dispatchEvent(new Event("change", { bubbles: true }));
+      return { found: true, hadText: Boolean(currentText) };
+    })()`);
+    if (!result.found) throw new Error("ChatGPT message composer was not found while clearing draft.");
+    return {
+      status: result.hadText ? "cleared" as const : "already-empty" as const,
+      targetId: target.id,
+    };
+  }, input.targetId);
+}
+
 export async function resetPreferredChatGptTaskTarget(
   targetId: string,
   home: string = homedir(),
@@ -1336,6 +1377,16 @@ export async function resetPreferredChatGptTaskTarget(
     || current.assistantCount > 0
   ) return { status: "not-preferred" };
   const model = await selectBestAvailableChatGptModel({ home, targetId }).catch(() => undefined);
+  await sleep(500);
+  await clearChatGptComposer({ home, targetId }).catch(() => undefined);
+  await sleep(250);
+  current = await inspectChatGptConversation(home, targetId);
+  if (current.composerText.trim()) {
+    await clearChatGptComposer({ home, targetId }).catch(() => undefined);
+    await sleep(250);
+    current = await inspectChatGptConversation(home, targetId);
+  }
+  if (current.composerText.trim()) return { status: "not-preferred" };
   const highPreset = model?.currentLabel === "高い"
     || model?.currentLabel === "High"
     || model?.currentLabel.endsWith(" 高い")
@@ -1397,14 +1448,12 @@ export async function submitTrustedChatGptComposer(
   return await withPageClient(home, async (client, target) => {
     const composer = await evaluate<{ valid: boolean; text: string; host: string }>(client, `(() => {
       const host = location.hostname;
-      const element = document.querySelector(
-        "#prompt-textarea,[data-testid='composer-input'],[contenteditable='true'][role='textbox'],textarea[placeholder]"
-      );
+      const active = document.activeElement;
+      const element = active instanceof HTMLElement
+        ? active.closest("#prompt-textarea,[data-testid='composer-input'],[contenteditable='true'][role='textbox'],textarea[placeholder]")
+        : null;
       if (!(element instanceof HTMLElement)) return { valid: false, text: "", host };
       const text = String(element.innerText || element.textContent || element.value || "").trim();
-      const active = document.activeElement;
-      const focused = active === element || (active instanceof Node && element.contains(active));
-      if (!focused) element.focus();
       return {
         valid: (host === "chatgpt.com" || host.endsWith(".chatgpt.com")) && Boolean(text),
         text,
@@ -1448,15 +1497,15 @@ export async function waitForChatGptResponse(
     const imageSignature = latest.assistantImageUrls.slice(baselineImageCount).join("\n");
     const imageReady = expectedImageCount > 0
       && newImageCount >= expectedImageCount
-      && hasExpectedMarker
-      && !latest.generating;
+      && hasExpectedMarker;
     if (imageReady) {
       imageStablePolls = imageSignature === lastImageSignature ? imageStablePolls + 1 : 0;
       stablePolls = 0;
       incompleteStablePolls = 0;
       lastImageSignature = imageSignature;
       lastText = latest.lastAssistantText;
-      if (imageStablePolls >= 1) return latest;
+      const requiredStablePolls = latest.generating ? 4 : 1;
+      if (imageStablePolls >= requiredStablePolls) return latest;
     } else if (expectedImageCount === 0 && hasNewAssistant && latest.lastAssistantText && hasExpectedMarker && !latest.generating) {
       stablePolls = latest.lastAssistantText === lastText ? stablePolls + 1 : 0;
       imageStablePolls = 0;

@@ -227,17 +227,50 @@ async function uploadToDrive(localPath: string, remote: string, remotePath: stri
   const rclone = resolveExecutable("rclone");
   if (!rclone) throw new Error("rclone executable was not found.");
   const destination = `${remote}${remotePath}`;
-  await execFileAsync(rclone, ["copyto", localPath, destination, "--retries", "2", "--low-level-retries", "3"], {
-    timeout: 180_000,
-    maxBuffer: 512 * 1024,
-  });
-  const linkResult = await execFileAsync(rclone, ["link", destination], {
-    timeout: 60_000,
-    maxBuffer: 512 * 1024,
-  });
+  await runRcloneWithRetry(rclone, [
+    "copyto",
+    localPath,
+    destination,
+    "--retries", "5",
+    "--retries-sleep", "10s",
+    "--low-level-retries", "10",
+    "--tpslimit", "8",
+    "--tpslimit-burst", "8",
+  ], 240_000);
+  const linkResult = await runRcloneWithRetry(rclone, [
+    "link",
+    destination,
+    "--tpslimit", "8",
+    "--tpslimit-burst", "8",
+  ], 90_000);
   const link = String(linkResult.stdout).trim().split(/\r?\n/u).find(Boolean);
   if (!link) throw new Error(`Drive upload succeeded but no share link was returned for ${remotePath}.`);
   return link;
+}
+
+async function runRcloneWithRetry(
+  executable: string,
+  args: string[],
+  timeout: number,
+): Promise<{ stdout: string | Buffer; stderr: string | Buffer }> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= 5; attempt += 1) {
+    try {
+      return await execFileAsync(executable, args, {
+        timeout,
+        maxBuffer: 512 * 1024,
+      });
+    } catch (error) {
+      lastError = error;
+      const detail = error instanceof Error
+        ? `${error.message}\n${String((error as Error & { stderr?: unknown }).stderr ?? "")}`
+        : String(error);
+      const retryable = /rateLimitExceeded|quota exceeded|userRateLimitExceeded|HTTP 429|temporar|timeout|connection reset/iu.test(detail);
+      if (!retryable || attempt >= 5) throw error;
+      await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, attempt * 15_000));
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
 }
 
 function assertTransparentQuality(stats: PngAlphaStats): void {
