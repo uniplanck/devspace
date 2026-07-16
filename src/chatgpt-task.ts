@@ -94,37 +94,46 @@ export async function runChatGptTask(
   if (!state.targetId) {
     state.phase = "opening";
     runtime.onPhase?.(state.phase, cloneState(state));
-    const interaction = await withBrowserInputLock(async () => {
-      const requestedUrl = input.url ?? DEFAULT_URL;
-      const opened = await acquirePreferredChatGptTaskTarget(prepareChatGptNavigationUrl(requestedUrl));
-      state.targetId = opened.targetId;
-      state.conversationUrl = opened.url;
-      state.reusedPreferredTarget = opened.reusedPreferredTarget;
-      state.requestedModel = new URL(requestedUrl).searchParams.get("model")
-        ?? CHATGPT_MINIMUM_PREFERRED_MODEL;
-      await activateBrowserTarget(state.targetId);
-      await waitForComposer(state.targetId, runtime.shouldStop);
-      const modelSelection: ChatGptModelSelectionResult = await selectBestAvailableChatGptModel({ targetId: state.targetId })
-        .catch((): ChatGptModelSelectionResult => ({
-          status: "url-only" as const,
-          targetId: state.targetId!,
-          currentLabel: "",
-          candidateCount: 0,
-        }));
-      state.modelSelectionStatus = modelSelection.status;
-      state.selectedModel = modelSelection.selectedModel ?? state.requestedModel;
-      state.selectedModelLabel = modelSelection.selectedLabel || modelSelection.currentLabel || state.selectedModel;
-      const before = await waitForComposer(state.targetId, runtime.shouldStop);
-      await focusChatGptComposer({ requireEmpty: true, targetId: state.targetId });
-      await typeBrowserText(input.prompt, undefined, state.targetId);
-      const submission = input.autoSubmit
-        ? await submitTrustedChatGptComposer({ targetId: state.targetId })
-        : await pressBrowserKey("Enter", { targetId: state.targetId });
-      const submitted = submission.status === "pressed"
-        ? await waitForSubmittedMessage(state.targetId, before.userCount, runtime.shouldStop)
-        : before;
-      return { before, submission, submitted };
-    }, runtime.shouldStop);
+    let interaction;
+    try {
+      interaction = await withBrowserInputLock(async () => {
+        const requestedUrl = input.url ?? DEFAULT_URL;
+        const opened = await acquirePreferredChatGptTaskTarget(prepareChatGptNavigationUrl(requestedUrl));
+        state.targetId = opened.targetId;
+        state.conversationUrl = opened.url;
+        state.reusedPreferredTarget = opened.reusedPreferredTarget;
+        state.requestedModel = new URL(requestedUrl).searchParams.get("model")
+          ?? CHATGPT_MINIMUM_PREFERRED_MODEL;
+        await activateBrowserTarget(state.targetId);
+        await waitForComposer(state.targetId, runtime.shouldStop);
+        const modelSelection: ChatGptModelSelectionResult = await selectBestAvailableChatGptModel({ targetId: state.targetId })
+          .catch((): ChatGptModelSelectionResult => ({
+            status: "url-only" as const,
+            targetId: state.targetId!,
+            currentLabel: "",
+            candidateCount: 0,
+          }));
+        state.modelSelectionStatus = modelSelection.status;
+        state.selectedModel = modelSelection.selectedModel ?? state.requestedModel;
+        state.selectedModelLabel = modelSelection.selectedLabel || modelSelection.currentLabel || state.selectedModel;
+        const before = await waitForComposer(state.targetId, runtime.shouldStop);
+        await focusChatGptComposer({ requireEmpty: true, targetId: state.targetId });
+        await typeBrowserText(input.prompt, undefined, state.targetId);
+        const submission = input.autoSubmit
+          ? await submitTrustedChatGptComposer({ targetId: state.targetId })
+          : await pressBrowserKey("Enter", { targetId: state.targetId });
+        const submitted = submission.status === "pressed"
+          ? await waitForSubmittedMessage(state.targetId, before.userCount, runtime.shouldStop)
+          : before;
+        return { before, submission, submitted };
+      }, runtime.shouldStop);
+    } catch (error) {
+      if (state.targetId && state.reusedPreferredTarget) {
+        const reset = await resetPreferredChatGptTaskTarget(state.targetId).catch(() => ({ status: "not-preferred" as const }));
+        if (reset.status === "reset") state.tabReset = true;
+      }
+      throw error;
+    }
     state.baselineAssistantCount = interaction.before.assistantCount;
     state.baselineImageCount = interaction.before.assistantImageUrls.length;
     state.conversationUrl = interaction.submitted.url;
