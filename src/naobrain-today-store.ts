@@ -167,6 +167,7 @@ export interface NaoBrainTodayConfig {
 export interface DriveSyncResult {
   configured: boolean;
   synced: boolean;
+  queued?: boolean;
   destination?: string;
   error?: string;
 }
@@ -178,6 +179,8 @@ export class NaoBrainTodayStore {
   private readonly gemini: NaoBrainGeminiClient;
   private queue: Promise<unknown> = Promise.resolve();
   private schedulerRunning = false;
+  private driveSyncTask: Promise<void> | null = null;
+  private readonly pendingDriveDates = new Set<string>();
 
   constructor(config: NaoBrainTodayConfig) {
     this.config = config;
@@ -329,7 +332,7 @@ export class NaoBrainTodayStore {
       };
       await this.appendRevision(entry);
       const snapshot = await this.rebuildSnapshot(current.date);
-      const drive = await this.syncDateFiles(current.date);
+      const drive = this.scheduleDateSync(current.date);
       return { entry, snapshot, drive };
     });
   }
@@ -736,6 +739,29 @@ export class NaoBrainTodayStore {
       writeFile(path, content, { encoding: "utf8", mode: 0o600 }),
       writeFile(latest, content, { encoding: "utf8", mode: 0o600 }),
     ]);
+  }
+
+  private scheduleDateSync(date: string): DriveSyncResult {
+    if (!this.config.driveRemote) return { configured: false, synced: false };
+    this.pendingDriveDates.add(date);
+    if (!this.driveSyncTask) {
+      this.driveSyncTask = (async () => {
+        while (this.pendingDriveDates.size > 0) {
+          const dates = Array.from(this.pendingDriveDates);
+          this.pendingDriveDates.clear();
+          for (const pendingDate of dates) await this.syncDateFiles(pendingDate);
+        }
+      })().finally(() => {
+        this.driveSyncTask = null;
+        if (this.pendingDriveDates.size > 0) this.scheduleDateSync(Array.from(this.pendingDriveDates)[0]);
+      });
+    }
+    return {
+      configured: true,
+      synced: false,
+      queued: true,
+      destination: `${redactRemote(this.config.driveRemote)}${this.config.driveBasePath}`,
+    };
   }
 
   private async syncDates(dates: string[]): Promise<DriveSyncResult> {
