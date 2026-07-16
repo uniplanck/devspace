@@ -89,6 +89,7 @@ export interface TodayEntry {
   endApproximate: boolean;
   createdAt: string;
   updatedAt: string;
+  deletedAt?: string;
   revisionNote?: string;
   title: string;
   body: string;
@@ -250,6 +251,7 @@ export class NaoBrainTodayStore {
       await this.ensureLayout();
       const current = await this.latestEntry(input.id);
       if (!current) throw new Error("Entry was not found.");
+      if (current.deletedAt) throw new Error("Deleted entries cannot be edited.");
 
       const merged: TodayEntryInput = {
         title: input.title ?? current.title,
@@ -300,6 +302,35 @@ export class NaoBrainTodayStore {
       const snapshot = current.date === date ? await this.list(date) : await this.rebuildSnapshot(date);
       const drive = await this.syncDates(Array.from(new Set([current.date, date])));
       return { entry, snapshot, previousDate: current.date, drive };
+    });
+  }
+
+  async delete(id: string, revisionNote?: string): Promise<{
+    entry: TodayEntry;
+    snapshot: TodayDaySnapshot;
+    drive: DriveSyncResult;
+  }> {
+    return this.enqueue(async () => {
+      await this.ensureLayout();
+      const current = await this.latestEntry(id);
+      if (!current) throw new Error("Entry was not found.");
+      if (current.deletedAt) throw new Error("Entry is already deleted.");
+      const now = new Date().toISOString();
+      const entry: TodayEntry = {
+        ...current,
+        revisionId: randomUUID(),
+        previousRevisionId: current.revisionId,
+        version: current.version + 1,
+        updatedAt: now,
+        deletedAt: now,
+        revisionNote: cleanText(revisionNote || "記録を削除", 240),
+        ai: undefined,
+        aiError: undefined,
+      };
+      await this.appendRevision(entry);
+      const snapshot = await this.rebuildSnapshot(current.date);
+      const drive = await this.syncDateFiles(current.date);
+      return { entry, snapshot, drive };
     });
   }
 
@@ -367,7 +398,7 @@ export class NaoBrainTodayStore {
 
   async listTags(includeDeleted = false): Promise<TodayTagWithUsage[]> {
     await this.ensureLayout();
-    const entries = await this.latestEntries();
+    const entries = (await this.latestEntries()).filter((entry) => !entry.deletedAt);
     await this.tags.ensureFromNames(entries.flatMap((entry) => entry.tags));
     const usage = new Map<string, { count: number; lastUsedAt?: string }>();
     for (const entry of entries) {
@@ -488,7 +519,7 @@ export class NaoBrainTodayStore {
     const dateTo = normalizeDateOnly(input.dateTo || (scope === "day" && value ? value : today));
     if (dateFrom > dateTo) throw new Error("dateFrom must be before dateTo.");
 
-    const allEntries = await this.latestEntries();
+    const allEntries = (await this.latestEntries()).filter((entry) => !entry.deletedAt);
     const entries = allEntries.filter((entry) => {
       if (entry.date < dateFrom || entry.date > dateTo) return false;
       if (scope === "all") return true;
@@ -679,7 +710,7 @@ export class NaoBrainTodayStore {
   private async rebuildSnapshot(date: string): Promise<TodayDaySnapshot> {
     const normalizedDate = normalizeDateOnly(date);
     const entries = (await this.latestEntries())
-      .filter((entry) => entry.date === normalizedDate)
+      .filter((entry) => !entry.deletedAt && entry.date === normalizedDate)
       .sort((left, right) => left.occurredAt.localeCompare(right.occurredAt) || left.createdAt.localeCompare(right.createdAt));
     const snapshot = buildSnapshot(normalizedDate, entries);
     await Promise.all([
@@ -837,7 +868,7 @@ export class NaoBrainTodayStore {
     }
     await writeFile(marker, `${new Date().toISOString()}\n`, { encoding: "utf8", mode: 0o600 });
 
-    const latestEntries = await this.latestEntries();
+    const latestEntries = (await this.latestEntries()).filter((entry) => !entry.deletedAt);
     const projectNames = latestEntries.map((entry) => entry.project).filter(Boolean);
     await this.projects.ensureFromNames(projectNames);
     await this.tags.ensureFromNames(latestEntries.flatMap((entry) => entry.tags));
@@ -884,6 +915,7 @@ function normalizeStoredEntry(value: unknown): TodayEntry {
     endApproximate: raw.endApproximate === true,
     createdAt,
     updatedAt,
+    deletedAt: normalizeOptionalIsoDate(raw.deletedAt),
     revisionNote: cleanText(raw.revisionNote || "", 240) || undefined,
     title: cleanText(raw.title || "無題", 140),
     body: cleanText(raw.body || "", 8_000),

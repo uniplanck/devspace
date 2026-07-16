@@ -56,7 +56,7 @@ try {
   assert.equal(history[0].title, "LP構成を確定");
   assert.equal(history[1].title, "LP構成とCTAを確定");
 
-  await store.append({
+  const planned = await store.append({
     title: "明日の公開前QA",
     body: "SP幅390pxで見切れを確認する。",
     status: "planned",
@@ -69,6 +69,15 @@ try {
   const snapshot = await store.list("2026-07-14");
   assert.equal(snapshot.summary.total, 1);
   assert.deepEqual(snapshot.entries.map((entry) => entry.title), ["LP構成とCTAを確定"]);
+
+  const deleted = await store.delete(planned.entry.id, "予定を取り消し");
+  assert.equal(deleted.entry.version, 2);
+  assert.ok(deleted.entry.deletedAt);
+  assert.equal(deleted.snapshot.summary.total, 0);
+  const deletedHistory = await store.history(planned.entry.id);
+  assert.equal(deletedHistory.length, 2);
+  assert.equal(deletedHistory[1].revisionNote, "予定を取り消し");
+  await assert.rejects(() => store.update({ id: planned.entry.id, title: "復活", runAi: false }), /Deleted entries cannot be edited/);
 
   const projects = await store.listProjects();
   assert.equal(projects.length, 1);
