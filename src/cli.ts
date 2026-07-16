@@ -655,7 +655,11 @@ async function runJobsStart(args: string[]): Promise<void> {
   const title = readJobsOption(args, "--title");
   const input = presetValue === "browser-loop"
     ? readBrowserLoopJobInput(args)
-    : presetValue === "chatgpt-task" ? readChatGptTaskJobInput(args) : undefined;
+    : presetValue === "chatgpt-task"
+      ? readChatGptTaskJobInput(args)
+      : presetValue === "image-to-drive"
+        ? readImageToDriveJobInput(args)
+        : undefined;
   const config = loadConfig();
   const record = startJob(config, {
     workspaceId: process.env.DEVSPACE_WORKSPACE_ID || undefined,
@@ -734,6 +738,11 @@ function readChatGptTaskJobInput(args: string[]): Record<string, unknown> {
   if (!prompt) throw new Error("ChatGPT task jobs require --prompt <prompt>.");
   const url = readJobsOption(args, "--url");
   const expectedMarker = readJobsOption(args, "--expect");
+  const expectedImagesValue = readJobsOption(args, "--images");
+  const expectedImageCount = expectedImagesValue === undefined ? undefined : Number(expectedImagesValue);
+  if (expectedImageCount !== undefined && (!Number.isInteger(expectedImageCount) || expectedImageCount < 1 || expectedImageCount > 4)) {
+    throw new Error("--images must be an integer from 1 to 4.");
+  }
   const timeoutSecondsValue = readJobsOption(args, "--timeout-seconds");
   const timeoutSeconds = timeoutSecondsValue === undefined ? undefined : Number(timeoutSecondsValue);
   if (timeoutSeconds !== undefined && (!Number.isFinite(timeoutSeconds) || timeoutSeconds < 5 || timeoutSeconds > 600)) {
@@ -743,7 +752,38 @@ function readChatGptTaskJobInput(args: string[]): Record<string, unknown> {
     prompt,
     ...(url ? { url } : {}),
     ...(expectedMarker ? { expectedMarker } : {}),
+    ...(expectedImageCount === undefined ? {} : { expectedImageCount }),
     ...(timeoutSeconds === undefined ? {} : { timeoutMs: Math.round(timeoutSeconds * 1000) }),
+    closeWhenDone: !args.includes("--keep-tab"),
+    autoSubmit: args.includes("--auto-submit"),
+  };
+}
+
+function readImageToDriveJobInput(args: string[]): Record<string, unknown> {
+  const prompt = readJobsOption(args, "--prompt");
+  if (!prompt) throw new Error("Image-to-Drive jobs require --prompt <prompt>.");
+  const countValue = readJobsOption(args, "--count");
+  const count = countValue === undefined ? 1 : Number(countValue);
+  if (!Number.isInteger(count) || count < 1 || count > 4) throw new Error("--count must be an integer from 1 to 4.");
+  const timeoutSecondsValue = readJobsOption(args, "--timeout-seconds");
+  const timeoutSeconds = timeoutSecondsValue === undefined ? undefined : Number(timeoutSecondsValue);
+  if (timeoutSeconds !== undefined && (!Number.isFinite(timeoutSeconds) || timeoutSeconds < 30 || timeoutSeconds > 600)) {
+    throw new Error("--timeout-seconds must be from 30 to 600 for image-to-drive.");
+  }
+  const driveRemote = readJobsOption(args, "--drive-remote");
+  const drivePath = readJobsOption(args, "--drive-path");
+  const filePrefix = readJobsOption(args, "--file-prefix");
+  const url = readJobsOption(args, "--url");
+  return {
+    prompt,
+    count,
+    transparent: args.includes("--transparent"),
+    ...(driveRemote ? { driveRemote } : {}),
+    ...(drivePath ? { drivePath } : {}),
+    ...(filePrefix ? { filePrefix } : {}),
+    ...(url ? { url } : {}),
+    ...(timeoutSeconds === undefined ? {} : { timeoutMs: Math.round(timeoutSeconds * 1000) }),
+    autoSubmit: !args.includes("--manual-submit"),
     closeWhenDone: !args.includes("--keep-tab"),
   };
 }
@@ -798,7 +838,8 @@ function printJobsHelp(): void {
     "Usage:",
     "  devspace jobs start <preset> [--title <title>]",
     "  devspace jobs start browser-loop --goal <goal> --provider <non-codex-provider> [--max-steps <1-60>] [--model <model>] [--download-group <group>]",
-    "  devspace jobs start chatgpt-task --prompt <prompt> [--url <chat-url>] [--expect <marker>] [--timeout-seconds <5-600>] [--keep-tab]",
+    "  devspace jobs start chatgpt-task --prompt <prompt> [--url <chat-url>] [--expect <marker>] [--images <1-4>] [--auto-submit] [--timeout-seconds <5-600>] [--keep-tab]",
+    "  devspace jobs start image-to-drive --prompt <prompt> [--count <1-4>] [--transparent] [--drive-remote <remote:>] [--drive-path <path>] [--file-prefix <name>] [--manual-submit] [--keep-tab]",
     "  devspace jobs ls [--all] [--json]",
     "  devspace jobs show <id> [--events] [--json]",
     "  devspace jobs cancel <id>",
