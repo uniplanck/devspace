@@ -1,7 +1,12 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
-import { compactDuration, compactYenRange, getCurrentChatExecutionCostSnapshot } from "./usage-meter.js";
+import {
+  compactDuration,
+  compactYenRange,
+  getCurrentChatExecutionCostSnapshot,
+  getExecutionCostSnapshot,
+} from "./usage-meter.js";
 
 export type ChatProgressStatus = "running" | "paused" | "completed" | "failed";
 export type EstimateSource = "provided" | "history" | "progress" | "blended" | "none";
@@ -46,11 +51,31 @@ export interface ChatProgressRecord {
   estimatedTotalSeconds?: number;
   remainingSeconds?: number;
   estimateSource: EstimateSource;
+  usageScope: "conversation" | "task-fallback";
   sessionObservedTokens: number;
+  sessionInputTokens: number;
+  sessionOutputTokens: number;
+  sessionToolDurationMs: number;
+  sessionCalls: number;
+  sessionErrors: number;
   sessionEstimatedUsd: number;
   sessionEstimatedJpy: number;
   sessionEstimatedUsdMax?: number;
   sessionEstimatedJpyMax?: number;
+  baselineInputTokens: number;
+  baselineOutputTokens: number;
+  baselineToolDurationMs: number;
+  baselineCalls: number;
+  baselineErrors: number;
+  baselineEstimatedJpy: number;
+  baselineEstimatedJpyMax: number;
+  taskInputTokens: number;
+  taskOutputTokens: number;
+  taskToolDurationMs: number;
+  taskCalls: number;
+  taskErrors: number;
+  taskEstimatedJpy: number;
+  taskEstimatedJpyMax: number;
   pricingModel: "gpt-5.6-sol";
   usdJpyRate: number;
 }
@@ -124,9 +149,7 @@ function recordId(input: ChatProgressInput): string {
   if (conversation) {
     return `chat_${conversation.replace(/[^A-Za-z0-9_-]/gu, "_").slice(0, 120)}`;
   }
-  const session = sanitizeText(input.sessionId, 120);
-  if (session) return `chat_${session.replace(/[^A-Za-z0-9_-]/gu, "_").slice(0, 96)}`;
-  const fallback = `${input.workspaceId ?? "global"}:${normalizeKey(input.chatLabel)}`;
+  const fallback = normalizeKey(input.chatLabel) || sanitizeText(input.sessionId, 120, "global");
   let hash = 2166136261;
   for (const character of fallback) {
     hash ^= character.codePointAt(0) ?? 0;
@@ -139,6 +162,12 @@ function elapsedSeconds(startedAt: string, now: Date): number {
   const started = Date.parse(startedAt);
   if (!Number.isFinite(started)) return 0;
   return Math.max(0, Math.round((now.getTime() - started) / 1000));
+}
+
+function nonNegativeDelta(current: number, baseline: number | undefined): number {
+  const normalizedCurrent = Number.isFinite(current) ? current : 0;
+  const normalizedBaseline = Number.isFinite(baseline) ? Number(baseline) : normalizedCurrent;
+  return Math.max(0, normalizedCurrent - normalizedBaseline);
 }
 
 function median(values: number[]): number | undefined {
@@ -222,14 +251,32 @@ export function updateChatProgress(input: ChatProgressInput): ChatProgressRecord
     priorTotalSeconds: existing?.estimatedTotalSeconds,
     priorSource: existing?.estimateSource,
   });
-  const cost = getCurrentChatExecutionCostSnapshot();
+  const conversationId = sanitizeText(input.conversationId, 160) || existing?.conversationId;
+  const usageScope = conversationId ? "conversation" : "task-fallback";
+  const cost = usageScope === "conversation"
+    ? getCurrentChatExecutionCostSnapshot()
+    : getExecutionCostSnapshot();
+  const baselineInputTokens = existing?.baselineInputTokens ?? cost.inputTokens;
+  const baselineOutputTokens = existing?.baselineOutputTokens ?? cost.outputTokens;
+  const baselineToolDurationMs = existing?.baselineToolDurationMs ?? cost.totalDurationMs;
+  const baselineCalls = existing?.baselineCalls ?? cost.calls;
+  const baselineErrors = existing?.baselineErrors ?? cost.errors;
+  const baselineEstimatedJpy = existing?.baselineEstimatedJpy ?? cost.estimatedJpy;
+  const baselineEstimatedJpyMax = existing?.baselineEstimatedJpyMax ?? cost.estimatedJpyMax;
+  const taskInputTokens = nonNegativeDelta(cost.inputTokens, baselineInputTokens);
+  const taskOutputTokens = nonNegativeDelta(cost.outputTokens, baselineOutputTokens);
+  const taskToolDurationMs = nonNegativeDelta(cost.totalDurationMs, baselineToolDurationMs);
+  const taskCalls = nonNegativeDelta(cost.calls, baselineCalls);
+  const taskErrors = nonNegativeDelta(cost.errors, baselineErrors);
+  const taskEstimatedJpy = nonNegativeDelta(cost.estimatedJpy, baselineEstimatedJpy);
+  const taskEstimatedJpyMax = nonNegativeDelta(cost.estimatedJpyMax, baselineEstimatedJpyMax);
   const finishedAt = status === "completed" || status === "failed"
     ? now.toISOString()
     : undefined;
   const record: ChatProgressRecord = {
     id,
     sessionId: sanitizeText(input.sessionId, 120, existing?.sessionId ?? "local"),
-    conversationId: sanitizeText(input.conversationId, 160) || existing?.conversationId,
+    conversationId,
     conversationUrl: sanitizeText(input.conversationUrl, 500) || existing?.conversationUrl,
     chatLabel: sanitizeText(input.chatLabel, 160, "GPT-Agent task"),
     workspaceId: sanitizeText(input.workspaceId, 160) || existing?.workspaceId,
@@ -251,11 +298,31 @@ export function updateChatProgress(input: ChatProgressInput): ChatProgressRecord
       ? undefined
       : Math.max(0, estimate.total - elapsed),
     estimateSource: status === "completed" ? "progress" : estimate.source,
-    sessionObservedTokens: cost.observedTokens,
-    sessionEstimatedUsd: cost.estimatedUsd,
-    sessionEstimatedJpy: cost.estimatedJpy,
-    sessionEstimatedUsdMax: cost.estimatedUsdMax,
-    sessionEstimatedJpyMax: cost.estimatedJpyMax,
+    usageScope,
+    sessionObservedTokens: usageScope === "conversation" ? cost.observedTokens : taskInputTokens + taskOutputTokens,
+    sessionInputTokens: usageScope === "conversation" ? cost.inputTokens : taskInputTokens,
+    sessionOutputTokens: usageScope === "conversation" ? cost.outputTokens : taskOutputTokens,
+    sessionToolDurationMs: usageScope === "conversation" ? cost.totalDurationMs : taskToolDurationMs,
+    sessionCalls: usageScope === "conversation" ? cost.calls : taskCalls,
+    sessionErrors: usageScope === "conversation" ? cost.errors : taskErrors,
+    sessionEstimatedUsd: usageScope === "conversation" ? cost.estimatedUsd : 0,
+    sessionEstimatedJpy: usageScope === "conversation" ? cost.estimatedJpy : taskEstimatedJpy,
+    sessionEstimatedUsdMax: usageScope === "conversation" ? cost.estimatedUsdMax : 0,
+    sessionEstimatedJpyMax: usageScope === "conversation" ? cost.estimatedJpyMax : taskEstimatedJpyMax,
+    baselineInputTokens,
+    baselineOutputTokens,
+    baselineToolDurationMs,
+    baselineCalls,
+    baselineErrors,
+    baselineEstimatedJpy,
+    baselineEstimatedJpyMax,
+    taskInputTokens,
+    taskOutputTokens,
+    taskToolDurationMs,
+    taskCalls,
+    taskErrors,
+    taskEstimatedJpy,
+    taskEstimatedJpyMax,
     pricingModel: cost.pricingModel,
     usdJpyRate: cost.usdJpyRate,
   };
@@ -303,6 +370,35 @@ export function formatChatProgressResult(record: ChatProgressRecord): string {
     record.sessionEstimatedJpy,
     record.sessionEstimatedJpyMax ?? record.sessionEstimatedJpy,
   );
+  const taskCost = compactYenRange(record.taskEstimatedJpy, record.taskEstimatedJpyMax);
+  const sessionCost = compactYenRange(
+    record.sessionEstimatedJpy,
+    record.sessionEstimatedJpyMax ?? record.sessionEstimatedJpy,
+  );
+  const cumulativeLabel = record.usageScope === "conversation"
+    ? `このChat内の${label}累計`
+    : `このタスク内の${label}累計`;
+  const scopeNote = record.usageScope === "conversation"
+    ? ""
+    : " Chat会話IDが渡されない経路では、同じchatLabelのタスク開始時点から集計します。";
+  const finalExecutionInformation = record.status === "completed" || record.status === "failed"
+    ? [
+        "",
+        `**${label} · 最終実行情報（GPT-5.6 API換算）**`,
+        "",
+        `| 指標 | 今回 | ${cumulativeLabel} |`,
+        "|---|---:|---:|",
+        `| 作業経過時間 | ${elapsed} | — |`,
+        `| MCP処理時間 | ${compactDuration(record.taskToolDurationMs)} | ${compactDuration(record.sessionToolDurationMs)} |`,
+        `| 入力推定 | 約${record.taskInputTokens.toLocaleString("ja-JP")} tok | 約${record.sessionInputTokens.toLocaleString("ja-JP")} tok |`,
+        `| 出力推定 | 約${record.taskOutputTokens.toLocaleString("ja-JP")} tok | 約${record.sessionOutputTokens.toLocaleString("ja-JP")} tok |`,
+        `| 推定費用 | ${taskCost} | ${sessionCost} |`,
+        `| ツール呼出 | ${record.taskCalls} | ${record.sessionCalls} |`,
+        `| エラー | ${record.taskErrors} | ${record.sessionErrors} |`,
+        "",
+        `※ ${label}のMCP入出力をGPT-5.6 API料金へ換算した参考値です。GAG/GAE利用自体の請求額やChatGPT本体の全token数ではありません。${scopeNote}`,
+      ]
+    : [];
 
   return [
     `**${label} · 実行状況**`,
@@ -320,5 +416,6 @@ export function formatChatProgressResult(record: ChatProgressRecord): string {
     `| 推定費用 | ${estimatedCost} |`,
     "",
     "※ 推定費用はGAG/GAEのMCP入出力をGPT-5.6 API料金へ換算した参考値です。ChatGPT本体の請求額ではありません。",
+    ...finalExecutionInformation,
   ].join("\n");
 }
