@@ -204,7 +204,7 @@ interface ToolLogFields {
 }
 
 function serverInstructions(config: ServerConfig): string {
-  const progressInstruction = ` For any task expected to use two or more workspace tools or take more than thirty seconds, call ${toolNames.reportProgress} before the first substantive workspace action with a short chatLabel, overallProgress 0, the current task, and an initial estimateMinutes. Update it at meaningful milestones and call it again with status completed or failed before the final response. The ${toolNames.reportProgress} result is the canonical fixed-format progress update: do not paraphrase it, rename its fields, reorder its rows, or replace it with free-form progress narration. Keep raw tool narration out of the user-facing response. After the completion progress call, the final user-facing response must always use exactly these headings in this order: \"## 完了結果\", \"## 変更\", \"## 検証\", \"## 残り\", and \"## 実行情報\". Never rename or omit a heading; write \"なし\" when a section has no content. Under \"## 実行情報\", report overall progress, elapsed time, estimated input/output tokens, and the GPT-5.6 API-conversion yen estimate using the latest returned values, and explicitly state that the estimate covers GAG/GAE MCP tool traffic rather than the full Chat or ChatGPT billing.`;
+  const progressInstruction = ` MCP cards and raw tool results are implementation details and must never be the only place where user-facing status appears. Before the first substantive GAG/GAE workspace action in every multi-step or file-changing task, send a normal visible commentary message containing an initial time estimate and progress 0%. When ${toolNames.reportProgress} is available, call it at start, meaningful milestones, and completion, then copy its returned Markdown verbatim into a normal visible commentary message; do not rely on the tool card being visible. When ${toolNames.reportProgress} is unavailable, provide the same visible status fields manually and continue rather than omitting progress. Send another visible progress update after roughly two to three workspace calls or fifteen seconds when work continues. Before the final response, call ${toolNames.reportProgress} with status completed or failed when available. The final user-facing response must always use exactly these headings in this order: \"## 完了結果\", \"## 変更\", \"## 検証\", \"## 残り\", and \"## 実行情報\". Never rename or omit a heading; write \"なし\" when a section has no content. Under \"## 実行情報\", paste the completed progress result's final execution table verbatim. If the progress tool is unavailable, reproduce the latest GAG/GAE usage values in a table with task elapsed time, MCP processing time, estimated input/output tokens for this task and this Chat, GPT-5.6 API-conversion yen estimate, tool calls, and errors. Explicitly state that GAG/GAE use is free under the user's current route and that the price is only an API-equivalent estimate, not ChatGPT billing.`;
   const showChangesInstruction =
     config.widgets === "changes"
       ? " If the turn successfully modifies files by creating, editing, overwriting, deleting, moving, or applying patches, call show_changes exactly once for that workspace after the final related file change and before your final response so the user can inspect the aggregate diff for that turn. Do not call it after every individual file change; do not skip it because individual file-change tools already returned diffs."
@@ -1238,6 +1238,16 @@ function createMcpServer(
         currentProgress: z.number(),
         elapsedSeconds: z.number(),
         remainingSeconds: z.number().optional(),
+        taskInputTokens: z.number(),
+        taskOutputTokens: z.number(),
+        sessionInputTokens: z.number(),
+        sessionOutputTokens: z.number(),
+        taskToolDurationMs: z.number(),
+        sessionToolDurationMs: z.number(),
+        taskCalls: z.number(),
+        sessionCalls: z.number(),
+        taskErrors: z.number(),
+        sessionErrors: z.number(),
         estimatedJpy: z.number(),
         estimatedJpyMax: z.number(),
       },
@@ -1281,6 +1291,16 @@ function createMcpServer(
           currentProgress: record.currentProgress,
           elapsedSeconds: record.elapsedSeconds,
           remainingSeconds: record.remainingSeconds,
+          taskInputTokens: record.taskInputTokens,
+          taskOutputTokens: record.taskOutputTokens,
+          sessionInputTokens: record.sessionInputTokens,
+          sessionOutputTokens: record.sessionOutputTokens,
+          taskToolDurationMs: record.taskToolDurationMs,
+          sessionToolDurationMs: record.sessionToolDurationMs,
+          taskCalls: record.taskCalls,
+          sessionCalls: record.sessionCalls,
+          taskErrors: record.taskErrors,
+          sessionErrors: record.sessionErrors,
           estimatedJpy: record.sessionEstimatedJpy,
           estimatedJpyMax: record.sessionEstimatedJpyMax ?? record.sessionEstimatedJpy,
         },
