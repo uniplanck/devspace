@@ -17,6 +17,7 @@ export interface ServerConfig {
   host: string;
   port: number;
   oauth: OAuthConfig;
+  internalMcpSecret: string | null;
   allowedRoots: string[];
   allowedHosts: string[];
   publicBaseUrl: string;
@@ -336,6 +337,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     host,
     port,
     oauth: parseOAuthConfig(env, files.auth.ownerToken),
+    internalMcpSecret: loadOptionalSecret(
+      env,
+      "DEVSPACE_INTERNAL_MCP_SECRET",
+      "DEVSPACE_INTERNAL_MCP_SECRET_FILE",
+    ),
     allowedRoots: parseAllowedRoots(env.DEVSPACE_ALLOWED_ROOTS ?? files.config.allowedRoots),
     allowedHosts: parseAllowedHosts(env.DEVSPACE_ALLOWED_HOSTS, derivedAllowedHosts),
     publicBaseUrl,

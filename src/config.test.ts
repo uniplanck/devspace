@@ -21,6 +21,18 @@ assert.equal(loadConfig(baseEnv).builtinProfiles, false);
 assert.equal(loadConfig(baseEnv).designAudit, false);
 assert.deepEqual(loadConfig(baseEnv).designAuditAllowedHosts, ["localhost", "127.0.0.1", "::1"]);
 assert.equal(loadConfig(baseEnv).widgets, "off");
+assert.equal(loadConfig(baseEnv).internalMcpSecret, null);
+assert.equal(
+  loadConfig({
+    ...baseEnv,
+    DEVSPACE_INTERNAL_MCP_SECRET: "internal-mcp-secret-that-is-long-enough",
+  }).internalMcpSecret,
+  "internal-mcp-secret-that-is-long-enough",
+);
+assert.throws(
+  () => loadConfig({ ...baseEnv, DEVSPACE_INTERNAL_MCP_SECRET: "too-short" }),
+  /DEVSPACE_INTERNAL_MCP_SECRET must be at least 32 characters long/,
+);
 assert.equal(
   loadConfig({ ...baseEnv, DEVSPACE_OPEN_WORKSPACE_PAYLOAD: "full" }).widgets,
   "off",
