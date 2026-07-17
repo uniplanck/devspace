@@ -2888,6 +2888,17 @@ export function createServer(config = loadConfig()): RunningServer {
       if (!authorizeToday(req, res)) return;
       try {
         const action = String(req.body?.action || "create");
+        if (action === "save-all") {
+          const rawTags = Array.isArray(req.body?.tags) ? req.body.tags : [];
+          const tags = await todayStore.saveTags(rawTags.map((rawTag: Record<string, unknown>) => ({
+            id: rawTag.id ? String(rawTag.id) : undefined,
+            name: String(rawTag.name || ""),
+            category: String(rawTag.category || ""),
+            kind: rawTag.kind === "person" ? "person" : "general",
+          })));
+          res.json({ ok: true, tags, savedCount: tags.length });
+          return;
+        }
         const kind = req.body?.kind === "person" ? "person" : "general";
         const tag = action === "update"
           ? await todayStore.updateTag(String(req.body?.id || ""), {

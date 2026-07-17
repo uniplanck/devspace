@@ -9,7 +9,7 @@ import {
   type GeminiKeySettings,
 } from "./naobrain-gemini-client.js";
 import { NaoBrainProjectStore, type TodayProject } from "./naobrain-project-store.js";
-import { NaoBrainTagStore, type TodayTag, type TodayTagKind } from "./naobrain-tag-store.js";
+import { NaoBrainTagStore, type TodayTag, type TodayTagDraft, type TodayTagKind } from "./naobrain-tag-store.js";
 
 const execFileAsync = promisify(execFile);
 const JST_TIME_ZONE = "Asia/Tokyo";
@@ -180,7 +180,9 @@ export class NaoBrainTodayStore {
   private queue: Promise<unknown> = Promise.resolve();
   private schedulerRunning = false;
   private driveSyncTask: Promise<void> | null = null;
+  private metadataSyncTask: Promise<void> | null = null;
   private readonly pendingDriveDates = new Set<string>();
+  private readonly aiTasks = new Set<string>();
 
   constructor(config: NaoBrainTodayConfig) {
     this.config = config;
@@ -207,7 +209,7 @@ export class NaoBrainTodayStore {
     };
   }
 
-  async append(input: TodayEntryInput): Promise<{ entry: TodayEntry; snapshot: TodayDaySnapshot; drive: DriveSyncResult }> {
+  async append(input: TodayEntryInput): Promise<{ entry: TodayEntry; snapshot: TodayDaySnapshot; drive: DriveSyncResult; aiQueued: boolean }> {
     return this.enqueue(async () => {
       await this.ensureLayout();
       const normalized = await this.normalizeInput(input);
@@ -236,11 +238,11 @@ export class NaoBrainTodayStore {
         source: normalized.source,
       };
 
-      await this.applyAi(entry, normalized.runAi);
       await this.appendRevision(entry);
       const snapshot = await this.rebuildSnapshot(date);
-      const drive = await this.syncDateFiles(date);
-      return { entry, snapshot, drive };
+      const drive = this.scheduleDateSync(date);
+      if (normalized.runAi) this.scheduleAiEnrichment(entry.id, entry.revisionId);
+      return { entry, snapshot, drive, aiQueued: normalized.runAi };
     });
   }
 
@@ -249,6 +251,7 @@ export class NaoBrainTodayStore {
     snapshot: TodayDaySnapshot;
     previousDate: string;
     drive: DriveSyncResult;
+    aiQueued: boolean;
   }> {
     return this.enqueue(async () => {
       await this.ensureLayout();
@@ -299,12 +302,14 @@ export class NaoBrainTodayStore {
         ai: undefined,
         aiError: undefined,
       };
-      await this.applyAi(entry, input.runAi !== false);
       await this.appendRevision(entry);
       await this.rebuildSnapshot(current.date);
       const snapshot = current.date === date ? await this.list(date) : await this.rebuildSnapshot(date);
-      const drive = await this.syncDates(Array.from(new Set([current.date, date])));
-      return { entry, snapshot, previousDate: current.date, drive };
+      for (const pendingDate of new Set([current.date, date])) this.scheduleDateSync(pendingDate);
+      const drive = this.scheduleDateSync(date);
+      const aiQueued = input.runAi !== false;
+      if (aiQueued) this.scheduleAiEnrichment(entry.id, entry.revisionId);
+      return { entry, snapshot, previousDate: current.date, drive, aiQueued };
     });
   }
 
@@ -424,7 +429,7 @@ export class NaoBrainTodayStore {
   async createProject(name: string): Promise<TodayProject> {
     return this.enqueue(async () => {
       const project = await this.projects.create(name);
-      await this.syncMetadataFiles();
+      this.scheduleMetadataSync();
       return project;
     });
   }
@@ -432,7 +437,7 @@ export class NaoBrainTodayStore {
   async updateProject(id: string, name: string): Promise<TodayProject> {
     return this.enqueue(async () => {
       const project = await this.projects.update(id, name);
-      await this.syncMetadataFiles();
+      this.scheduleMetadataSync();
       return project;
     });
   }
@@ -440,7 +445,7 @@ export class NaoBrainTodayStore {
   async deleteProject(id: string): Promise<TodayProject> {
     return this.enqueue(async () => {
       const project = await this.projects.delete(id);
-      await this.syncMetadataFiles();
+      this.scheduleMetadataSync();
       return project;
     });
   }
@@ -448,7 +453,6 @@ export class NaoBrainTodayStore {
   async listTags(includeDeleted = false): Promise<TodayTagWithUsage[]> {
     await this.ensureLayout();
     const entries = (await this.latestEntries()).filter((entry) => !entry.deletedAt);
-    await this.tags.ensureFromNames(entries.flatMap((entry) => entry.tags));
     const usage = new Map<string, { count: number; lastUsedAt?: string }>();
     for (const entry of entries) {
       for (const name of entry.tags) {
@@ -468,7 +472,7 @@ export class NaoBrainTodayStore {
   async createTag(name: string, category?: string, kind?: TodayTagKind): Promise<TodayTag> {
     return this.enqueue(async () => {
       const tag = await this.tags.create(name, category, kind);
-      await this.syncMetadataFiles();
+      this.scheduleMetadataSync();
       return tag;
     });
   }
@@ -476,7 +480,7 @@ export class NaoBrainTodayStore {
   async updateTag(id: string, input: { name: string; category?: string; kind?: TodayTagKind }): Promise<TodayTag> {
     return this.enqueue(async () => {
       const tag = await this.tags.update(id, input);
-      await this.syncMetadataFiles();
+      this.scheduleMetadataSync();
       return tag;
     });
   }
@@ -484,8 +488,16 @@ export class NaoBrainTodayStore {
   async deleteTag(id: string): Promise<TodayTag> {
     return this.enqueue(async () => {
       const tag = await this.tags.delete(id);
-      await this.syncMetadataFiles();
+      this.scheduleMetadataSync();
       return tag;
+    });
+  }
+
+  async saveTags(drafts: TodayTagDraft[]): Promise<TodayTagWithUsage[]> {
+    return this.enqueue(async () => {
+      await this.tags.saveAll(drafts);
+      this.scheduleMetadataSync();
+      return this.listTags();
     });
   }
 
@@ -785,6 +797,50 @@ export class NaoBrainTodayStore {
       writeFile(path, content, { encoding: "utf8", mode: 0o600 }),
       writeFile(latest, content, { encoding: "utf8", mode: 0o600 }),
     ]);
+  }
+
+  private scheduleAiEnrichment(id: string, revisionId: string): void {
+    const taskKey = `${id}:${revisionId}`;
+    if (this.aiTasks.has(taskKey)) return;
+    this.aiTasks.add(taskKey);
+    setTimeout(() => {
+      void (async () => {
+        const current = await this.latestEntry(id);
+        if (!current || current.deletedAt || current.revisionId !== revisionId) return;
+        const enriched: TodayEntry = { ...current, ai: undefined, aiError: undefined };
+        await this.applyAi(enriched, true);
+        await this.enqueue(async () => {
+          const latest = await this.latestEntry(id);
+          if (!latest || latest.deletedAt || latest.revisionId !== revisionId) return;
+          const revisions = await this.readAllRevisions();
+          const index = revisions.findIndex((entry) => entry.id === id && entry.revisionId === revisionId);
+          if (index < 0) return;
+          revisions[index] = { ...enriched, updatedAt: latest.updatedAt };
+          await writeFile(
+            this.revisionsPath(),
+            `${revisions.map((entry) => JSON.stringify(entry)).join("\n")}\n`,
+            { encoding: "utf8", mode: 0o600 },
+          );
+          await this.rebuildSnapshot(latest.date);
+          this.scheduleDateSync(latest.date);
+        });
+      })().catch(() => undefined).finally(() => this.aiTasks.delete(taskKey));
+    }, 0);
+  }
+
+  private scheduleMetadataSync(): DriveSyncResult {
+    if (!this.config.driveRemote) return { configured: false, synced: false };
+    if (!this.metadataSyncTask) {
+      this.metadataSyncTask = this.syncMetadataFiles()
+        .then(() => undefined, () => undefined)
+        .finally(() => { this.metadataSyncTask = null; });
+    }
+    return {
+      configured: true,
+      synced: false,
+      queued: true,
+      destination: `${redactRemote(this.config.driveRemote)}${this.config.driveBasePath}`,
+    };
   }
 
   private scheduleDateSync(date: string): DriveSyncResult {
