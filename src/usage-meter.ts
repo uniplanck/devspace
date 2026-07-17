@@ -161,8 +161,10 @@ function runtimeUsageLabel(): string {
   const explicit = String(process.env.DEVSPACE_USAGE_LABEL || "").trim();
   if (explicit) return explicit;
   const role = String(process.env.DEVSPACE_NODE_ROLE || "").toLowerCase();
+  if (role === "gae" || role === "ec2") return "GAE";
+  if (role === "gag" || role === "mac") return "GAG";
   const instance = String(process.env.DEVSPACE_INSTANCE_NAME || "").toLowerCase();
-  return role === "gae" || role === "ec2" || instance.includes("4ec2") ? "GAE" : "GAG";
+  return instance.includes("4ec2") ? "GAE" : "GAG";
 }
 
 function historyPath(): string {
@@ -461,58 +463,70 @@ export function recordObservedToolUsage(input: {
   return entry;
 }
 
-export function getExecutionCostSnapshot(): ExecutionCostSnapshot {
-  const cost = estimateGpt56ApiCost(processUsage.inputTokens, processUsage.outputTokens);
+function executionCostSnapshot(state: UsageState): ExecutionCostSnapshot {
+  const cost = estimateGpt56ApiCost(state.inputTokens, state.outputTokens);
   return {
-    observedTokens: processUsage.observedTokens,
-    savedTokens: processUsage.savedTokens,
-    inputTokens: processUsage.inputTokens,
-    outputTokens: processUsage.outputTokens,
+    observedTokens: state.observedTokens,
+    savedTokens: state.savedTokens,
+    inputTokens: state.inputTokens,
+    outputTokens: state.outputTokens,
     estimatedUsd: cost.usd,
     estimatedJpy: cost.jpy,
     estimatedUsdMax: cost.maxUsd,
     estimatedJpyMax: cost.maxJpy,
     pricingModel: cost.model,
     usdJpyRate: cost.usdJpyRate,
-    totalDurationMs: processUsage.totalDurationMs,
-    calls: processUsage.calls,
-    errors: processUsage.errors,
-    retries: processUsage.retries,
-    byTool: byToolSnapshot(processUsage),
+    totalDurationMs: state.totalDurationMs,
+    calls: state.calls,
+    errors: state.errors,
+    retries: state.retries,
+    byTool: byToolSnapshot(state),
     note: "Model input/output tokens and GPT-5.6 Sol short-to-long-context API costs are estimates; duration and call/error counts are observed by GPT-Agent.",
   };
+}
+
+export function getExecutionCostSnapshot(): ExecutionCostSnapshot {
+  return executionCostSnapshot(processUsage);
+}
+
+export function getCurrentChatExecutionCostSnapshot(): ExecutionCostSnapshot {
+  const sessionId = usageSessionStorage.getStore();
+  return executionCostSnapshot(sessionId ? chatUsageState(sessionId) : processUsage);
+}
+
+function compactUsageSummaryText(entry: UsageEntry): string {
+  const label = runtimeUsageLabel();
+  return [
+    `**${label} · 利用量（GPT-5.6 API換算）**`,
+    "",
+    `| 指標 | 今回 | このChat内の${label}累計 |`,
+    "|---|---:|---:|",
+    `| 入力推定 | 約${compactTokenCount(entry.inputTokens)} tok | 約${compactTokenCount(entry.sessionInputTokens)} tok |`,
+    `| 出力推定 | 約${compactTokenCount(entry.outputTokens)} tok | 約${compactTokenCount(entry.sessionOutputTokens)} tok |`,
+    `| 推定費用 | ${compactYenRange(entry.estimatedJpy, entry.estimatedJpyMax)} | ${compactYenRange(entry.sessionEstimatedJpy, entry.sessionEstimatedJpyMax)} |`,
+    `| ツール処理時間 | ${compactDuration(entry.durationMs)} | ${compactDuration(entry.sessionDurationMs)} |`,
+    `| ツール呼出 | 1 | ${entry.sessionCalls} |`,
+    `| エラー | ${entry.error ? 1 : 0} | ${entry.sessionErrors} |`,
+    "",
+    `※ ${label}のMCPツール入出力から算出した推定値です。Chat全文のtoken数やChatGPT本体の請求額ではありません。`,
+  ].join("\n");
 }
 
 function fullUsageSummaryText(entry: UsageEntry): string {
   const byTool = Object.entries(entry.byTool)
     .map(([tool, value]) => `${tool} ${value.calls}回/${compactDuration(value.totalDurationMs)}`)
     .join(" / ");
-
   const label = runtimeUsageLabel();
-  return [
-    `${label} · GPT-5.6推定コスト:`,
-    `今回: 入力約${compactTokenCount(entry.inputTokens)} / 出力約${compactTokenCount(entry.outputTokens)} token / ${compactYenRange(entry.estimatedJpy, entry.estimatedJpyMax)} / ${compactDuration(entry.durationMs)} / ${entry.error ? "error" : "ok"}`,
-    `このChat累計: 入力約${compactTokenCount(entry.sessionInputTokens)} / 出力約${compactTokenCount(entry.sessionOutputTokens)} token / ${compactYenRange(entry.sessionEstimatedJpy, entry.sessionEstimatedJpyMax)} / ${compactDuration(entry.sessionDurationMs)} / ${entry.sessionCalls} calls / ${entry.sessionErrors} errors / ${entry.sessionRetries} retries`,
-    `内訳: ${byTool || "なし"}`,
-    `推定節約token: 約${compactTokenCount(entry.sessionSavedTokens)}`,
-    `${label}返却結果をモデル入力、ツール引数をモデル出力として換算。短コンテキストは入力$5/M・出力$30/M、272K超の長コンテキストは入力$10/M・出力$45/M（USD/JPY=${entry.usdJpyRate}）。`,
-    `実際の全入力tokenは${label}単独では取得できないため短〜長コンテキストの範囲表示です。ChatGPT本体の請求額ではありません。`,
-  ].join("\n");
-}
 
-function compactUsageSummaryText(entry: UsageEntry): string {
-  const label = runtimeUsageLabel();
   return [
-    `**${label} · GPT-5.6推定**`,
+    compactUsageSummaryText(entry),
     "",
-    "| 指標 | 今回 | このChat累計 |",
-    "|---|---:|---:|",
-    `| 入力 | 約${compactTokenCount(entry.inputTokens)} tok | 約${compactTokenCount(entry.sessionInputTokens)} tok |`,
-    `| 出力 | 約${compactTokenCount(entry.outputTokens)} tok | 約${compactTokenCount(entry.sessionOutputTokens)} tok |`,
-    `| 推定料金 | ${compactYenRange(entry.estimatedJpy, entry.estimatedJpyMax)} | ${compactYenRange(entry.sessionEstimatedJpy, entry.sessionEstimatedJpyMax)} |`,
-    `| 処理時間 | ${compactDuration(entry.durationMs)} | ${compactDuration(entry.sessionDurationMs)} |`,
-    `| 呼出 | 1 | ${entry.sessionCalls} |`,
-    `| エラー | ${entry.error ? 1 : 0} | ${entry.sessionErrors} |`,
+    `**${label} · 利用量詳細**`,
+    "",
+    `- ツール内訳: ${byTool || "なし"}`,
+    `- 再試行: ${entry.sessionRetries}回`,
+    `- 推定節約token: 約${compactTokenCount(entry.sessionSavedTokens)} tok`,
+    `- 換算条件: 短コンテキスト 入力$5/M・出力$30/M、長コンテキスト 入力$10/M・出力$45/M、USD/JPY=${entry.usdJpyRate}`,
   ].join("\n");
 }
 
