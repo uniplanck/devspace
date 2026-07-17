@@ -70,6 +70,22 @@ try {
   assert.equal(snapshot.summary.total, 1);
   assert.deepEqual(snapshot.entries.map((entry) => entry.title), ["LP構成とCTAを確定"]);
 
+  const queuedAi = await store.append({
+    title: "非同期AI確認",
+    body: "記録保存をAI処理より先に完了する。",
+    status: "done",
+    kind: "result",
+    occurredAt: "2026-07-16T01:00:00.000Z",
+    runAi: true,
+  });
+  assert.equal(queuedAi.aiQueued, true);
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    if ((await store.list("2026-07-16")).entries[0]?.aiError) break;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.equal((await store.history(queuedAi.entry.id)).length, 1);
+  assert.match((await store.list("2026-07-16")).entries[0]?.aiError || "", /Gemini|API key/i);
+
   const deleted = await store.delete(planned.entry.id, "予定を取り消し");
   assert.equal(deleted.entry.version, 2);
   assert.ok(deleted.entry.deletedAt);
@@ -118,6 +134,14 @@ try {
   await store.deleteTag(temporaryTag.id);
   assert.equal((await store.listTags()).some((tag) => tag.name === "削除予定"), false);
   assert.equal((await store.listTags(true)).find((tag) => tag.name === "削除予定")?.active, false);
+
+  const bulkSavedTags = await store.saveTags([
+    { id: personTag.id, name: "クロさん", category: "一緒にいた人", kind: "person" },
+    { name: "水春", category: "場所", kind: "general" },
+  ]);
+  assert.deepEqual(bulkSavedTags.map((tag) => tag.name).sort(), ["クロさん", "水春"]);
+  assert.equal((await store.listTags()).some((tag) => tag.name === "LP"), false);
+  assert.equal((await store.listTags(true)).find((tag) => tag.name === "LP")?.active, false);
 
   const settings = await store.updateAiSettings({ fallback2: "test-fallback-key-2" });
   assert.equal(settings.fallback2Configured, true);
