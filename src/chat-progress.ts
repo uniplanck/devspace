@@ -1,7 +1,7 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
-import { compactDuration, compactYenRange, getExecutionCostSnapshot } from "./usage-meter.js";
+import { compactDuration, compactYenRange, getCurrentChatExecutionCostSnapshot } from "./usage-meter.js";
 
 export type ChatProgressStatus = "running" | "paused" | "completed" | "failed";
 export type EstimateSource = "provided" | "history" | "progress" | "blended" | "none";
@@ -222,7 +222,7 @@ export function updateChatProgress(input: ChatProgressInput): ChatProgressRecord
     priorTotalSeconds: existing?.estimatedTotalSeconds,
     priorSource: existing?.estimateSource,
   });
-  const cost = getExecutionCostSnapshot();
+  const cost = getCurrentChatExecutionCostSnapshot();
   const finishedAt = status === "completed" || status === "failed"
     ? now.toISOString()
     : undefined;
@@ -271,10 +271,54 @@ export function listChatProgress(): ChatProgressRecord[] {
   return readStore().records;
 }
 
+function runtimeProgressLabel(): string {
+  const explicit = String(process.env.DEVSPACE_USAGE_LABEL || "").trim();
+  if (explicit) return explicit;
+  const role = String(process.env.DEVSPACE_NODE_ROLE || "").toLowerCase();
+  if (role === "gae" || role === "ec2") return "GAE";
+  if (role === "gag" || role === "mac") return "GAG";
+  const instance = String(process.env.DEVSPACE_INSTANCE_NAME || "").toLowerCase();
+  return instance.includes("4ec2") ? "GAE" : "GAG";
+}
+
+function progressStatusLabel(status: ChatProgressStatus): string {
+  if (status === "completed") return "✅ 完了";
+  if (status === "paused") return "⏸️ 一時停止";
+  if (status === "failed") return "❌ 失敗";
+  return "▶️ 実行中";
+}
+
+function progressTableCell(value: string | undefined, fallback: string): string {
+  const normalized = String(value || "").trim();
+  return (normalized || fallback).replace(/\|/gu, "\\|");
+}
+
 export function formatChatProgressResult(record: ChatProgressRecord): string {
+  const label = runtimeProgressLabel();
   const elapsed = compactDuration(record.elapsedSeconds * 1000);
-  const eta = record.remainingSeconds === undefined
-    ? "ETA unknown"
-    : `ETA ${compactDuration(record.remainingSeconds * 1000)}`;
-  return `Progress synced: ${record.overallProgress}% · elapsed ${elapsed} · ${eta} · ${compactYenRange(record.sessionEstimatedJpy, record.sessionEstimatedJpyMax ?? record.sessionEstimatedJpy)} estimated`;
+  const remaining = record.remainingSeconds === undefined
+    ? "算出中"
+    : compactDuration(record.remainingSeconds * 1000);
+  const estimatedCost = compactYenRange(
+    record.sessionEstimatedJpy,
+    record.sessionEstimatedJpyMax ?? record.sessionEstimatedJpy,
+  );
+
+  return [
+    `**${label} · 実行状況**`,
+    "",
+    "| 項目 | 内容 |",
+    "|---|---|",
+    `| 状態 | ${progressStatusLabel(record.status)} |`,
+    `| 全体進捗 | ${record.overallProgress}% |`,
+    `| 現在の作業 | ${progressTableCell(record.currentTask, "—")} |`,
+    `| 経過時間 | ${elapsed} |`,
+    `| 残り予測 | ${remaining} |`,
+    `| 完了済み | ${progressTableCell(record.completed, "—")} |`,
+    `| 次の作業 | ${progressTableCell(record.next, "—")} |`,
+    `| リスク | ${progressTableCell(record.risk, "なし")} |`,
+    `| 推定費用 | ${estimatedCost} |`,
+    "",
+    "※ 推定費用はGAG/GAEのMCP入出力をGPT-5.6 API料金へ換算した参考値です。ChatGPT本体の請求額ではありません。",
+  ].join("\n");
 }

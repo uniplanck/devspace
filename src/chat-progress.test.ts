@@ -46,7 +46,12 @@ const updated = updateChatProgress({
 assert.equal(updated.overallProgress, 50);
 assert.equal(updated.currentProgress, 80);
 assert.equal(updated.estimatedTotalSeconds, 1_200);
-assert.match(formatChatProgressResult(updated), /Progress synced: 50%/u);
+const formattedProgress = formatChatProgressResult(updated);
+assert.match(formattedProgress, /^\*\*GAG · 実行状況\*\*/u);
+assert.match(formattedProgress, /\| 状態 \| ▶️ 実行中 \|/u);
+assert.match(formattedProgress, /\| 全体進捗 \| 50% \|/u);
+assert.match(formattedProgress, /\| 現在の作業 \| 実装 \|/u);
+assert.match(formattedProgress, /\| 次の作業 \| テスト \|/u);
 
 const completed = updateChatProgress({
   sessionId: "session_changed_again",
