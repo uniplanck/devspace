@@ -8,6 +8,7 @@ import {
   classifyBrowserElementRisk,
   isManagedAutomationBrowserSession,
   listBrowserApprovals,
+  resolveBrowserBackgroundMode,
   resolveBrowserDownloadDirectory,
   type BrowserElementDescriptor,
   type BrowserSessionRecord,
@@ -33,6 +34,15 @@ try {
     startedAt: new Date(0).toISOString(),
   };
   assert.equal(isManagedAutomationBrowserSession(legacyManualSession), false);
+  assert.equal(resolveBrowserBackgroundMode("background-window", {}), "background-window");
+  assert.equal(
+    resolveBrowserBackgroundMode("background-window", { DEVSPACE_BROWSER_BACKGROUND_MODE: "headless" }),
+    "headless",
+  );
+  assert.throws(
+    () => resolveBrowserBackgroundMode("headless", { DEVSPACE_BROWSER_BACKGROUND_MODE: "invalid" }),
+    /must be headless/,
+  );
   assert.equal(
     isManagedAutomationBrowserSession({ ...legacyManualSession, managedBy: "gpt-agent-automation" }),
     true,

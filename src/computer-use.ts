@@ -128,7 +128,7 @@ export function defaultComputerUsePolicy(home: string = homedir()): ComputerUseP
       profileDirectory: join(home, ".devspace", "chrome-for-testing-profile"),
       downloadDirectory: join(home, "Downloads", "GPT-Agent"),
       allowDownloads: false,
-      backgroundMode: "background-window",
+      backgroundMode: "headless",
     },
     desktop: {
       enabled: false,
@@ -180,7 +180,7 @@ export function enableChatGptBrowserPolicy(
       profileDirectory: join(home, ".devspace", "chrome-for-testing-profile"),
       downloadDirectory: join(home, "Downloads", "GPT-Agent"),
       allowDownloads: true,
-      backgroundMode: "background-window",
+      backgroundMode: "headless",
     },
     desktop: {
       ...loaded.policy.desktop,
@@ -438,7 +438,7 @@ function readBoolean(value: unknown, label: string): boolean {
 }
 
 function readBackgroundMode(value: unknown): "headless" | "background-window" | "window" {
-  if (value === undefined) return "background-window";
+  if (value === undefined) return "headless";
   if (value === "headless" || value === "background-window" || value === "window") return value;
   throw new Error("browser.backgroundMode must be headless, background-window, or window.");
 }

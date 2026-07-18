@@ -25,6 +25,8 @@ import {
   scoreChatGptModel,
 } from "./chatgpt-model.js";
 
+export type BrowserBackgroundMode = "headless" | "background-window" | "window";
+
 export interface BrowserSessionRecord {
   schemaVersion: 1;
   managedBy?: "gpt-agent-automation";
@@ -34,7 +36,7 @@ export interface BrowserSessionRecord {
   browserExecutable: string;
   browserWebSocketPath: string;
   profileDirectory: string;
-  backgroundMode: "headless" | "background-window" | "window";
+  backgroundMode: BrowserBackgroundMode;
   startedAt: string;
   targetId?: string;
 }
@@ -275,9 +277,22 @@ export async function browserStatus(home: string = homedir()): Promise<{
   return { active: true, session, pages };
 }
 
+export function resolveBrowserBackgroundMode(
+  policyMode: BrowserBackgroundMode,
+  env: NodeJS.ProcessEnv = process.env,
+): BrowserBackgroundMode {
+  const override = env.DEVSPACE_BROWSER_BACKGROUND_MODE?.trim();
+  if (!override) return policyMode;
+  if (override === "headless" || override === "background-window" || override === "window") {
+    return override;
+  }
+  throw new Error("DEVSPACE_BROWSER_BACKGROUND_MODE must be headless, background-window, or window.");
+}
+
 export async function startBrowserSession(input: {
   policyPath?: string;
   home?: string;
+  env?: NodeJS.ProcessEnv;
 } = {}): Promise<{ status: "started" | "already-running"; session: BrowserSessionRecord }> {
   const home = input.home ?? homedir();
   const policy = loadPolicy(input.policyPath, home);
@@ -286,6 +301,7 @@ export async function startBrowserSession(input: {
     throw new Error("Chrome for Testing was not found. Run npm run browser:install:chrome-for-testing.");
   }
   const profileDirectory = resolve(policy.browser.profileDirectory);
+  const backgroundMode = resolveBrowserBackgroundMode(policy.browser.backgroundMode, input.env ?? process.env);
   const existing = readSession(home);
   if (existing && await sessionResponds(existing)) {
     const sameManagedBrowser = isManagedAutomationBrowserSession(existing)
@@ -317,9 +333,12 @@ export async function startBrowserSession(input: {
     "--disable-save-password-bubble",
     "--disable-features=AutofillServerCommunication,MediaRouter,PasswordManagerOnboarding,Translate",
   ];
-  if (policy.browser.backgroundMode === "headless") {
+  if (process.platform === "linux") {
+    browserArgs.push("--no-sandbox");
+  }
+  if (backgroundMode === "headless") {
     browserArgs.push("--headless=new", "--window-size=1440,1200");
-  } else if (policy.browser.backgroundMode === "background-window") {
+  } else if (backgroundMode === "background-window") {
     browserArgs.push(
       "--disable-background-mode",
       "--window-position=-32000,-32000",
@@ -363,7 +382,7 @@ export async function startBrowserSession(input: {
     browserExecutable: browser.path,
     browserWebSocketPath,
     profileDirectory,
-    backgroundMode: policy.browser.backgroundMode,
+    backgroundMode,
     startedAt: new Date().toISOString(),
   };
   saveSession(session, home);

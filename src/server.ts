@@ -157,7 +157,7 @@ function shouldAttachWidget(mode: WidgetMode, kind: ToolWidgetKind): boolean {
     case "off":
       return false;
     case "changes":
-      return kind === "workspace" || kind === "show_changes";
+      return kind === "show_changes";
     case "full":
       return true;
   }

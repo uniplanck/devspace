@@ -153,10 +153,10 @@ a PTY, or send Ctrl-C. Set `tty: true` only for commands that need a terminal.
 Compact workspace payloads default to `DEVSPACE_WIDGETS=off`; full payloads
 default to `DEVSPACE_WIDGETS=changes`.
 
-The `changes` mode keeps individual read and shell calls compact and attaches
-widget UI only to `open_workspace` and the aggregate `show_changes` flow. Use
-`DEVSPACE_WIDGETS=full` only for per-tool diagnostic cards, or `off` to disable
-widget UI entirely.
+The `changes` mode keeps workspace, read, search, and shell calls free of custom
+widget cards and attaches widget UI only to the final aggregate `show_changes`
+flow. Use `DEVSPACE_WIDGETS=full` only for per-tool diagnostic cards, or `off`
+to disable widget UI entirely.
 
 When `show_changes` is exposed, models should call it exactly once after the
 final file modification in any turn that changes files. The tool only requires
