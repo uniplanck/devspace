@@ -442,6 +442,13 @@ async function runChatGptTaskJob(store: JobStore, job: JobRecord): Promise<JobRe
     job.state as Partial<ChatGptTaskState> | undefined,
     {
       onPhase: (phase, state) => {
+        if (phase === "opening" && state.writingKernelMode) {
+          const status = state.writingKernelApplied ? "applied" : "skipped";
+          const detail = state.writingKernelApplied
+            ? `${state.writingKernelReason}; ${state.writingKernelCharacters ?? 0} characters`
+            : state.writingKernelReason ?? "no reason";
+          store.appendEvent(job.id, "info", `Japanese writing kernel: ${status} (${detail}).`);
+        }
         const progress = phase === "opening" ? 15 : phase === "waiting-approval" ? 35 : phase === "waiting-response" ? 55 : 95;
         store.update(job.id, {
           state: state as unknown as Record<string, unknown>,
@@ -586,7 +593,10 @@ function readChatGptTaskInput(value: Record<string, unknown> | undefined): ChatG
   const timeoutMs = typeof value?.timeoutMs === "number" ? value.timeoutMs : undefined;
   const closeWhenDone = typeof value?.closeWhenDone === "boolean" ? value.closeWhenDone : undefined;
   const autoSubmit = typeof value?.autoSubmit === "boolean" ? value.autoSubmit : undefined;
-  return { prompt, url, expectedMarker, expectedImageCount, timeoutMs, closeWhenDone, autoSubmit };
+  const writingKernel = value?.writingKernel === "auto" || value?.writingKernel === "on" || value?.writingKernel === "off"
+    ? value.writingKernel
+    : undefined;
+  return { prompt, url, expectedMarker, expectedImageCount, timeoutMs, closeWhenDone, autoSubmit, writingKernel };
 }
 
 function readImageToDriveInput(value: Record<string, unknown> | undefined): ImageToDriveInput {
