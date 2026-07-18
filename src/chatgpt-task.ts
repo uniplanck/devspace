@@ -25,6 +25,10 @@ import {
   prepareChatGptNavigationUrl,
   prepareChatGptTaskUrl,
 } from "./chatgpt-model.js";
+import {
+  prepareJapaneseWritingPrompt,
+  type JapaneseWritingKernelMode,
+} from "./japanese-writing-kernel.js";
 
 export interface ChatGptTaskInput {
   prompt: string;
@@ -34,6 +38,7 @@ export interface ChatGptTaskInput {
   timeoutMs?: number;
   closeWhenDone?: boolean;
   autoSubmit?: boolean;
+  writingKernel?: JapaneseWritingKernelMode;
 }
 
 export interface ChatGptTaskState {
@@ -55,6 +60,11 @@ export interface ChatGptTaskState {
   reusedPreferredTarget?: boolean;
   tabReset?: boolean;
   tabClosed?: boolean;
+  writingKernelMode?: JapaneseWritingKernelMode;
+  writingKernelApplied?: boolean;
+  writingKernelReason?: string;
+  writingKernelSource?: string;
+  writingKernelCharacters?: number;
 }
 
 export type ChatGptTaskResult =
@@ -75,6 +85,18 @@ export async function runChatGptTask(
 ): Promise<ChatGptTaskResult> {
   const input = validateInput(rawInput);
   const state = normalizeState(initialState);
+  let submittedPrompt = input.prompt;
+  if (!state.targetId) {
+    const preparedPrompt = prepareJapaneseWritingPrompt(input.prompt, {
+      mode: input.writingKernel,
+    });
+    submittedPrompt = preparedPrompt.prompt;
+    state.writingKernelMode = preparedPrompt.mode;
+    state.writingKernelApplied = preparedPrompt.applied;
+    state.writingKernelReason = preparedPrompt.reason;
+    state.writingKernelSource = preparedPrompt.sourcePath;
+    state.writingKernelCharacters = preparedPrompt.kernelCharacters;
+  }
   await startBrowserSession();
 
   if (state.pendingApprovalId) {
@@ -118,7 +140,9 @@ export async function runChatGptTask(
         state.selectedModelLabel = modelSelection.selectedLabel || modelSelection.currentLabel || state.selectedModel;
         const before = await waitForComposer(state.targetId, runtime.shouldStop);
         await focusChatGptComposer({ requireEmpty: true, targetId: state.targetId });
-        await typeBrowserText(input.prompt, undefined, state.targetId);
+        for (let offset = 0; offset < submittedPrompt.length; offset += 3_500) {
+          await typeBrowserText(submittedPrompt.slice(offset, offset + 3_500), undefined, state.targetId);
+        }
         const submission = input.autoSubmit
           ? await submitTrustedChatGptComposer({ targetId: state.targetId })
           : await pressBrowserKey("Enter", { targetId: state.targetId });
@@ -237,6 +261,10 @@ function validateInput(input: ChatGptTaskInput): ChatGptTaskInput {
   if (!Number.isFinite(timeoutMs) || timeoutMs < 5_000 || timeoutMs > 600_000) {
     throw new Error("ChatGPT task timeoutMs must be from 5000 to 600000.");
   }
+  const writingKernel = input.writingKernel ?? "auto";
+  if (!["auto", "on", "off"].includes(writingKernel)) {
+    throw new Error("ChatGPT task writingKernel must be auto, on, or off.");
+  }
   return {
     prompt,
     url: prepareChatGptTaskUrl(input.url),
@@ -245,6 +273,7 @@ function validateInput(input: ChatGptTaskInput): ChatGptTaskInput {
     timeoutMs,
     closeWhenDone: input.closeWhenDone ?? true,
     autoSubmit: input.autoSubmit ?? false,
+    writingKernel,
   };
 }
 
@@ -274,6 +303,15 @@ function normalizeState(value?: Partial<ChatGptTaskState>): ChatGptTaskState {
     ...(value?.reusedPreferredTarget ? { reusedPreferredTarget: true } : {}),
     ...(value?.tabReset ? { tabReset: true } : {}),
     ...(value?.tabClosed ? { tabClosed: true } : {}),
+    ...(value?.writingKernelMode ? { writingKernelMode: value.writingKernelMode } : {}),
+    ...(typeof value?.writingKernelApplied === "boolean"
+      ? { writingKernelApplied: value.writingKernelApplied }
+      : {}),
+    ...(value?.writingKernelReason ? { writingKernelReason: value.writingKernelReason } : {}),
+    ...(value?.writingKernelSource ? { writingKernelSource: value.writingKernelSource } : {}),
+    ...(typeof value?.writingKernelCharacters === "number"
+      ? { writingKernelCharacters: value.writingKernelCharacters }
+      : {}),
   };
 }
 

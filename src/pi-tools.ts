@@ -128,7 +128,7 @@ async function runBuiltinRuntimeCommand(
       "  devspace-runtime finder <workspace-relative-path>",
       "  devspace-runtime jobs start <preset> [--title <title>]",
       "  devspace-runtime jobs start browser-loop --goal <goal> --provider <non-codex-provider> [--max-steps <1-60>] [--model <model>] [--download-group <group>]",
-      "  devspace-runtime jobs start chatgpt-task --prompt <prompt> [--url <chat-url>] [--expect <marker>] [--images <1-4>] [--auto-submit] [--timeout-seconds <5-600>] [--keep-tab]",
+      "  devspace-runtime jobs start chatgpt-task --prompt <prompt> [--writing-kernel <auto|on|off>] [--url <chat-url>] [--expect <marker>] [--images <1-4>] [--auto-submit] [--timeout-seconds <5-600>] [--keep-tab]",
       "  devspace-runtime jobs start image-to-drive --prompt <prompt> [--count <1-4>] [--transparent] [--drive-remote <remote:>] [--drive-path <path>] [--file-prefix <name>] [--manual-submit] [--keep-tab]",
       "  devspace-runtime jobs list",
       "  devspace-runtime jobs show <id> [--events]",
@@ -406,6 +406,10 @@ function runtimeChatGptTaskInput(tokens: string[]): Record<string, unknown> {
   if (timeoutSeconds !== undefined && (!Number.isFinite(timeoutSeconds) || timeoutSeconds < 5 || timeoutSeconds > 600)) {
     throw new Error("--timeout-seconds must be from 5 to 600.");
   }
+  const writingKernel = runtimeOption(tokens, "--writing-kernel") ?? "auto";
+  if (!["auto", "on", "off"].includes(writingKernel)) {
+    throw new Error("--writing-kernel must be auto, on, or off.");
+  }
   return {
     prompt,
     ...(url ? { url } : {}),
@@ -414,6 +418,7 @@ function runtimeChatGptTaskInput(tokens: string[]): Record<string, unknown> {
     ...(timeoutSeconds === undefined ? {} : { timeoutMs: Math.round(timeoutSeconds * 1000) }),
     closeWhenDone: !tokens.includes("--keep-tab"),
     autoSubmit: tokens.includes("--auto-submit"),
+    writingKernel,
   };
 }
 

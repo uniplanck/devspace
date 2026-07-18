@@ -748,6 +748,10 @@ function readChatGptTaskJobInput(args: string[]): Record<string, unknown> {
   if (timeoutSeconds !== undefined && (!Number.isFinite(timeoutSeconds) || timeoutSeconds < 5 || timeoutSeconds > 600)) {
     throw new Error("--timeout-seconds must be from 5 to 600.");
   }
+  const writingKernel = readJobsOption(args, "--writing-kernel") ?? "auto";
+  if (!["auto", "on", "off"].includes(writingKernel)) {
+    throw new Error("--writing-kernel must be auto, on, or off.");
+  }
   return {
     prompt,
     ...(url ? { url } : {}),
@@ -756,6 +760,7 @@ function readChatGptTaskJobInput(args: string[]): Record<string, unknown> {
     ...(timeoutSeconds === undefined ? {} : { timeoutMs: Math.round(timeoutSeconds * 1000) }),
     closeWhenDone: !args.includes("--keep-tab"),
     autoSubmit: args.includes("--auto-submit"),
+    writingKernel,
   };
 }
 
@@ -838,7 +843,7 @@ function printJobsHelp(): void {
     "Usage:",
     "  devspace jobs start <preset> [--title <title>]",
     "  devspace jobs start browser-loop --goal <goal> --provider <non-codex-provider> [--max-steps <1-60>] [--model <model>] [--download-group <group>]",
-    "  devspace jobs start chatgpt-task --prompt <prompt> [--url <chat-url>] [--expect <marker>] [--images <1-4>] [--auto-submit] [--timeout-seconds <5-600>] [--keep-tab]",
+    "  devspace jobs start chatgpt-task --prompt <prompt> [--writing-kernel <auto|on|off>] [--url <chat-url>] [--expect <marker>] [--images <1-4>] [--auto-submit] [--timeout-seconds <5-600>] [--keep-tab]",
     "  devspace jobs start image-to-drive --prompt <prompt> [--count <1-4>] [--transparent] [--drive-remote <remote:>] [--drive-path <path>] [--file-prefix <name>] [--manual-submit] [--keep-tab]",
     "  devspace jobs ls [--all] [--json]",
     "  devspace jobs show <id> [--events] [--json]",

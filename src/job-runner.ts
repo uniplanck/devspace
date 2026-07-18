@@ -586,7 +586,19 @@ function readChatGptTaskInput(value: Record<string, unknown> | undefined): ChatG
   const timeoutMs = typeof value?.timeoutMs === "number" ? value.timeoutMs : undefined;
   const closeWhenDone = typeof value?.closeWhenDone === "boolean" ? value.closeWhenDone : undefined;
   const autoSubmit = typeof value?.autoSubmit === "boolean" ? value.autoSubmit : undefined;
-  return { prompt, url, expectedMarker, expectedImageCount, timeoutMs, closeWhenDone, autoSubmit };
+  const writingKernel = typeof value?.writingKernel === "string"
+    ? value.writingKernel as ChatGptTaskInput["writingKernel"]
+    : undefined;
+  return {
+    prompt,
+    url,
+    expectedMarker,
+    expectedImageCount,
+    timeoutMs,
+    closeWhenDone,
+    autoSubmit,
+    writingKernel,
+  };
 }
 
 function readImageToDriveInput(value: Record<string, unknown> | undefined): ImageToDriveInput {
