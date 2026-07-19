@@ -63,6 +63,11 @@ import {
 import { registerV11Tools } from "./register-v11-tools.js";
 // PRIVATE_GEX_START
 import { GexLearningStore, type GexLearningSyncPayload } from "./gex-learning-store.js";
+import {
+  GexChatRuntimeStore,
+  type GexChatActivationPayload,
+  type GexChatRuntimePayload,
+} from "./gex-chat-runtime-store.js";
 // PRIVATE_GEX_END
 import {
   NaoBrainTodayStore,
@@ -79,6 +84,7 @@ import {
 type Transport = StreamableHTTPServerTransport;
 // PRIVATE_GEX_START
 const GEX_LEARNING_BRIDGE_HEADER = "gex-learning-v1";
+const GEX_CHAT_RUNTIME_BRIDGE_HEADER = "gex-chat-runtime-v1";
 // PRIVATE_GEX_END
 const WORKSPACE_APP_URI = "ui://devspace/workspace-app.html";
 const WORKSPACE_APP_MANIFEST_ENTRY = "workspace-app.html";
@@ -155,7 +161,7 @@ function shouldAttachWidget(mode: WidgetMode, kind: ToolWidgetKind): boolean {
     case "off":
       return false;
     case "changes":
-      return kind === "workspace" || kind === "show_changes";
+      return kind === "show_changes";
     case "full":
       return true;
   }
@@ -2522,14 +2528,22 @@ function rawRequestHostname(req: Request): string {
   }
 }
 
-function isAuthorizedGexLearningRequest(req: Request): boolean {
+function isAuthorizedLocalGexRequest(req: Request, expectedHeader: string): boolean {
   const hostname = rawRequestHostname(req);
   const loopbackHost = hostname === "127.0.0.1" || hostname === "localhost" || hostname === "::1";
-  return loopbackHost && req.header("x-gex-bridge") === GEX_LEARNING_BRIDGE_HEADER;
+  return loopbackHost && req.header("x-gex-bridge") === expectedHeader;
 }
 
-function denyGexLearningRequest(res: Response): void {
-  res.status(403).json({ ok: false, error: "GEX learning bridge is local-only." });
+function isAuthorizedGexLearningRequest(req: Request): boolean {
+  return isAuthorizedLocalGexRequest(req, GEX_LEARNING_BRIDGE_HEADER);
+}
+
+function isAuthorizedGexChatRuntimeRequest(req: Request): boolean {
+  return isAuthorizedLocalGexRequest(req, GEX_CHAT_RUNTIME_BRIDGE_HEADER);
+}
+
+function denyLocalGexRequest(res: Response): void {
+  res.status(403).json({ ok: false, error: "GEX bridge is local-only." });
 }
 // PRIVATE_GEX_END
 
@@ -2567,6 +2581,7 @@ export function createServer(config = loadConfig()): RunningServer {
     : [];
   // PRIVATE_GEX_START
   const gexLearningStore = new GexLearningStore(config.gexLearningDir);
+  const gexChatRuntimeStore = new GexChatRuntimeStore();
   // PRIVATE_GEX_END
   const todayStore = new NaoBrainTodayStore({
     dataDir: config.naobrainTodayDir,
@@ -2630,7 +2645,7 @@ export function createServer(config = loadConfig()): RunningServer {
   app.get("/gex-learning/health", (req, res) => {
     res.setHeader("cache-control", "no-store");
     if (!isAuthorizedGexLearningRequest(req)) {
-      denyGexLearningRequest(res);
+      denyLocalGexRequest(res);
       return;
     }
     res.json({ ok: true, name: "gex-learning-bridge" });
@@ -2642,7 +2657,7 @@ export function createServer(config = loadConfig()): RunningServer {
     async (req, res) => {
       res.setHeader("cache-control", "no-store");
       if (!isAuthorizedGexLearningRequest(req)) {
-        denyGexLearningRequest(res);
+        denyLocalGexRequest(res);
         return;
       }
       try {
@@ -2654,6 +2669,70 @@ export function createServer(config = loadConfig()): RunningServer {
         });
         res.status(500).json({ ok: false, error: "GEX learning data could not be saved." });
       }
+    },
+  );
+
+  app.post(
+    "/gex-chat-runtime/sync",
+    express.json({ limit: "64kb" }),
+    async (req, res) => {
+      res.setHeader("cache-control", "no-store");
+      if (!isAuthorizedGexChatRuntimeRequest(req)) {
+        denyLocalGexRequest(res);
+        return;
+      }
+      try {
+        const result = await gexChatRuntimeStore.sync((req.body || {}) as GexChatRuntimePayload);
+        res.json({ ok: true, ...result });
+      } catch (error) {
+        logEvent(config.logging, "warn", "gex_chat_runtime_sync_error", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+        res.status(400).json({ ok: false, error: "GEX Chat runtime state could not be saved." });
+      }
+    },
+  );
+
+  app.post(
+    "/gex-chat-runtime/activate",
+    express.json({ limit: "16kb" }),
+    (req, res) => {
+      res.setHeader("cache-control", "no-store");
+      if (!isAuthorizedGexChatRuntimeRequest(req)) {
+        denyLocalGexRequest(res);
+        return;
+      }
+      try {
+        const command = gexChatRuntimeStore.requestActivation((req.body || {}) as GexChatActivationPayload);
+        res.json({ ok: true, commandId: command.id });
+      } catch (error) {
+        res.status(400).json({
+          ok: false,
+          error: error instanceof Error ? error.message : "ChatGPT tab activation could not be queued.",
+        });
+      }
+    },
+  );
+
+  app.get("/gex-chat-runtime/command", (req, res) => {
+    res.setHeader("cache-control", "no-store");
+    if (!isAuthorizedGexChatRuntimeRequest(req)) {
+      denyLocalGexRequest(res);
+      return;
+    }
+    res.json({ ok: true, command: gexChatRuntimeStore.activationCommand() });
+  });
+
+  app.post(
+    "/gex-chat-runtime/command/ack",
+    express.json({ limit: "8kb" }),
+    (req, res) => {
+      res.setHeader("cache-control", "no-store");
+      if (!isAuthorizedGexChatRuntimeRequest(req)) {
+        denyLocalGexRequest(res);
+        return;
+      }
+      res.json({ ok: true, acknowledged: gexChatRuntimeStore.acknowledgeActivation(req.body?.commandId) });
     },
   );
   // PRIVATE_GEX_END

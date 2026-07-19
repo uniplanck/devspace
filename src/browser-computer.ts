@@ -275,6 +275,17 @@ export async function browserStatus(home: string = homedir()): Promise<{
   return { active: true, session, pages };
 }
 
+export function effectiveBrowserBackgroundMode(
+  policyMode: "headless" | "background-window" | "window",
+  env: NodeJS.ProcessEnv = process.env,
+): "headless" | "background-window" | "window" {
+  const override = String(env.DEVSPACE_BROWSER_BACKGROUND_MODE ?? "").trim();
+  if (override === "headless" || override === "background-window" || override === "window") {
+    return override;
+  }
+  return policyMode;
+}
+
 export async function startBrowserSession(input: {
   policyPath?: string;
   home?: string;
@@ -286,12 +297,18 @@ export async function startBrowserSession(input: {
     throw new Error("Chrome for Testing was not found. Run npm run browser:install:chrome-for-testing.");
   }
   const profileDirectory = resolve(policy.browser.profileDirectory);
+  const backgroundMode = effectiveBrowserBackgroundMode(policy.browser.backgroundMode);
   const existing = readSession(home);
   if (existing && await sessionResponds(existing)) {
     const sameManagedBrowser = isManagedAutomationBrowserSession(existing)
       && existing.browserExecutable === browser.path
-      && resolve(existing.profileDirectory) === profileDirectory;
+      && resolve(existing.profileDirectory) === profileDirectory
+      && existing.backgroundMode === backgroundMode;
     if (sameManagedBrowser) return { status: "already-running", session: existing };
+    if (isManagedAutomationBrowserSession(existing)) {
+      try { process.kill(existing.pid, "SIGTERM"); } catch {}
+      await sleep(300);
+    }
     clearSession(home);
   } else if (existing) {
     clearSession(home);
@@ -317,9 +334,9 @@ export async function startBrowserSession(input: {
     "--disable-save-password-bubble",
     "--disable-features=AutofillServerCommunication,MediaRouter,PasswordManagerOnboarding,Translate",
   ];
-  if (policy.browser.backgroundMode === "headless") {
+  if (backgroundMode === "headless") {
     browserArgs.push("--headless=new", "--window-size=1440,1200");
-  } else if (policy.browser.backgroundMode === "background-window") {
+  } else if (backgroundMode === "background-window") {
     browserArgs.push(
       "--disable-background-mode",
       "--window-position=-32000,-32000",
@@ -363,7 +380,7 @@ export async function startBrowserSession(input: {
     browserExecutable: browser.path,
     browserWebSocketPath,
     profileDirectory,
-    backgroundMode: policy.browser.backgroundMode,
+    backgroundMode,
     startedAt: new Date().toISOString(),
   };
   saveSession(session, home);

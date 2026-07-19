@@ -84,7 +84,7 @@ sessions.
 | Value | Behavior |
 | --- | --- |
 | `full` | Opt-in diagnostic mode. Widget UI is attached to exposed workspace, file, edit, and shell tools, which uses substantially more vertical space. |
-| `changes` | Enables the aggregate `show_changes` tool and attaches widget UI only to `open_workspace` and `show_changes`. This is the default when full workspace payloads are selected. |
+| `changes` | Enables the aggregate `show_changes` tool and attaches widget UI only to that final aggregate card. Read, search, shell, and `open_workspace` calls do not receive custom widget cards. This is the default when full workspace payloads are selected. |
 | `off` | Disables widget UI. This is the default in compact mode. |
 
 ## Compact payloads and execution-cost estimates

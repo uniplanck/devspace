@@ -13,7 +13,7 @@ Environment=PATH=/home/ubuntu/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbi
 Environment=NODE_ENV=production
 Environment=DEVSPACE_NODE_ROLE=ec2
 Environment=DEVSPACE_TOOL_MODE=full
-Environment=DEVSPACE_WIDGETS=off
+Environment=DEVSPACE_WIDGETS=changes
 Environment=DEVSPACE_USAGE_CONTENT=compact
 Environment=DEVSPACE_OPEN_WORKSPACE_PAYLOAD=compact
 Environment=DEVSPACE_COPY_PATH=/home/ubuntu/copy.txt
