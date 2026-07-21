@@ -74,12 +74,13 @@ async function getProject(id) {
   const dir = path.join(DATA_DIR, 'projects', id);
   const project = await readJson(path.join(dir, 'project.json'));
   if (!project) return null;
-  const [editorialIr, qc, transcript] = await Promise.all([
+  const [editorialIr, qc, transcript, artifacts] = await Promise.all([
     readJson(path.join(dir, 'editorial-ir.json')),
     readJson(path.join(dir, 'qc-report.json')),
     readJson(path.join(dir, 'transcript.json')),
+    readJson(path.join(dir, 'artifacts.json'), { version: 1, artifacts: [] }),
   ]);
-  return { ...project, editorialIr, qc, transcript };
+  return { ...project, editorialIr, qc, transcript, artifacts: artifacts?.artifacts || [] };
 }
 
 async function listQueue() {

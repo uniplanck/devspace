@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "artifacts": [
+    {
+      "id": "2b3f1923-d66c-476d-b0c5-8100377d3436",
+      "kind": "fixture",
+      "label": "10秒カット検証動画",
+      "note": "1280x720・30fps・映像音声リンク・複数区間trim検証用",
+      "filename": "gag-cut-lab.mp4",
+      "bytes": 5108546,
+      "sha256": "9b0ea8109e5f75550ddd1c4edc46f08aa96c929f374f61d6bb1260602a00a39a",
+      "drivePath": "AI-Video-Production-OS/Test-Artifacts/2026-07-21/demo-talk/gag-cut-lab.mp4",
+      "url": "https://drive.google.com/open?id=15H-HBQXxCtYs46OPJGyFu3tdQLW4ookP",
+      "createdAt": "2026-07-21T03:08:53.418Z"
+    }
+  ],
+  "updatedAt": "2026-07-21T03:08:53.418Z"
+}
