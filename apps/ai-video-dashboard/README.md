@@ -141,6 +141,36 @@ node analyze-media.mjs \
 
 `--transcript`を省略すると同名sidecarを自動探索します。外部engineは`--transcript-command`、`--transcript-command-args-json`、`--transcript-format`で直接接続できます。FFmpegでメディア情報、無音、シーン変化を取得し、文字起こしからフィラー・言い直し・反復テイク候補を検出します。自動削除は高信頼候補だけに限定し、根拠ID付きの`analysis.json`、`editorial-ir.json`、`qc-report.json`を生成します。表情・反応の意味判定は未実装で、シーン変化を補助信号としてのみ保持します。
 
+## 複数素材を同期してマルチカムIRを生成
+
+基準プロジェクトは、先に`analyze-media.mjs`で生成した単一素材プロジェクトです。manifestへ2素材以上と、編集後タイムライン上の明示的な`cameraPlan`を指定します。
+
+```json
+{
+  "referenceAssetId": "cam-a",
+  "assets": [
+    { "id": "cam-a", "path": "/absolute/path/to/cam-a.mp4" },
+    { "id": "cam-b", "path": "/absolute/path/to/cam-b.mp4" }
+  ],
+  "cameraPlan": [
+    { "assetId": "cam-a", "timelineIn": 0, "timelineOut": 4.5 },
+    { "assetId": "cam-b", "timelineIn": 4.5, "timelineOut": 8.0 }
+  ],
+  "sync": { "maximumOffsetSeconds": 8, "minimumSyncConfidence": 0.58 }
+}
+```
+
+```bash
+node analyze-multicam.mjs \
+  --project multicam-project \
+  --manifest /absolute/path/to/multicam-manifest.json \
+  --reference-project-dir /absolute/path/to/reference-project \
+  --output-dir /absolute/path/to/data/projects/multicam-project \
+  --dashboard-url http://127.0.0.1:4317
+```
+
+音声RMS包絡の相互相関から、`対象素材のsourceTime = 基準素材のsourceTime + offset`として同期します。自動同期が不安定な素材は`manualOffsetSeconds`で上書きできます。同期信頼度不足や素材範囲外では基準カメラへフォールバックし、QCを`review`へ落とします。画角の良否を根拠なく自動判断せず、カメラ切替は`cameraPlan`を正本にします。
+
 ## 編集後プレビューを生成
 
 ```bash
@@ -150,7 +180,16 @@ node render-preview.mjs \
   --output /absolute/path/to/preview.mp4
 ```
 
-`select_range`を映像・音声で同時に連結し、再配置済み字幕を日本語フォントで焼き込みます。出力尺はEditorial IRの期待値と照合し、許容誤差を超える場合は失敗します。
+単一素材では`--media`を使用します。複数素材ではasset IDと絶対パスを記載したJSONを渡します。
+
+```bash
+node render-preview.mjs \
+  --asset-bindings /absolute/path/to/asset-bindings.json \
+  --ir /absolute/path/to/multicam-editorial-ir.json \
+  --output /absolute/path/to/multicam-preview.mp4
+```
+
+`select_range`を素材ごとに切り出し、解像度・フレームレート・音声形式を正規化して連結します。再配置済み字幕を日本語フォントで焼き込み、出力尺をEditorial IRの期待値と照合します。現MVPの音声戦略は`selected_asset`で、選択カメラの音声を映像と一緒に切り替えます。
 
 ## 確認用ファイルをGoogle Driveへ保存
 
@@ -170,6 +209,7 @@ node upload-artifact.mjs \
 ```bash
 node transcription-adapters.test.mjs
 node analysis-core.test.mjs
+node multicam-core.test.mjs
 node render-preview.mjs --self-test
 node test.mjs
 ```

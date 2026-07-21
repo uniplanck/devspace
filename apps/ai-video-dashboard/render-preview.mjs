@@ -18,7 +18,7 @@ const FONT_CANDIDATES = [
 
 function usage(message) {
   if (message) process.stderr.write(`${message}\n`);
-  process.stderr.write('Usage: node render-preview.mjs --media <video> --ir <editorial-ir.json> --output <preview.mp4> [--font <fontfile>] [--crf 18]\n');
+  process.stderr.write('Usage: node render-preview.mjs (--media <video> | --asset-bindings <json>) --ir <editorial-ir.json> --output <preview.mp4> [--font <fontfile>] [--crf 18]\n');
   process.exit(2);
 }
 
@@ -58,7 +58,13 @@ function normalizeSelects(operations) {
       const sourceOut = finiteNumber(operation.sourceOut, `select_range ${operation.id || index} sourceOut`);
       const timelineIn = finiteNumber(operation.timelineIn ?? 0, `select_range ${operation.id || index} timelineIn`);
       if (sourceIn < 0 || sourceOut <= sourceIn || timelineIn < 0) throw new Error(`Invalid select_range ${operation.id || index}`);
-      return { id: operation.id || `select-${index + 1}`, sourceIn, sourceOut, timelineIn };
+      return {
+        id: operation.id || `select-${index + 1}`,
+        assetId: String(operation.assetId || 'default'),
+        sourceIn,
+        sourceOut,
+        timelineIn,
+      };
     })
     .sort((left, right) => left.timelineIn - right.timelineIn || left.sourceIn - right.sourceIn);
   if (!selects.length) throw new Error('Editorial IR has no enabled select_range operations');
@@ -122,6 +128,36 @@ async function chooseFont(explicit) {
   throw new Error('No Japanese-capable preview font found. Pass --font <fontfile>.');
 }
 
+function normalizeAssetBindingValue(value) {
+  if (typeof value === 'string') return { path: value };
+  if (value && typeof value === 'object' && !Array.isArray(value)) return value;
+  return {};
+}
+
+async function resolveAssetPaths(options, plan) {
+  let bindings = options.assetBindings && typeof options.assetBindings === 'object' && !Array.isArray(options.assetBindings)
+    ? options.assetBindings
+    : {};
+  if (options['asset-bindings']) {
+    const file = path.resolve(String(options['asset-bindings']));
+    if (!await fileExists(file)) throw new Error(`Asset bindings file not found: ${file}`);
+    const parsed = JSON.parse(await fs.readFile(file, 'utf8'));
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('Asset bindings JSON must be an object');
+    bindings = parsed;
+  }
+  const assetIds = [...new Set(plan.selects.map((select) => select.assetId))];
+  const result = new Map();
+  for (const assetId of assetIds) {
+    const binding = normalizeAssetBindingValue(bindings[assetId]);
+    const candidate = binding.path || (assetIds.length === 1 ? options.media : undefined);
+    if (!candidate) throw new Error(`Media binding is missing for asset ${assetId}`);
+    const resolved = path.resolve(String(candidate));
+    if (!await fileExists(resolved)) throw new Error(`Media file not found for ${assetId}: ${resolved}`);
+    result.set(assetId, resolved);
+  }
+  return result;
+}
+
 async function probeMedia(mediaPath, ffprobePath) {
   const { stdout } = await execFileAsync(ffprobePath, [
     '-v', 'error',
@@ -149,25 +185,42 @@ function escapeFilterPath(value) {
     .replaceAll("'", "\\'");
 }
 
-async function buildFilterScript({ plan, media, fontFile, tempDir }) {
+async function buildFilterScript({ plan, mediaByAsset, inputIndexByAsset, outputMedia, fontFile, tempDir }) {
   const lines = [];
   const concatInputs = [];
+  const hasAudio = plan.selects.some((select) => mediaByAsset.get(select.assetId)?.hasAudio);
   for (const [index, select] of plan.selects.entries()) {
-    lines.push(`[0:v]trim=start=${select.sourceIn}:end=${select.sourceOut},setpts=PTS-STARTPTS[v${index}]`);
+    const inputIndex = inputIndexByAsset.get(select.assetId);
+    const media = mediaByAsset.get(select.assetId);
+    const duration = round(select.sourceOut - select.sourceIn, 6);
+    lines.push(
+      `[${inputIndex}:v]trim=start=${select.sourceIn}:end=${select.sourceOut},setpts=PTS-STARTPTS,`
+      + `scale=${outputMedia.width}:${outputMedia.height}:force_original_aspect_ratio=decrease,`
+      + `pad=${outputMedia.width}:${outputMedia.height}:(ow-iw)/2:(oh-ih)/2,setsar=1,`
+      + `fps=${plan.frameRate},format=yuv420p[v${index}]`,
+    );
     concatInputs.push(`[v${index}]`);
-    if (media.hasAudio) {
-      lines.push(`[0:a]atrim=start=${select.sourceIn}:end=${select.sourceOut},asetpts=PTS-STARTPTS[a${index}]`);
+    if (hasAudio) {
+      if (media?.hasAudio) {
+        lines.push(
+          `[${inputIndex}:a]atrim=start=${select.sourceIn}:end=${select.sourceOut},asetpts=PTS-STARTPTS,`
+          + 'aresample=48000,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo'
+          + `[a${index}]`,
+        );
+      } else {
+        lines.push(`anullsrc=r=48000:cl=stereo,atrim=duration=${duration},asetpts=PTS-STARTPTS[a${index}]`);
+      }
       concatInputs.push(`[a${index}]`);
     }
   }
-  if (media.hasAudio) {
+  if (hasAudio) {
     lines.push(`${concatInputs.join('')}concat=n=${plan.selects.length}:v=1:a=1[vcat][acat]`);
   } else {
     lines.push(`${concatInputs.join('')}concat=n=${plan.selects.length}:v=1:a=0[vcat]`);
   }
 
   let previous = 'vcat';
-  const fontSize = Math.max(32, Math.min(72, Math.round(media.height / 16)));
+  const fontSize = Math.max(32, Math.min(72, Math.round(outputMedia.height / 16)));
   const boxBorder = Math.max(12, Math.round(fontSize * 0.3));
   for (const [index, caption] of plan.captions.entries()) {
     const textFile = path.join(tempDir, `caption-${String(index + 1).padStart(3, '0')}.txt`);
@@ -181,51 +234,61 @@ async function buildFilterScript({ plan, media, fontFile, tempDir }) {
       + `textfile='${escapeFilterPath(textFile)}':`
       + `expansion=none:reload=0:fontcolor=white:fontsize=${size}:`
       + `box=1:boxcolor=black@0.62:boxborderw=${boxBorder}:`
-      + `x=(w-text_w)/2:y=h-text_h-${Math.max(42, Math.round(media.height * 0.07))}:`
+      + `x=(w-text_w)/2:y=h-text_h-${Math.max(42, Math.round(outputMedia.height * 0.07))}:`
       + `enable='between(t,${caption.start},${caption.end})'[${next}]`,
     );
     previous = next;
   }
   if (previous === 'vcat') lines.push('[vcat]null[vout]');
   else lines.push(`[${previous}]null[vout]`);
-  return `${lines.join(';\n')}\n`;
+  return { script: `${lines.join(';\n')}\n`, hasAudio };
 }
 
 export async function renderPreview(options) {
-  const mediaPath = path.resolve(options.media);
   const irPath = path.resolve(options.ir);
   const outputPath = path.resolve(options.output);
-  if (!await fileExists(mediaPath)) throw new Error(`Media file not found: ${mediaPath}`);
   if (!await fileExists(irPath)) throw new Error(`Editorial IR file not found: ${irPath}`);
-  const [editorialIr, media, fontFile] = await Promise.all([
+  const [editorialIr, fontFile] = await Promise.all([
     fs.readFile(irPath, 'utf8').then(JSON.parse),
-    probeMedia(mediaPath, options.ffprobe || DEFAULT_FFPROBE),
     chooseFont(options.font),
   ]);
   const plan = buildRenderPlan(editorialIr);
+  const assetPaths = await resolveAssetPaths(options, plan);
+  const assetIds = [...assetPaths.keys()];
+  const mediaRows = await Promise.all(assetIds.map(async (assetId, index) => ({
+    assetId,
+    inputIndex: index,
+    path: assetPaths.get(assetId),
+    media: await probeMedia(assetPaths.get(assetId), options.ffprobe || DEFAULT_FFPROBE),
+  })));
+  const mediaByAsset = new Map(mediaRows.map((row) => [row.assetId, row.media]));
+  const inputIndexByAsset = new Map(mediaRows.map((row) => [row.assetId, row.inputIndex]));
+  const outputMedia = mediaByAsset.get(plan.selects[0].assetId);
   for (const select of plan.selects) {
-    if (select.sourceOut > media.durationSeconds + 0.05) throw new Error(`select_range ${select.id} exceeds source duration`);
+    const media = mediaByAsset.get(select.assetId);
+    if (!media) throw new Error(`Media metadata is missing for asset ${select.assetId}`);
+    if (select.sourceOut > media.durationSeconds + 0.05) {
+      throw new Error(`select_range ${select.id} exceeds ${select.assetId} duration`);
+    }
   }
 
   const tempDir = await fs.mkdtemp(path.join(tmpdir(), 'ai-video-preview-'));
   try {
     const filterScript = path.join(tempDir, 'filter.txt');
-    await fs.writeFile(filterScript, await buildFilterScript({ plan, media, fontFile, tempDir }), 'utf8');
+    const filter = await buildFilterScript({ plan, mediaByAsset, inputIndexByAsset, outputMedia, fontFile, tempDir });
+    await fs.writeFile(filterScript, filter.script, 'utf8');
     await fs.mkdir(path.dirname(outputPath), { recursive: true });
-    const args = [
-      '-hide_banner', '-loglevel', 'error', '-y',
-      '-i', mediaPath,
-      '-filter_complex_script', filterScript,
-      '-map', '[vout]',
-    ];
-    if (media.hasAudio) args.push('-map', '[acat]');
+    const args = ['-hide_banner', '-loglevel', 'error', '-y'];
+    for (const row of mediaRows) args.push('-i', row.path);
+    args.push('-filter_complex_script', filterScript, '-map', '[vout]');
+    if (filter.hasAudio) args.push('-map', '[acat]');
     args.push(
       '-c:v', 'libx264',
       '-preset', String(options.preset || 'medium'),
       '-crf', String(options.crf || '18'),
       '-pix_fmt', 'yuv420p',
     );
-    if (media.hasAudio) args.push('-c:a', 'aac', '-b:a', '192k');
+    if (filter.hasAudio) args.push('-c:a', 'aac', '-b:a', '192k');
     else args.push('-an');
     args.push('-movflags', '+faststart', outputPath);
     await execFileAsync(options.ffmpeg || DEFAULT_FFMPEG, args, { timeout: 10 * 60_000, maxBuffer: 4_000_000 });
@@ -239,7 +302,9 @@ export async function renderPreview(options) {
     return {
       ok: true,
       output: outputPath,
-      sourceDurationSeconds: round(media.durationSeconds),
+      assetCount: assetIds.length,
+      sourceDurationSeconds: round(outputMedia.durationSeconds),
+      sourceDurationsSeconds: Object.fromEntries(mediaRows.map((row) => [row.assetId, round(row.media.durationSeconds)])),
       outputDurationSeconds: round(rendered.durationSeconds),
       expectedDurationSeconds: plan.durationSeconds,
       durationErrorSeconds: round(durationError),
@@ -273,7 +338,7 @@ async function main() {
     process.stdout.write(`${JSON.stringify({ ok: true, test: 'preview-render-plan' })}\n`);
     return;
   }
-  if (!options.media || !options.ir || !options.output) usage('Missing required arguments');
+  if ((!options.media && !options['asset-bindings']) || !options.ir || !options.output) usage('Missing required arguments');
   process.stdout.write(`${JSON.stringify(await renderPreview(options), null, 2)}\n`);
 }
 
