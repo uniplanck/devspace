@@ -212,12 +212,26 @@ node upload-artifact.mjs \
 
 既定では`grive:AI-Video-Production-OS/Test-Artifacts/YYYY-MM-DD/<projectId>/`へアップロードし、共有URL・SHA-256・用途を`artifacts.json`へ記録します。Dashboardの「確認用ファイル」から直接開けます。保存先は`AIVIDEO_DRIVE_REMOTE`と`AIVIDEO_DRIVE_BASE`で変更できます。
 
+## 実撮影素材を品質評価
+
+マルチカム解析済みプロジェクトと編集後プレビューを指定します。
+
+```bash
+node evaluate-real-footage.mjs \
+  --project-dir /absolute/path/to/data/projects/multicam-project \
+  --preview /absolute/path/to/multicam-preview.mp4 \
+  --dashboard-url http://100.66.201.64:4317
+```
+
+冒頭・中央・終端の音声を再照合し、同期ドリフトを`ms/分`で算出します。さらに出力尺、source範囲、master音声統一、平均音量、クリッピングリスク、カット境界の音切れを100点満点で採点し、`evaluation-report.json`へ改善指示付きで保存します。Dashboardの「実素材品質評価」に同じ結果を表示します。
+
 ## テスト
 
 ```bash
 node transcription-adapters.test.mjs
 node analysis-core.test.mjs
 node multicam-core.test.mjs
+node real-footage-quality.test.mjs
 node render-preview.mjs --self-test
 node test.mjs
 ```
