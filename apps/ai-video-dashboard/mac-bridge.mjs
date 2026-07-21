@@ -1,6 +1,8 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { renderPreview } from './render-preview.mjs';
+import { uploadArtifact } from './upload-artifact.mjs';
 
 const ROOT = path.dirname(new URL(import.meta.url).pathname);
 const DASHBOARD = process.env.AIVIDEO_DASHBOARD_URL || 'http://100.66.201.64:4317';
@@ -288,6 +290,57 @@ function clipMatchesExpected(clip, expected) {
 }
 
 async function handleCommand(command) {
+  if (command.action === 'render_preview') {
+    const project = await requestJson(`${DASHBOARD}/api/projects/${command.projectId}`);
+    const operations = project?.editorialIr?.timeline?.operations;
+    if (!Array.isArray(operations)) return { status: 'unsupported', reason: 'Project has no Editorial IR operations' };
+    const assetIds = [...new Set(operations.filter((operation) => operation?.type === 'select_range').map((operation) => operation.assetId).filter(Boolean))];
+    if (assetIds.length !== 1) return { status: 'unsupported', reason: 'Headless preview currently requires exactly one source asset' };
+    const bindings = normalizeAssetBindings(command.payload);
+    const binding = bindings[assetIds[0]] || {};
+    const mediaPath = typeof binding.path === 'string' && path.isAbsolute(binding.path)
+      ? binding.path
+      : typeof project.sourceMediaPath === 'string' && path.isAbsolute(project.sourceMediaPath)
+        ? project.sourceMediaPath
+        : null;
+    if (!mediaPath) return { status: 'unsupported', reason: `Preview source path is missing for ${assetIds[0]}` };
+    await fs.access(mediaPath);
+
+    const fingerprint = stableHash(project.editorialIr).slice(0, 16);
+    const previewDir = path.join(STATE_DIR, 'previews');
+    await fs.mkdir(previewDir, { recursive: true });
+    const irFile = path.join(previewDir, `${command.projectId}-${fingerprint}.editorial-ir.json`);
+    const outputPath = typeof command.payload?.outputPath === 'string' && path.isAbsolute(command.payload.outputPath)
+      ? command.payload.outputPath
+      : path.join(previewDir, `${command.projectId}-${fingerprint}.mp4`);
+    await fs.writeFile(irFile, `${JSON.stringify(project.editorialIr, null, 2)}\n`, 'utf8');
+    const render = await renderPreview({
+      media: mediaPath,
+      ir: irFile,
+      output: outputPath,
+      ...(command.payload?.font ? { font: command.payload.font } : {}),
+      ...(command.payload?.crf ? { crf: command.payload.crf } : {}),
+    });
+
+    let artifact = null;
+    if (command.payload?.publishToDrive !== false) {
+      const uploaded = await uploadArtifact({
+        projectId: command.projectId,
+        file: outputPath,
+        kind: 'preview',
+        label: command.payload?.label || 'AI解析・編集プレビュー',
+        note: command.payload?.note || 'Editorial IRから自動生成',
+        dataDir: STATE_DIR,
+      });
+      artifact = uploaded.artifact;
+      await requestJson(`${DASHBOARD}/api/projects/${command.projectId}/artifacts`, {
+        method: 'POST',
+        body: JSON.stringify({ artifact }),
+      });
+    }
+    return { status: 'completed', mode: 'headless_ffmpeg_preview', render, artifact };
+  }
+
   const capabilitySnapshot = await inventoryCapabilities();
   const tools = capabilitySnapshot.tools;
   if (command.action === 'sync_timeline') {
@@ -301,11 +354,6 @@ async function handleCommand(command) {
   if (command.action === 'export_xml') {
     const tool = chooseTool(tools, [/export.*xml/i, /xml.*export/i, /nle.*xml/i]);
     if (!tool) return { status: 'unsupported', reason: 'No XML export tool found', capabilityCount: tools.length };
-    return { status: 'completed', tool: tool.name, output: await callTool(tool.name, command.payload || {}) };
-  }
-  if (command.action === 'render_preview') {
-    const tool = chooseTool(tools, [/export.*(video|preview|mp4)/i, /render.*preview/i]);
-    if (!tool) return { status: 'unsupported', reason: 'No preview export tool found', capabilityCount: tools.length };
     return { status: 'completed', tool: tool.name, output: await callTool(tool.name, command.payload || {}) };
   }
   if (command.action === 'apply_ir') {
