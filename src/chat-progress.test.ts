@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -10,9 +10,12 @@ import {
 
 const previousPath = process.env.DEVSPACE_CHAT_PROGRESS_PATH;
 const previousUsageLabel = process.env.DEVSPACE_USAGE_LABEL;
+const previousStaleMinutes = process.env.DEVSPACE_PROGRESS_STALE_MINUTES;
 const stateDir = mkdtempSync(join(tmpdir(), "devspace-chat-progress-"));
-process.env.DEVSPACE_CHAT_PROGRESS_PATH = join(stateDir, "chat-progress.json");
+const progressFile = join(stateDir, "chat-progress.json");
+process.env.DEVSPACE_CHAT_PROGRESS_PATH = progressFile;
 process.env.DEVSPACE_USAGE_LABEL = "GAG";
+process.env.DEVSPACE_PROGRESS_STALE_MINUTES = "15";
 
 const started = updateChatProgress({
   sessionId: "session_test",
@@ -113,6 +116,17 @@ const parallel = updateChatProgress({
 assert.equal(parallel.status, "running");
 assert.equal(listChatProgress().length, 2);
 
+const staleStore = JSON.parse(readFileSync(progressFile, "utf8")) as {
+  records: Array<{ id: string; status: string; updatedAt: string; risk?: string }>;
+};
+const staleRecord = staleStore.records.find((record) => record.id === parallel.id);
+assert.ok(staleRecord);
+staleRecord.updatedAt = new Date(Date.now() - 16 * 60_000).toISOString();
+writeFileSync(progressFile, `${JSON.stringify(staleStore, null, 2)}\n`);
+const autoPaused = listChatProgress().find((record) => record.id === parallel.id);
+assert.equal(autoPaused?.status, "paused");
+assert.equal(autoPaused?.risk, "長時間更新がないため自動一時停止");
+
 const fallbackStarted = updateChatProgress({
   sessionId: "changing_transport_1",
   chatLabel: "GAE fallback task",
@@ -159,4 +173,9 @@ if (previousUsageLabel === undefined) {
   delete process.env.DEVSPACE_USAGE_LABEL;
 } else {
   process.env.DEVSPACE_USAGE_LABEL = previousUsageLabel;
+}
+if (previousStaleMinutes === undefined) {
+  delete process.env.DEVSPACE_PROGRESS_STALE_MINUTES;
+} else {
+  process.env.DEVSPACE_PROGRESS_STALE_MINUTES = previousStaleMinutes;
 }
