@@ -1,11 +1,13 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { registerAppTool } from "@modelcontextprotocol/ext-apps/server";
 import * as z from "zod/v4";
+import { batchEditWorkspace } from "./batch-edit.js";
 import type { ServerConfig } from "./config.js";
 import {
   focusedContext,
   projectSnapshot,
   reviewChanges,
+  workspaceDigest,
   type WorkspaceInspectionContext,
 } from "./compound-tools.js";
 import { runDesignAudit } from "./design-audit.js";
@@ -26,6 +28,13 @@ const readOnlyAnnotations = {
   readOnlyHint: true,
   destructiveHint: false,
   idempotentHint: true,
+  openWorldHint: false,
+};
+
+const batchWriteAnnotations = {
+  readOnlyHint: false,
+  destructiveHint: true,
+  idempotentHint: false,
   openWorldHint: false,
 };
 
@@ -88,7 +97,9 @@ export function registerV11Tools(
   if (enabledTools.has("project_snapshot")) {
     registerProjectSnapshot(server, input);
     registerFocusedContext(server, input);
+    registerWorkspaceDigest(server, input);
     registerReviewChanges(server, input);
+    if (input.config.toolMode !== "codex") registerBatchEdit(server, input);
   }
 
   if (enabledTools.has("design_audit")) {
@@ -193,7 +204,13 @@ export function enabledV11ToolNames(config: ServerConfig): string[] {
   return [
     config.skillMatcher && config.skillsEnabled ? "match_skills" : undefined,
     ...(config.compoundTools
-      ? ["project_snapshot", "focused_context", "review_changes"]
+      ? [
+          "project_snapshot",
+          "focused_context",
+          "workspace_digest",
+          "review_changes",
+          ...(config.toolMode === "codex" ? [] : ["batch_edit"]),
+        ]
       : []),
     config.designAudit ? "design_audit" : undefined,
   ].filter((name): name is string => name !== undefined);
@@ -297,6 +314,120 @@ function registerFocusedContext(
         toolInput,
       );
       return toolResult(result, `Focused context: ${result.relevantFiles.length} relevant file(s).`);
+    },
+  );
+}
+
+function registerWorkspaceDigest(
+  server: McpServer,
+  input: {
+    workspaces: WorkspaceRegistry;
+    localAgentProviders: LocalAgentProviderAvailability[];
+  },
+): void {
+  registerAppTool(
+    server,
+    "workspace_digest",
+    {
+      title: "Workspace digest",
+      description: "Combine Git/project state, focused search, and bounded relevant file excerpts in one read-only call. Prefer this over separate status, grep, and repeated read calls when the next decision depends on the combined context.",
+      inputSchema: {
+        workspaceId: z.string(),
+        focus: z.string().min(1).max(4_000),
+        paths: z.array(z.string().max(1_000)).max(25).optional(),
+        maxFiles: z.number().int().min(1).max(12).optional(),
+        contextLines: z.number().int().min(10).max(240).optional(),
+        maxCharacters: z.number().int().min(4_000).max(60_000).optional(),
+      },
+      outputSchema: {
+        project: z.object({
+          branch: z.string().nullable(),
+          dirty: z.boolean(),
+          changedFiles: z.array(z.string()),
+          diffStat: z.string(),
+          package: z.object({
+            name: z.string().optional(),
+            version: z.string().optional(),
+            scripts: z.array(z.string()),
+          }),
+          applicableInstructions: z.array(z.string()),
+          recommendedTestCommand: z.string().optional(),
+          recommendedBuildCommand: z.string().optional(),
+        }),
+        focus: z.object({
+          relevantFiles: z.array(z.string()),
+          relevantSymbols: z.array(z.object({ name: z.string(), path: z.string(), line: z.number().int().positive() })),
+          searchMatches: z.array(z.object({ path: z.string(), line: z.number().int().positive() })),
+          impactCandidates: z.array(z.string()),
+          detectionMethod: z.enum(["bounded_text_fallback", "codegraph_adapter_unavailable_fallback"]),
+        }),
+        excerpts: z.array(z.object({
+          path: z.string(),
+          startLine: z.number().int().positive(),
+          endLine: z.number().int().positive(),
+          content: z.string(),
+          truncated: z.boolean(),
+        })),
+        metrics: metricsSchema,
+      },
+      _meta: {},
+      annotations: readOnlyAnnotations,
+    },
+    async ({ workspaceId, ...toolInput }) => {
+      const workspace = input.workspaces.getWorkspace(workspaceId);
+      const result = await workspaceDigest(
+        inspectionContext(workspace, input.localAgentProviders),
+        toolInput,
+      );
+      return toolResult(
+        result,
+        `Workspace digest: ${result.focus.relevantFiles.length} relevant file(s), ${result.excerpts.length} excerpt(s).`,
+      );
+    },
+  );
+}
+
+function registerBatchEdit(
+  server: McpServer,
+  input: { workspaces: WorkspaceRegistry },
+): void {
+  registerAppTool(
+    server,
+    "batch_edit",
+    {
+      title: "Batch edit files",
+      description: "Apply pre-determined exact replacements to up to 12 independent files in one call. Use only after the required changes are known; do not use when one file's result must be inspected before deciding the next edit.",
+      inputSchema: {
+        workspaceId: z.string(),
+        files: z.array(z.object({
+          path: z.string().min(1).max(4_000),
+          edits: z.array(z.object({
+            oldText: z.string().min(1),
+            newText: z.string(),
+          })).min(1).max(30),
+        })).min(1).max(12),
+      },
+      outputSchema: {
+        status: z.literal("applied"),
+        files: z.array(z.object({
+          path: z.string(),
+          replacements: z.number().int().positive(),
+          charactersBefore: z.number().int().nonnegative(),
+          charactersAfter: z.number().int().nonnegative(),
+        })),
+        totalFiles: z.number().int().positive(),
+        totalReplacements: z.number().int().positive(),
+      },
+      _meta: {},
+      annotations: batchWriteAnnotations,
+    },
+    async ({ workspaceId, files }) => {
+      const workspace = input.workspaces.getWorkspace(workspaceId);
+      const result = await batchEditWorkspace(workspace.root, files);
+      return toolResult(
+        result,
+        `Batch edit applied ${result.totalReplacements} replacement(s) across ${result.totalFiles} file(s).`,
+      );
     },
   );
 }
