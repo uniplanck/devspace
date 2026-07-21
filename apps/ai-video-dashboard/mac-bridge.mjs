@@ -92,6 +92,92 @@ function textEventKey(startFrame, durationFrames, text) {
   return `${startFrame}:${durationFrames}:${text}`;
 }
 
+function stableHash(value) {
+  return crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
+}
+
+function bridgeStateFile(projectId) {
+  return path.join(STATE_DIR, `project-${projectId}.json`);
+}
+
+async function readBridgeState(projectId) {
+  try { return JSON.parse(await fs.readFile(bridgeStateFile(projectId), 'utf8')); }
+  catch (error) {
+    if (error?.code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
+async function writeBridgeState(projectId, value) {
+  await fs.mkdir(STATE_DIR, { recursive: true });
+  const file = bridgeStateFile(projectId);
+  const temp = `${file}.${process.pid}.tmp`;
+  await fs.writeFile(temp, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
+  await fs.rename(temp, file);
+}
+
+function secondsToFrame(seconds, fps) {
+  const value = Number(seconds);
+  if (!Number.isFinite(value) || value < 0) throw new Error(`Invalid non-negative time: ${seconds}`);
+  return Math.round(value * fps);
+}
+
+function normalizeAssetBindings(payload) {
+  const raw = payload?.assetBindings;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+  const bindings = {};
+  for (const [assetId, binding] of Object.entries(raw)) {
+    if (typeof binding === 'string') bindings[assetId] = { path: binding };
+    else if (binding && typeof binding === 'object') bindings[assetId] = binding;
+  }
+  return bindings;
+}
+
+function compileEditorialPlan(operations, fps) {
+  const selected = operations
+    .filter((operation) => operation?.type === 'select_range')
+    .map((operation, index) => {
+      const sourceInFrame = secondsToFrame(operation.sourceIn, fps);
+      const sourceOutFrame = secondsToFrame(operation.sourceOut, fps);
+      if (sourceOutFrame <= sourceInFrame) throw new Error(`select_range ${operation.id || index} has an empty range`);
+      return {
+        operationId: operation.id || `select-${index}`,
+        assetId: operation.assetId,
+        sourceInFrame,
+        durationFrames: sourceOutFrame - sourceInFrame,
+        requestedTimelineFrame: Number.isFinite(Number(operation.timelineIn))
+          ? secondsToFrame(operation.timelineIn, fps)
+          : null,
+        ordinal: index,
+      };
+    });
+
+  let cursor = 0;
+  const clips = selected
+    .sort((a, b) => (a.requestedTimelineFrame ?? Number.MAX_SAFE_INTEGER) - (b.requestedTimelineFrame ?? Number.MAX_SAFE_INTEGER) || a.ordinal - b.ordinal)
+    .map((segment) => {
+      const startFrame = segment.requestedTimelineFrame ?? cursor;
+      cursor = Math.max(cursor, startFrame + segment.durationFrames);
+      return { ...segment, startFrame };
+    });
+
+  const captions = operations
+    .filter((operation) => operation?.type === 'caption')
+    .map((operation, index) => {
+      const startFrame = secondsToFrame(operation.timelineIn || 0, fps);
+      const endFrame = Math.max(startFrame + 1, secondsToFrame(operation.timelineOut ?? operation.timelineIn ?? 0, fps));
+      return {
+        operationId: operation.id || `caption-${index}`,
+        startFrame,
+        durationFrames: endFrame - startFrame,
+        text: String(operation.text || ''),
+        role: operation.role || 'caption',
+      };
+    });
+
+  return { fps, clips, captions };
+}
+
 function existingTextEventKeys(timeline) {
   const keys = new Set();
   for (const track of timeline?.tracks || []) {
@@ -113,6 +199,91 @@ async function callTool(name, args = {}) {
   const message = toolErrorMessage(result);
   if (message) throw new Error(`Palmier tool ${name} failed: ${message}`);
   return result;
+}
+
+function mediaItemsFromResult(result) {
+  const parsed = toolContentJson(result);
+  if (Array.isArray(parsed)) return parsed;
+  if (Array.isArray(parsed?.media)) return parsed.media;
+  if (Array.isArray(parsed?.assets)) return parsed.assets;
+  if (Array.isArray(parsed?.items)) return parsed.items;
+  if (Array.isArray(parsed?.entries)) return parsed.entries;
+  return [];
+}
+
+function mediaIdentity(item) {
+  return item?.id || item?.mediaRef || item?.reference || item?.assetId || null;
+}
+
+function mediaDisplayName(item) {
+  return item?.name || item?.displayName || item?.filename || item?.title || '';
+}
+
+async function resolveMediaBindings({ command, projectId, plan, tools }) {
+  const getMediaTool = chooseTool(tools, [/^get_media$/i]);
+  const importMediaTool = chooseTool(tools, [/^import_media$/i]);
+  if (!getMediaTool || !importMediaTool) throw new Error('Palmier requires get_media and import_media for cut application');
+
+  const bindings = normalizeAssetBindings(command.payload);
+  const requiredAssetIds = [...new Set(plan.clips.map((clip) => clip.assetId))];
+  const resolved = {};
+  let media = mediaItemsFromResult(await callTool(getMediaTool.name, {}));
+
+  for (const assetId of requiredAssetIds) {
+    if (!assetId) throw new Error('select_range is missing assetId');
+    const binding = bindings[assetId];
+    if (!binding) throw new Error(`No asset binding supplied for ${assetId}`);
+
+    if (typeof binding.mediaRef === 'string' && binding.mediaRef) {
+      const found = media.find((item) => mediaIdentity(item) === binding.mediaRef);
+      if (!found) throw new Error(`Bound mediaRef not found in Palmier: ${binding.mediaRef}`);
+      resolved[assetId] = binding.mediaRef;
+      continue;
+    }
+
+    const importName = binding.name || `gag-${projectId}-${assetId}`;
+    const existing = media.find((item) => mediaDisplayName(item) === importName);
+    if (existing && mediaIdentity(existing)) {
+      resolved[assetId] = mediaIdentity(existing);
+      continue;
+    }
+
+    const source = {};
+    if (typeof binding.path === 'string' && path.isAbsolute(binding.path)) source.path = binding.path;
+    else if (typeof binding.url === 'string' && /^https:\/\//.test(binding.url)) source.url = binding.url;
+    else throw new Error(`Asset ${assetId} requires an absolute local path, HTTPS URL, or mediaRef`);
+
+    await callTool(importMediaTool.name, { source, name: importName });
+    media = mediaItemsFromResult(await callTool(getMediaTool.name, {}));
+    const imported = media.find((item) => mediaDisplayName(item) === importName);
+    const mediaRef = mediaIdentity(imported);
+    if (!mediaRef) throw new Error(`Palmier imported ${assetId} but did not expose a mediaRef`);
+    resolved[assetId] = mediaRef;
+  }
+  return resolved;
+}
+
+function allTimelineClips(timeline) {
+  const clips = [];
+  for (const [trackIndex, track] of (timeline?.tracks || []).entries()) {
+    for (const clip of track.clips || []) clips.push({ ...clip, trackIndex });
+    for (const group of track.captionGroups || []) {
+      for (const row of group.clips || group.rows || []) {
+        if (Array.isArray(row) && row.length >= 4) {
+          clips.push({ id: row[0], startFrame: row[1], durationFrames: row[2], textContent: row[3], mediaType: 'text', trackIndex });
+        }
+      }
+    }
+  }
+  return clips;
+}
+
+function clipMatchesExpected(clip, expected) {
+  return clip
+    && clip.mediaRef === expected.mediaRef
+    && clip.startFrame === expected.startFrame
+    && clip.durationFrames === expected.durationFrames
+    && Number(clip.trimStartFrame || 0) === expected.sourceInFrame;
 }
 
 async function handleCommand(command) {
@@ -137,76 +308,153 @@ async function handleCommand(command) {
     return { status: 'completed', tool: tool.name, output: await callTool(tool.name, command.payload || {}) };
   }
   if (command.action === 'apply_ir') {
-    const timelineTool = chooseTool(tools, [/^get_timeline$/i, /timeline.*(get|inspect|read)/i, /(get|inspect|read).*timeline/i]);
-    const addTextsTool = chooseTool(tools, [/^add_texts$/i, /add.*text/i]);
-    if (!timelineTool || !addTextsTool) {
+    const timelineTool = chooseTool(tools, [/^get_timeline$/i]);
+    const addTextsTool = chooseTool(tools, [/^add_texts$/i]);
+    const addClipsTool = chooseTool(tools, [/^add_clips$/i]);
+    const setClipTool = chooseTool(tools, [/^set_clip_properties$/i]);
+    const removeClipsTool = chooseTool(tools, [/^remove_clips$/i]);
+    if (!timelineTool || !addTextsTool || !addClipsTool || !setClipTool || !removeClipsTool) {
       return {
         status: 'unsupported',
-        reason: 'Palmier does not expose the minimum get_timeline + add_texts tool set',
+        reason: 'Palmier lacks one or more required timeline tools',
         capabilityCount: tools.length,
       };
     }
 
     const project = await requestJson(`${DASHBOARD}/api/projects/${command.projectId}`);
     const operations = project?.editorialIr?.timeline?.operations;
-    if (!Array.isArray(operations)) {
-      return { status: 'unsupported', reason: 'Project has no Editorial IR operations' };
+    if (!Array.isArray(operations)) return { status: 'unsupported', reason: 'Project has no Editorial IR operations' };
+
+    const initialTimeline = toolContentJson(await callTool(timelineTool.name, {})) || {};
+    const fps = Number(initialTimeline.fps || project.editorialIr.timeline.frameRate || 30);
+    if (!Number.isFinite(fps) || fps <= 0) throw new Error(`Invalid project fps: ${fps}`);
+    const plan = compileEditorialPlan(operations, fps);
+    const bindings = await resolveMediaBindings({ command, projectId: command.projectId, plan, tools });
+    const expectedClips = plan.clips.map((clip) => ({ ...clip, mediaRef: bindings[clip.assetId] }));
+    const fingerprint = stableHash({ plan, bindings });
+    const previousState = await readBridgeState(command.projectId);
+    const initialClips = allTimelineClips(initialTimeline);
+
+    if (previousState?.fingerprint === fingerprint) {
+      const managedVideoValid = (previousState.managedVideoClipIds || []).every((id) => initialClips.some((clip) => clip.id === id));
+      const captionsValid = plan.captions.every((caption) => existingTextEventKeys(initialTimeline).has(textEventKey(caption.startFrame, caption.durationFrames, caption.text)));
+      const expectedValid = expectedClips.every((expected) => initialClips.some((clip) => clipMatchesExpected(clip, expected)));
+      if (managedVideoValid && captionsValid && expectedValid) {
+        return {
+          status: 'completed',
+          mode: 'cut_caption_mvp',
+          result: 'already_applied',
+          fps,
+          fingerprint,
+          operationResults: operations.map((operation) => ({ operationId: operation.id, type: operation.type, status: 'already_present' })),
+        };
+      }
     }
 
-    const timelineResult = await callTool(timelineTool.name, {});
-    const timeline = toolContentJson(timelineResult) || {};
-    const fps = Number(timeline.fps || project.editorialIr.timeline.frameRate || 30);
-    const existing = existingTextEventKeys(timeline);
-    const captionEntries = [];
-    const operationResults = [];
+    const beforeIds = new Set(initialClips.map((clip) => clip.id));
+    const createdVideoIds = [];
+    const createdTextIds = [];
+    let mutationStarted = false;
+    try {
+      if (expectedClips.length) {
+        mutationStarted = true;
+        await callTool(addClipsTool.name, {
+          entries: expectedClips.map((clip) => ({
+            mediaRef: clip.mediaRef,
+            startFrame: clip.startFrame,
+            durationFrames: clip.durationFrames,
+          })),
+        });
 
-    for (const operation of operations) {
-      if (operation.type !== 'caption') {
-        operationResults.push({
+        let timeline = toolContentJson(await callTool(timelineTool.name, {})) || {};
+        let clips = allTimelineClips(timeline);
+        for (const expected of expectedClips) {
+          const created = clips.find((clip) => !beforeIds.has(clip.id)
+            && clip.mediaRef === expected.mediaRef
+            && clip.startFrame === expected.startFrame
+            && clip.durationFrames === expected.durationFrames
+            && clip.mediaType !== 'audio');
+          if (!created?.id) throw new Error(`Unable to identify Palmier clip for ${expected.operationId}`);
+          createdVideoIds.push(created.id);
+          if (expected.sourceInFrame > 0) {
+            await callTool(setClipTool.name, { clipIds: [created.id], trimStartFrame: expected.sourceInFrame });
+          }
+        }
+      }
+
+      let timelineAfterVideo = toolContentJson(await callTool(timelineTool.name, {})) || {};
+      const existingText = existingTextEventKeys(timelineAfterVideo);
+      const captionsToAdd = plan.captions.filter((caption) => !existingText.has(textEventKey(caption.startFrame, caption.durationFrames, caption.text)));
+      if (captionsToAdd.length) {
+        mutationStarted = true;
+        const idsBeforeText = new Set(allTimelineClips(timelineAfterVideo).map((clip) => clip.id));
+        await callTool(addTextsTool.name, {
+          entries: captionsToAdd.map((caption) => ({
+            startFrame: caption.startFrame,
+            durationFrames: caption.durationFrames,
+            content: caption.text,
+            fontName: 'Helvetica-Bold',
+            fontSize: caption.role === 'emphasis' ? 72 : 50,
+            color: '#FFFFFF',
+            alignment: 'center',
+            transform: { centerX: 0.5, centerY: 0.88 },
+          })),
+        });
+        timelineAfterVideo = toolContentJson(await callTool(timelineTool.name, {})) || {};
+        for (const clip of allTimelineClips(timelineAfterVideo)) {
+          if (!idsBeforeText.has(clip.id) && clip.mediaType === 'text') createdTextIds.push(clip.id);
+        }
+      }
+
+      const finalTimeline = toolContentJson(await callTool(timelineTool.name, {})) || {};
+      const finalClips = allTimelineClips(finalTimeline);
+      const clipChecks = expectedClips.map((expected) => ({
+        operationId: expected.operationId,
+        valid: finalClips.some((clip) => clipMatchesExpected(clip, expected)),
+      }));
+      const captionChecks = plan.captions.map((caption) => ({
+        operationId: caption.operationId,
+        valid: existingTextEventKeys(finalTimeline).has(textEventKey(caption.startFrame, caption.durationFrames, caption.text)),
+      }));
+      const failedCheck = [...clipChecks, ...captionChecks].find((check) => !check.valid);
+      if (failedCheck) throw new Error(`Postflight verification failed for ${failedCheck.operationId}`);
+
+      const oldManagedIds = [...new Set([...(previousState?.managedVideoClipIds || []), ...(previousState?.managedTextClipIds || [])])]
+        .filter((id) => finalClips.some((clip) => clip.id === id))
+        .filter((id) => !createdVideoIds.includes(id) && !createdTextIds.includes(id));
+      if (oldManagedIds.length) await callTool(removeClipsTool.name, { clipIds: oldManagedIds });
+
+      await writeBridgeState(command.projectId, {
+        schemaVersion: 1,
+        projectId: command.projectId,
+        fingerprint,
+        fps,
+        managedVideoClipIds: createdVideoIds,
+        managedTextClipIds: createdTextIds,
+        appliedAt: new Date().toISOString(),
+      });
+
+      return {
+        status: 'completed',
+        mode: 'cut_caption_mvp',
+        result: previousState ? 'replaced_managed_edit' : 'applied',
+        fps,
+        fingerprint,
+        managedVideoClipIds: createdVideoIds,
+        managedTextClipIds: createdTextIds,
+        operationResults: operations.map((operation) => ({
           operationId: operation.id,
           type: operation.type,
-          status: 'unsupported',
-          reason: 'MVP Palmier mapping currently applies caption operations only',
-        });
-        continue;
+          status: operation.type === 'remove_range' ? 'applied_by_reconstruction' : 'applied_exactly',
+        })),
+      };
+    } catch (error) {
+      if (mutationStarted) {
+        const rollbackIds = [...new Set([...createdVideoIds, ...createdTextIds])];
+        if (rollbackIds.length) await callTool(removeClipsTool.name, { clipIds: rollbackIds }).catch(() => undefined);
       }
-      const startFrame = Math.max(0, Math.round(Number(operation.timelineIn || 0) * fps));
-      const endFrame = Math.max(startFrame + 1, Math.round(Number(operation.timelineOut || operation.timelineIn || 0) * fps));
-      const durationFrames = endFrame - startFrame;
-      const key = textEventKey(startFrame, durationFrames, operation.text);
-      if (existing.has(key)) {
-        operationResults.push({ operationId: operation.id, type: operation.type, status: 'already_present' });
-        continue;
-      }
-      captionEntries.push({
-        startFrame,
-        durationFrames,
-        content: operation.text,
-        fontName: 'Helvetica-Bold',
-        fontSize: operation.role === 'emphasis' ? 72 : 50,
-        color: '#FFFFFF',
-        alignment: 'center',
-        transform: { centerX: 0.5, centerY: 0.88 },
-      });
-      operationResults.push({ operationId: operation.id, type: operation.type, status: 'pending' });
+      throw error;
     }
-
-    let applyOutput = null;
-    if (captionEntries.length) {
-      applyOutput = await callTool(addTextsTool.name, { entries: captionEntries });
-      for (const result of operationResults) {
-        if (result.status === 'pending') result.status = 'applied_exactly';
-      }
-    }
-
-    return {
-      status: 'completed',
-      mode: 'caption_mvp',
-      fps,
-      capabilityCount: tools.length,
-      operationResults,
-      applyOutput,
-    };
   }
   throw new Error(`Unsupported command action: ${command.action}`);
 }
@@ -236,9 +484,33 @@ async function pollOnce() {
 async function main() {
   await fs.mkdir(STATE_DIR, { recursive: true });
   const once = process.argv.includes('--once');
+  if (process.argv.includes('--self-test')) {
+    const plan = compileEditorialPlan([
+      { id: 'a', type: 'select_range', assetId: 'cam', sourceIn: 2, sourceOut: 5, timelineIn: 0 },
+      { id: 'b', type: 'select_range', assetId: 'cam', sourceIn: 7, sourceOut: 9, timelineIn: 3 },
+      { id: 'c', type: 'caption', timelineIn: 0.5, timelineOut: 2.5, text: 'test' },
+    ], 30);
+    const valid = plan.clips.length === 2
+      && plan.clips[0].sourceInFrame === 60
+      && plan.clips[0].durationFrames === 90
+      && plan.clips[1].startFrame === 90
+      && plan.clips[1].sourceInFrame === 210
+      && plan.captions[0].startFrame === 15
+      && plan.captions[0].durationFrames === 60;
+    if (!valid) throw new Error('Bridge compiler self-test failed');
+    console.log(JSON.stringify({ ok: true, test: 'bridge-compiler' }));
+    return;
+  }
   if (process.argv.includes('--inventory')) {
     const snapshot = await inventoryCapabilities();
     console.log(JSON.stringify({ ok: true, tools: snapshot.tools.length, file: path.join(STATE_DIR, 'palmier-capabilities.json') }, null, 2));
+    return;
+  }
+  if (process.argv.includes('--media')) {
+    const snapshot = await inventoryCapabilities();
+    const tool = chooseTool(snapshot.tools, [/^get_media$/i]);
+    if (!tool) throw new Error('Palmier get_media tool is unavailable');
+    console.log(JSON.stringify(await callTool(tool.name, {}), null, 2));
     return;
   }
   do {

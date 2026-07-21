@@ -49,6 +49,30 @@ tailscale serve status
 
 Mac上のGAG Bridgeはキューを取得し、Palmierのlocalhost MCPへ変換して実行します。Palmier MCP自体をtailnetへ直接公開しません。
 
+### カット＋テロップ適用
+
+`apply_ir`では、`payload.assetBindings`でEditorial IRの`assetId`をPalmier素材へ解決します。
+
+```json
+{
+  "projectId": "demo-talk",
+  "action": "apply_ir",
+  "target": "palmier-mac",
+  "payload": {
+    "assetBindings": {
+      "cam-a": {
+        "path": "/absolute/path/to/cam-a.mp4",
+        "name": "interview-cam-a"
+      }
+    }
+  }
+}
+```
+
+bindingは絶対ローカルパス、HTTPS URL、既存`mediaRef`に対応します。Bridgeは`select_range`を連続タイムラインへコンパイルし、`trimStartFrame`を適用します。`remove_range`は選択区間だけを再構築することで反映します。
+
+同一IRの再実行はno-opです。IR変更時は新構成を作成・検証してから、Bridge自身が以前作成したclipだけを削除します。ユーザー作成clipは削除しません。失敗時は今回作成したclipだけをrollbackします。
+
 ## Mac / Palmier Bridge
 
 Palmier Proでプロジェクトを開いた状態で起動します。
