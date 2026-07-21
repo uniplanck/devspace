@@ -92,9 +92,42 @@ node apps/ai-video-dashboard/mac-bridge.mjs
 
 環境変数 `AIVIDEO_DASHBOARD_URL`、`PALMIER_MCP_URL`、`AIVIDEO_POLL_MS`、`AIVIDEO_BRIDGE_TARGET` で変更できます。
 
-現在の`apply_ir`はCaption MVPです。`caption`操作をPalmierの`add_texts`へ変換し、同じ開始frame・duration・本文が既に存在する場合は`already_present`として重複追加しません。`select_range`と`remove_range`は素材対応表とカットマッピングが完成するまで`unsupported`を明示して実行しません。
+現在の`apply_ir`はカット＋字幕MVPです。`select_range`を連続タイムラインへ再構築し、映像・音声へ同一のtrimを適用します。`remove_range`は選択区間だけを再構築する方式で反映し、`caption`は`add_texts`へ変換します。同一IRの再実行は`already_applied`となり、変更時は新構成の検証後にBridge管理clipだけを差し替えます。
 
-検証用の空プロジェクトは `fixtures/empty-lab.palmier` です。
+診断コマンド:
+
+```bash
+node mac-bridge.mjs --inventory
+node mac-bridge.mjs --media
+node mac-bridge.mjs --timeline
+node mac-bridge.mjs --self-test
+```
+
+検証用の空プロジェクトは `fixtures/empty-lab.palmier`、解析E2E用は`fixtures/analysis-lab.palmier`です。
+
+## メディア解析からEditorial IRを生成
+
+```bash
+node analyze-media.mjs \
+  --project analysis-lab \
+  --media /absolute/path/to/source.mp4 \
+  --transcript /absolute/path/to/transcript.json \
+  --output-dir /absolute/path/to/data/projects/analysis-lab \
+  --dashboard-url http://127.0.0.1:4317
+```
+
+FFmpegでメディア情報、無音、シーン変化を取得し、sidecar文字起こしからフィラー・言い直し・反復テイク候補を検出します。自動削除は高信頼候補だけに限定し、根拠ID付きの`analysis.json`、`editorial-ir.json`、`qc-report.json`を生成します。表情・反応の意味判定は未実装で、シーン変化を補助信号としてのみ保持します。
+
+## 編集後プレビューを生成
+
+```bash
+node render-preview.mjs \
+  --media /absolute/path/to/source.mp4 \
+  --ir /absolute/path/to/editorial-ir.json \
+  --output /absolute/path/to/preview.mp4
+```
+
+`select_range`を映像・音声で同時に連結し、再配置済み字幕を日本語フォントで焼き込みます。出力尺はEditorial IRの期待値と照合し、許容誤差を超える場合は失敗します。
 
 ## 確認用ファイルをGoogle Driveへ保存
 
@@ -112,6 +145,8 @@ node upload-artifact.mjs \
 ## テスト
 
 ```bash
+node analysis-core.test.mjs
+node render-preview.mjs --self-test
 node test.mjs
 ```
 

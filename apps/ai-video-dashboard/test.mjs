@@ -4,6 +4,20 @@ import { promises as fs } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
+import { buildRenderPlan } from './render-preview.mjs';
+
+const previewPlan = buildRenderPlan({
+  timeline: {
+    frameRate: 30,
+    operations: [
+      { type: 'select_range', sourceIn: 0, sourceOut: 2, timelineIn: 0 },
+      { type: 'select_range', sourceIn: 4, sourceOut: 7, timelineIn: 2 },
+      { type: 'caption', timelineIn: 1, timelineOut: 3, text: 'preview' },
+    ],
+  },
+});
+assert.equal(previewPlan.durationSeconds, 5);
+assert.equal(previewPlan.captions.length, 1);
 
 const port = 44317;
 const base = `http://127.0.0.1:${port}`;
@@ -62,6 +76,29 @@ try {
   const synced = await syncResponse.json();
   assert.equal(synced.id, 'analysis-lab');
   assert.equal(synced.analysis.version, 'analysis.v1');
+
+  const artifactResponse = await fetch(`${base}/api/projects/analysis-lab/artifacts`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      artifact: {
+        id: 'artifact-test',
+        kind: 'preview',
+        label: 'Preview',
+        note: 'test',
+        filename: 'preview.mp4',
+        bytes: 100,
+        sha256: '0123456789abcdef',
+        drivePath: 'AI-Video/preview.mp4',
+        url: 'https://drive.google.com/open?id=test',
+        createdAt: '2026-07-21T01:05:00.000Z',
+      },
+    }),
+  });
+  assert.equal(artifactResponse.status, 201);
+  const withArtifact = await artifactResponse.json();
+  assert.equal(withArtifact.artifacts.length, 1);
+  assert.equal(withArtifact.artifacts[0].kind, 'preview');
 
   const mismatchResponse = await fetch(`${base}/api/projects/wrong-id`, {
     method: 'PUT',

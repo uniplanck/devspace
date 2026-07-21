@@ -116,6 +116,27 @@ async function syncProject(id, body) {
   return getProject(id);
 }
 
+async function registerArtifact(id, body) {
+  if (!safeId(id)) throw Object.assign(new Error('invalid project id'), { status: 400 });
+  const project = await getProject(id);
+  if (!project) throw Object.assign(new Error('project not found'), { status: 404 });
+  const artifact = body?.artifact && typeof body.artifact === 'object' && !Array.isArray(body.artifact)
+    ? body.artifact
+    : body;
+  if (!artifact || typeof artifact !== 'object' || Array.isArray(artifact)) throw Object.assign(new Error('invalid artifact'), { status: 400 });
+  if (typeof artifact.url !== 'string' || !artifact.url.startsWith('https://')) throw Object.assign(new Error('artifact.url must be HTTPS'), { status: 400 });
+  if (typeof artifact.sha256 !== 'string' || artifact.sha256.length < 8) throw Object.assign(new Error('artifact.sha256 is required'), { status: 400 });
+  if (typeof artifact.kind !== 'string' || !artifact.kind) throw Object.assign(new Error('artifact.kind is required'), { status: 400 });
+  const file = path.join(DATA_DIR, 'projects', id, 'artifacts.json');
+  const manifest = await readJson(file, { version: 1, artifacts: [] });
+  manifest.version = 1;
+  manifest.updatedAt = new Date().toISOString();
+  manifest.artifacts = [artifact, ...(Array.isArray(manifest.artifacts) ? manifest.artifacts : [])]
+    .filter((item, index, items) => index === items.findIndex((candidate) => candidate.sha256 === item.sha256 && candidate.kind === item.kind));
+  await writeJsonAtomic(file, manifest);
+  return getProject(id);
+}
+
 async function listQueue() {
   const entries = await fs.readdir(path.join(DATA_DIR, 'queue'));
   const rows = [];
@@ -194,7 +215,7 @@ async function handler(req, res) {
     }
     if (pathname === '/api/capabilities' && req.method === 'GET') {
       return sendJson(res, 200, {
-        dashboard: ['project_list', 'project_detail', 'project_sync', 'media_analysis', 'editorial_ir', 'transcript', 'qc_report', 'command_queue'],
+        dashboard: ['project_list', 'project_detail', 'project_sync', 'artifact_register', 'media_analysis', 'editorial_ir', 'transcript', 'qc_report', 'command_queue'],
         queueActions: ['apply_ir', 'export_xml', 'render_preview', 'sync_timeline'],
         adapters: { headless: 'available', palmier: 'contract_ready_mac_required', premiere: 'planned_via_xml_or_uxp' },
       });
@@ -207,6 +228,10 @@ async function handler(req, res) {
     }
     if (projectMatch && req.method === 'PUT') {
       return sendJson(res, 200, await syncProject(projectMatch[1], await parseBody(req)));
+    }
+    const artifactMatch = pathname.match(/^\/api\/projects\/([^/]+)\/artifacts$/);
+    if (artifactMatch && req.method === 'POST') {
+      return sendJson(res, 201, await registerArtifact(artifactMatch[1], await parseBody(req)));
     }
     if (pathname === '/api/queue' && req.method === 'GET') return sendJson(res, 200, { commands: await listQueue() });
     if (pathname === '/api/queue' && req.method === 'POST') return sendJson(res, 201, await enqueue(await parseBody(req)));
