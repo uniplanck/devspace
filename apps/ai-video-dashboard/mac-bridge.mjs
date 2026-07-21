@@ -295,16 +295,25 @@ async function handleCommand(command) {
     const operations = project?.editorialIr?.timeline?.operations;
     if (!Array.isArray(operations)) return { status: 'unsupported', reason: 'Project has no Editorial IR operations' };
     const assetIds = [...new Set(operations.filter((operation) => operation?.type === 'select_range').map((operation) => operation.assetId).filter(Boolean))];
-    if (assetIds.length !== 1) return { status: 'unsupported', reason: 'Headless preview currently requires exactly one source asset' };
+    if (!assetIds.length) return { status: 'unsupported', reason: 'Project has no selected source assets' };
     const bindings = normalizeAssetBindings(command.payload);
-    const binding = bindings[assetIds[0]] || {};
-    const mediaPath = typeof binding.path === 'string' && path.isAbsolute(binding.path)
-      ? binding.path
-      : typeof project.sourceMediaPath === 'string' && path.isAbsolute(project.sourceMediaPath)
-        ? project.sourceMediaPath
-        : null;
-    if (!mediaPath) return { status: 'unsupported', reason: `Preview source path is missing for ${assetIds[0]}` };
-    await fs.access(mediaPath);
+    const projectPaths = project.sourceMediaPaths && typeof project.sourceMediaPaths === 'object'
+      ? project.sourceMediaPaths
+      : {};
+    const assetBindings = {};
+    for (const assetId of assetIds) {
+      const binding = bindings[assetId] || {};
+      const mediaPath = typeof binding.path === 'string' && path.isAbsolute(binding.path)
+        ? binding.path
+        : typeof projectPaths[assetId] === 'string' && path.isAbsolute(projectPaths[assetId])
+          ? projectPaths[assetId]
+          : assetIds.length === 1 && typeof project.sourceMediaPath === 'string' && path.isAbsolute(project.sourceMediaPath)
+            ? project.sourceMediaPath
+            : null;
+      if (!mediaPath) return { status: 'unsupported', reason: `Preview source path is missing for ${assetId}` };
+      await fs.access(mediaPath);
+      assetBindings[assetId] = { path: mediaPath };
+    }
 
     const fingerprint = stableHash(project.editorialIr).slice(0, 16);
     const previewDir = path.join(STATE_DIR, 'previews');
@@ -315,7 +324,7 @@ async function handleCommand(command) {
       : path.join(previewDir, `${command.projectId}-${fingerprint}.mp4`);
     await fs.writeFile(irFile, `${JSON.stringify(project.editorialIr, null, 2)}\n`, 'utf8');
     const render = await renderPreview({
-      media: mediaPath,
+      assetBindings,
       ir: irFile,
       output: outputPath,
       ...(command.payload?.font ? { font: command.payload.font } : {}),
