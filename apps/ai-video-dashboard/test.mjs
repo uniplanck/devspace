@@ -19,6 +19,22 @@ const previewPlan = buildRenderPlan({
 assert.equal(previewPlan.durationSeconds, 5);
 assert.equal(previewPlan.captions.length, 1);
 
+const fractionalDuration = 0.103;
+const fractionalPlan = buildRenderPlan({
+  timeline: {
+    frameRate: 30,
+    operations: Array.from({ length: 175 }, (_, index) => ({
+      id: `fractional-${index + 1}`,
+      type: 'select_range',
+      sourceIn: index * 0.2,
+      sourceOut: index * 0.2 + fractionalDuration,
+      timelineIn: index * fractionalDuration,
+    })),
+  },
+});
+assert.equal(fractionalPlan.totalFrames, Math.round(175 * fractionalDuration * 30));
+assert.equal(fractionalPlan.selects.reduce((sum, select) => sum + select.durationFrames, 0), fractionalPlan.totalFrames);
+
 const port = 44317;
 const base = `http://127.0.0.1:${port}`;
 const dataDir = await fs.mkdtemp(path.join(tmpdir(), 'ai-video-dashboard-test-'));
