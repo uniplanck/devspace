@@ -109,6 +109,47 @@ function normalizeCaptions(operations, durationSeconds) {
     .sort((left, right) => left.start - right.start || left.end - right.end);
 }
 
+function normalizeOverlays(operations, durationSeconds) {
+  const allowed = new Set(['title_card', 'chapter', 'callout', 'cta']);
+  return operations
+    .filter((operation) => allowed.has(operation?.type) && operation.enabled !== false)
+    .map((operation, index) => {
+      const start = finiteNumber(operation.timelineIn, `${operation.type} ${operation.id || index} timelineIn`);
+      const end = finiteNumber(operation.timelineOut, `${operation.type} ${operation.id || index} timelineOut`);
+      const text = String(operation.text || '').trim();
+      if (!text || start < 0 || end <= start) throw new Error(`Invalid ${operation.type} ${operation.id || index}`);
+      return {
+        id: operation.id || `${operation.type}-${index + 1}`,
+        type: operation.type,
+        start: Math.min(durationSeconds, start),
+        end: Math.min(durationSeconds, end),
+        text,
+        position: String(operation.position || (operation.type === 'chapter' ? 'top_left' : 'center')),
+      };
+    })
+    .filter((operation) => operation.end > operation.start)
+    .sort((left, right) => left.start - right.start || left.end - right.end);
+}
+
+function normalizeVisualEffects(operations, durationSeconds) {
+  return operations
+    .filter((operation) => operation?.type === 'visual_effect' && operation.enabled !== false)
+    .map((operation, index) => {
+      const start = finiteNumber(operation.timelineIn, `visual_effect ${operation.id || index} timelineIn`);
+      const end = finiteNumber(operation.timelineOut, `visual_effect ${operation.id || index} timelineOut`);
+      const scale = finiteNumber(operation.scale ?? 1.08, `visual_effect ${operation.id || index} scale`);
+      if (start < 0 || end <= start || scale < 1 || scale > 1.25) throw new Error(`Invalid visual_effect ${operation.id || index}`);
+      return {
+        id: operation.id || `visual-effect-${index + 1}`,
+        start: Math.min(durationSeconds, start),
+        end: Math.min(durationSeconds, end),
+        scale,
+      };
+    })
+    .filter((operation) => operation.end > operation.start)
+    .sort((left, right) => left.start - right.start || left.end - right.end);
+}
+
 function quantizeSelects(selects, frameRate) {
   const rawDurationSeconds = selects.reduce((sum, select) => sum + select.sourceOut - select.sourceIn, 0);
   const totalFrames = Math.max(1, Math.round(rawDurationSeconds * frameRate));
@@ -143,12 +184,17 @@ export function buildRenderPlan(editorialIr) {
   const frameRate = finiteNumber(editorialIr?.timeline?.frameRate || 30, 'timeline frameRate');
   const framePlan = quantizeSelects(normalizeSelects(operations), frameRate);
   const captions = normalizeCaptions(operations, framePlan.durationSeconds);
+  const overlays = normalizeOverlays(operations, framePlan.durationSeconds);
+  const visualEffects = normalizeVisualEffects(operations, framePlan.durationSeconds);
   return {
     frameRate,
     totalFrames: framePlan.totalFrames,
     durationSeconds: round(framePlan.durationSeconds, 6),
     selects: framePlan.selects,
     captions,
+    overlays,
+    visualEffects,
+    audioProcessing: String(editorialIr?.audio?.processing || 'none'),
     audioStrategy: String(editorialIr?.multicam?.audioStrategy || 'selected_asset'),
     masterAudioAssetId: editorialIr?.multicam?.masterAudioAssetId
       ? String(editorialIr.multicam.masterAudioAssetId)
@@ -248,10 +294,13 @@ async function buildFilterScript({ plan, mediaByAsset, inputIndexByAsset, output
     concatInputs.push(`[v${index}]`);
     if (hasAudio) {
       if (media?.hasAudio) {
+        const boundaryFade = plan.audioProcessing === 'voice_youtube' && duration > 0.08
+          ? `,afade=t=in:st=0:d=0.02,afade=t=out:st=${Math.max(0, duration - 0.02)}:d=0.02`
+          : '';
         lines.push(
           `[${audioInputIndex}:a]atrim=start=${select.audioSourceIn}:duration=${duration},asetpts=PTS-STARTPTS,`
           + 'aresample=48000,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo'
-          + `[a${index}]`,
+          + `${boundaryFade}[a${index}]`,
         );
       } else {
         lines.push(`anullsrc=r=48000:cl=stereo,atrim=duration=${duration},asetpts=PTS-STARTPTS[a${index}]`);
@@ -259,15 +308,61 @@ async function buildFilterScript({ plan, mediaByAsset, inputIndexByAsset, output
       concatInputs.push(`[a${index}]`);
     }
   }
+  let audioOutput = null;
   if (hasAudio) {
     lines.push(`${concatInputs.join('')}concat=n=${plan.selects.length}:v=1:a=1[vcat][acat]`);
+    if (plan.audioProcessing === 'voice_youtube') {
+      lines.push('[acat]highpass=f=70,acompressor=threshold=-24dB:ratio=3:attack=15:release=180,loudnorm=I=-16:LRA=9:TP=-1.5[aout]');
+      audioOutput = 'aout';
+    } else {
+      audioOutput = 'acat';
+    }
   } else {
     lines.push(`${concatInputs.join('')}concat=n=${plan.selects.length}:v=1:a=0[vcat]`);
   }
 
   let previous = 'vcat';
+  for (const [index, effect] of plan.visualEffects.entries()) {
+    const scaledWidth = Math.ceil(outputMedia.width * effect.scale / 2) * 2;
+    const scaledHeight = Math.ceil(outputMedia.height * effect.scale / 2) * 2;
+    const base = `vfxbase${index}`;
+    const zoom = `vfxzoom${index}`;
+    const zoomed = `vfxzoomed${index}`;
+    const next = `vfx${index}`;
+    lines.push(`[${previous}]split=2[${base}][${zoom}]`);
+    lines.push(`[${zoom}]scale=${scaledWidth}:${scaledHeight},crop=${outputMedia.width}:${outputMedia.height}:(iw-ow)/2:(ih-oh)/2[${zoomed}]`);
+    lines.push(`[${base}][${zoomed}]overlay=0:0:enable='between(t,${effect.start},${effect.end})'[${next}]`);
+    previous = next;
+  }
+
   const fontSize = Math.max(32, Math.min(72, Math.round(outputMedia.height / 16)));
   const boxBorder = Math.max(12, Math.round(fontSize * 0.3));
+  for (const [index, overlay] of plan.overlays.entries()) {
+    const textFile = path.join(tempDir, `overlay-${String(index + 1).padStart(3, '0')}.txt`);
+    await fs.writeFile(textFile, `${overlay.text}\n`, 'utf8');
+    const next = `voverlay${index}`;
+    const size = overlay.type === 'title_card' || overlay.type === 'cta'
+      ? Math.round(fontSize * 1.35)
+      : overlay.type === 'chapter'
+        ? Math.round(fontSize * 0.86)
+        : Math.round(fontSize * 1.05);
+    const position = overlay.position === 'top_left'
+      ? `x=${Math.round(outputMedia.width * 0.04)}:y=${Math.round(outputMedia.height * 0.06)}`
+      : overlay.position === 'top'
+        ? `x=(w-text_w)/2:y=${Math.round(outputMedia.height * 0.08)}`
+        : 'x=(w-text_w)/2:y=(h-text_h)/2';
+    const opacity = overlay.type === 'chapter' ? 0.72 : 0.82;
+    lines.push(
+      `[${previous}]drawtext=`
+      + `fontfile='${escapeFilterPath(fontFile)}':`
+      + `textfile='${escapeFilterPath(textFile)}':`
+      + `expansion=none:reload=0:fontcolor=white:fontsize=${size}:line_spacing=${Math.round(size * 0.18)}:`
+      + `box=1:boxcolor=black@${opacity}:boxborderw=${Math.round(size * 0.35)}:`
+      + `${position}:enable='between(t,${overlay.start},${overlay.end})'[${next}]`,
+    );
+    previous = next;
+  }
+
   for (const [index, caption] of plan.captions.entries()) {
     const textFile = path.join(tempDir, `caption-${String(index + 1).padStart(3, '0')}.txt`);
     await fs.writeFile(textFile, `${caption.text}\n`, 'utf8');
@@ -287,7 +382,7 @@ async function buildFilterScript({ plan, mediaByAsset, inputIndexByAsset, output
   }
   if (previous === 'vcat') lines.push('[vcat]null[vout]');
   else lines.push(`[${previous}]null[vout]`);
-  return { script: `${lines.join(';\n')}\n`, hasAudio };
+  return { script: `${lines.join(';\n')}\n`, hasAudio, audioOutput };
 }
 
 export async function renderPreview(options) {
@@ -332,7 +427,7 @@ export async function renderPreview(options) {
     const args = ['-hide_banner', '-loglevel', 'error', '-y'];
     for (const row of mediaRows) args.push('-i', row.path);
     args.push('-filter_complex_script', filterScript, '-map', '[vout]');
-    if (filter.hasAudio) args.push('-map', '[acat]');
+    if (filter.hasAudio) args.push('-map', `[${filter.audioOutput}]`);
     args.push(
       '-c:v', 'libx264',
       '-preset', String(options.preset || 'medium'),
@@ -361,6 +456,9 @@ export async function renderPreview(options) {
       durationErrorSeconds: round(durationError),
       selectCount: plan.selects.length,
       captionCount: plan.captions.length,
+      overlayCount: plan.overlays.length,
+      visualEffectCount: plan.visualEffects.length,
+      audioProcessing: plan.audioProcessing,
       audioStrategy: plan.audioStrategy,
       audioAssetIds: [...new Set(plan.selects.map((select) => select.audioAssetId))],
       hasAudio: rendered.hasAudio,
@@ -386,7 +484,12 @@ async function main() {
         ],
       },
     });
-    const ok = plan.durationSeconds === 5 && plan.selects.length === 2 && plan.captions.length === 1;
+    const ok = plan.durationSeconds === 5
+      && plan.selects.length === 2
+      && plan.captions.length === 1
+      && plan.overlays.length === 0
+      && plan.visualEffects.length === 0
+      && plan.audioProcessing === 'none';
     if (!ok) throw new Error('preview renderer self-test failed');
     process.stdout.write(`${JSON.stringify({ ok: true, test: 'preview-render-plan' })}\n`);
     return;

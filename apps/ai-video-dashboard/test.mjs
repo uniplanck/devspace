@@ -19,6 +19,23 @@ const previewPlan = buildRenderPlan({
 assert.equal(previewPlan.durationSeconds, 5);
 assert.equal(previewPlan.captions.length, 1);
 
+const retentionPlan = buildRenderPlan({
+  audio: { processing: 'voice_youtube' },
+  timeline: {
+    frameRate: 30,
+    operations: [
+      { type: 'select_range', sourceIn: 0, sourceOut: 10, timelineIn: 0 },
+      { type: 'title_card', timelineIn: 0, timelineOut: 3, text: 'Hook' },
+      { type: 'chapter', timelineIn: 3, timelineOut: 5, text: 'Chapter' },
+      { type: 'cta', timelineIn: 8, timelineOut: 10, text: 'CTA' },
+      { type: 'visual_effect', timelineIn: 0, timelineOut: 5, scale: 1.1 },
+    ],
+  },
+});
+assert.equal(retentionPlan.audioProcessing, 'voice_youtube');
+assert.equal(retentionPlan.overlays.length, 3);
+assert.equal(retentionPlan.visualEffects.length, 1);
+
 const fractionalDuration = 0.103;
 const fractionalPlan = buildRenderPlan({
   timeline: {
