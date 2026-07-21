@@ -109,16 +109,45 @@ function normalizeCaptions(operations, durationSeconds) {
     .sort((left, right) => left.start - right.start || left.end - right.end);
 }
 
+function quantizeSelects(selects, frameRate) {
+  const rawDurationSeconds = selects.reduce((sum, select) => sum + select.sourceOut - select.sourceIn, 0);
+  const totalFrames = Math.max(1, Math.round(rawDurationSeconds * frameRate));
+  const quantized = selects.map((select, index) => {
+    const startFrame = Math.round(select.timelineIn * frameRate);
+    const endFrame = index + 1 < selects.length
+      ? Math.round(selects[index + 1].timelineIn * frameRate)
+      : totalFrames;
+    const durationFrames = endFrame - startFrame;
+    if (durationFrames <= 0) throw new Error(`select_range ${select.id} collapses after frame quantization`);
+    const sourceStartFrame = Math.round(select.sourceIn * frameRate);
+    const audioSourceStartFrame = Math.round(select.audioSourceIn * frameRate);
+    return {
+      ...select,
+      timelineIn: startFrame / frameRate,
+      sourceIn: sourceStartFrame / frameRate,
+      sourceOut: (sourceStartFrame + durationFrames) / frameRate,
+      audioSourceIn: audioSourceStartFrame / frameRate,
+      audioSourceOut: (audioSourceStartFrame + durationFrames) / frameRate,
+      startFrame,
+      durationFrames,
+    };
+  });
+  const quantizedFrames = quantized.reduce((sum, select) => sum + select.durationFrames, 0);
+  if (quantizedFrames !== totalFrames) throw new Error(`Frame plan mismatch: ${quantizedFrames} != ${totalFrames}`);
+  return { selects: quantized, totalFrames, durationSeconds: totalFrames / frameRate };
+}
+
 export function buildRenderPlan(editorialIr) {
   const operations = editorialIr?.timeline?.operations;
   if (!Array.isArray(operations)) throw new Error('Editorial IR timeline.operations is required');
-  const selects = normalizeSelects(operations);
-  const durationSeconds = round(selects.reduce((sum, select) => sum + select.sourceOut - select.sourceIn, 0));
-  const captions = normalizeCaptions(operations, durationSeconds);
+  const frameRate = finiteNumber(editorialIr?.timeline?.frameRate || 30, 'timeline frameRate');
+  const framePlan = quantizeSelects(normalizeSelects(operations), frameRate);
+  const captions = normalizeCaptions(operations, framePlan.durationSeconds);
   return {
-    frameRate: finiteNumber(editorialIr?.timeline?.frameRate || 30, 'timeline frameRate'),
-    durationSeconds,
-    selects,
+    frameRate,
+    totalFrames: framePlan.totalFrames,
+    durationSeconds: round(framePlan.durationSeconds, 6),
+    selects: framePlan.selects,
     captions,
     audioStrategy: String(editorialIr?.multicam?.audioStrategy || 'selected_asset'),
     masterAudioAssetId: editorialIr?.multicam?.masterAudioAssetId
@@ -208,18 +237,19 @@ async function buildFilterScript({ plan, mediaByAsset, inputIndexByAsset, output
     const inputIndex = inputIndexByAsset.get(select.assetId);
     const audioInputIndex = inputIndexByAsset.get(select.audioAssetId);
     const media = mediaByAsset.get(select.audioAssetId);
-    const duration = round(select.sourceOut - select.sourceIn, 6);
+    const duration = select.durationFrames / plan.frameRate;
     lines.push(
-      `[${inputIndex}:v]trim=start=${select.sourceIn}:end=${select.sourceOut},setpts=PTS-STARTPTS,`
+      `[${inputIndex}:v]trim=start=${select.sourceIn},setpts=PTS-STARTPTS,`
+      + `fps=${plan.frameRate},trim=end_frame=${select.durationFrames},setpts=PTS-STARTPTS,`
       + `scale=${outputMedia.width}:${outputMedia.height}:force_original_aspect_ratio=decrease,`
       + `pad=${outputMedia.width}:${outputMedia.height}:(ow-iw)/2:(oh-ih)/2,setsar=1,`
-      + `fps=${plan.frameRate},format=yuv420p[v${index}]`,
+      + `format=yuv420p[v${index}]`,
     );
     concatInputs.push(`[v${index}]`);
     if (hasAudio) {
       if (media?.hasAudio) {
         lines.push(
-          `[${audioInputIndex}:a]atrim=start=${select.audioSourceIn}:end=${select.audioSourceOut},asetpts=PTS-STARTPTS,`
+          `[${audioInputIndex}:a]atrim=start=${select.audioSourceIn}:duration=${duration},asetpts=PTS-STARTPTS,`
           + 'aresample=48000,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo'
           + `[a${index}]`,
         );
