@@ -108,8 +108,8 @@ function parseBoolean(value: string | undefined): boolean {
   return ["1", "true", "yes", "on"].includes(value?.toLowerCase() ?? "");
 }
 
-function parseFeatureFlag(value: string | undefined, name: string): boolean {
-  if (value === undefined) return false;
+function parseFeatureFlag(value: string | undefined, name: string, defaultValue = false): boolean {
+  if (value === undefined) return defaultValue;
   const normalized = value.trim().toLowerCase();
   if (["1", "true", "yes", "on"].includes(normalized)) return true;
   if (["0", "false", "no", "off"].includes(normalized)) return false;
@@ -356,7 +356,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     ),
     usageContent: parseUsageContentMode(env.DEVSPACE_USAGE_CONTENT),
     skillMatcher: parseFeatureFlag(env.DEVSPACE_SKILL_MATCHER, "DEVSPACE_SKILL_MATCHER"),
-    compoundTools: parseFeatureFlag(env.DEVSPACE_COMPOUND_TOOLS, "DEVSPACE_COMPOUND_TOOLS"),
+    compoundTools: parseFeatureFlag(env.DEVSPACE_COMPOUND_TOOLS, "DEVSPACE_COMPOUND_TOOLS", true),
     builtinProfiles: parseFeatureFlag(env.DEVSPACE_BUILTIN_PROFILES, "DEVSPACE_BUILTIN_PROFILES"),
     designAudit: parseFeatureFlag(env.DEVSPACE_DESIGN_AUDIT, "DEVSPACE_DESIGN_AUDIT"),
     designAuditAllowedHosts: parseStringList(

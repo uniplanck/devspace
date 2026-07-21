@@ -248,6 +248,127 @@ export async function focusedContext(
   });
 }
 
+export interface WorkspaceDigestResult extends Record<string, unknown> {
+  project: {
+    branch: string | null;
+    dirty: boolean;
+    changedFiles: string[];
+    diffStat: string;
+    package: ProjectSnapshotResult["package"];
+    applicableInstructions: string[];
+    recommendedTestCommand?: string;
+    recommendedBuildCommand?: string;
+  };
+  focus: {
+    relevantFiles: string[];
+    relevantSymbols: FocusedContextResult["relevantSymbols"];
+    searchMatches: FocusedContextResult["searchMatches"];
+    impactCandidates: string[];
+    detectionMethod: FocusedContextResult["detectionMethod"];
+  };
+  excerpts: Array<{
+    path: string;
+    startLine: number;
+    endLine: number;
+    content: string;
+    truncated: boolean;
+  }>;
+  metrics: ToolMetrics;
+}
+
+export async function workspaceDigest(
+  context: WorkspaceInspectionContext,
+  options: {
+    focus: string;
+    paths?: string[];
+    maxFiles?: number;
+    contextLines?: number;
+    maxCharacters?: number;
+  },
+): Promise<WorkspaceDigestResult> {
+  const startedAt = performance.now();
+  const maxFiles = clampInteger(options.maxFiles, 6, 1, 12);
+  const contextLines = clampInteger(options.contextLines, 60, 10, 240);
+  const maxCharacters = clampInteger(options.maxCharacters, 24_000, 4_000, 60_000);
+  const [snapshot, focused] = await Promise.all([
+    projectSnapshot(context, { maxCharacters: Math.min(16_000, maxCharacters) }),
+    focusedContext(context, {
+      focus: options.focus,
+      paths: options.paths,
+      maxFiles,
+      maxCharacters: Math.min(16_000, maxCharacters),
+    }),
+  ]);
+
+  const excerpts: WorkspaceDigestResult["excerpts"] = [];
+  for (const display of focused.relevantFiles.slice(0, maxFiles)) {
+    const content = await readBoundedTextFile(resolve(context.root, display), context.root, 256_000);
+    if (content === undefined) continue;
+    const lines = content.split(/\r?\n/);
+    const matchLine = focused.searchMatches.find((match) => match.path === display)?.line ?? 1;
+    const halfWindow = Math.floor(contextLines / 2);
+    const startLine = Math.max(1, matchLine - halfWindow);
+    const endLine = Math.min(lines.length, startLine + contextLines - 1);
+    const excerpt = lines
+      .slice(startLine - 1, endLine)
+      .map((line) => containsSecretValue(line) ? "[redacted: potential secret]" : line)
+      .join("\n");
+    excerpts.push({
+      path: display,
+      startLine,
+      endLine,
+      content: excerpt,
+      truncated: startLine > 1 || endLine < lines.length,
+    });
+  }
+
+  return buildBoundedPayload({
+    startedAt,
+    maxCharacters,
+    build: (contentBudget) => {
+      const changedFiles = takeWithinCharacterBudget(snapshot.changedFiles, Math.floor(contentBudget * 0.08));
+      const instructions = takeWithinCharacterBudget(snapshot.applicableInstructions, Math.floor(contentBudget * 0.06));
+      const files = takeWithinCharacterBudget(focused.relevantFiles, Math.floor(contentBudget * 0.08));
+      const symbols = takeWithinCharacterBudget(focused.relevantSymbols, Math.floor(contentBudget * 0.1));
+      const matches = takeWithinCharacterBudget(focused.searchMatches, Math.floor(contentBudget * 0.1));
+      const impact = takeWithinCharacterBudget(focused.impactCandidates, Math.floor(contentBudget * 0.06));
+      const boundedExcerpts = takeWithinCharacterBudget(excerpts, Math.floor(contentBudget * 0.48));
+      const truncated = changedFiles.truncated || instructions.truncated || files.truncated
+        || symbols.truncated || matches.truncated || impact.truncated || boundedExcerpts.truncated
+        || snapshot.metrics.truncated || focused.metrics.truncated;
+      return {
+        payload: {
+          project: {
+            branch: snapshot.branch,
+            dirty: snapshot.dirty,
+            changedFiles: changedFiles.items,
+            diffStat: snapshot.diffStat,
+            package: snapshot.package,
+            applicableInstructions: instructions.items,
+            ...(snapshot.recommendedTestCommand
+              ? { recommendedTestCommand: snapshot.recommendedTestCommand }
+              : {}),
+            ...(snapshot.recommendedBuildCommand
+              ? { recommendedBuildCommand: snapshot.recommendedBuildCommand }
+              : {}),
+          },
+          focus: {
+            relevantFiles: files.items,
+            relevantSymbols: symbols.items,
+            searchMatches: matches.items,
+            impactCandidates: impact.items,
+            detectionMethod: focused.detectionMethod,
+          },
+          excerpts: boundedExcerpts.items,
+        },
+        returnedItems: changedFiles.items.length + files.items.length + symbols.items.length
+          + matches.items.length + boundedExcerpts.items.length,
+        truncated,
+      };
+    },
+  });
+}
+
 export interface ReviewChangesResult extends Record<string, unknown> {
   changedFiles: Array<{ path: string; status: string }>;
   diffStat: string;
