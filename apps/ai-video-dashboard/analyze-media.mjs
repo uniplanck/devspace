@@ -11,10 +11,10 @@ import {
   buildAnalysisDocument,
   buildEditorialIr,
   buildQcReport,
-  normalizeTranscript,
   planRemovals,
   stableFingerprint,
 } from './analysis-core.mjs';
+import { parseCommandArgs, resolveTranscript } from './transcription-adapters.mjs';
 
 const execFileAsync = promisify(execFile);
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
@@ -25,7 +25,7 @@ function parseArgs(argv) {
     const token = argv[index];
     if (!token.startsWith('--')) continue;
     const key = token.slice(2);
-    if (key === 'no-scenes' || key === 'dry-run') {
+    if (key === 'no-scenes' || key === 'dry-run' || key === 'no-auto-transcript') {
       options[key] = true;
       continue;
     }
@@ -48,39 +48,6 @@ function parseFrameRate(value) {
   const [left, right] = text.split('/').map(Number);
   const rate = right ? left / right : left;
   return Number.isFinite(rate) && rate > 0 ? Math.round(rate * 1000) / 1000 : 30;
-}
-
-function parseTimestamp(value) {
-  const match = String(value).trim().match(/(?:(\d+):)?(\d{2}):(\d{2})[,.](\d{3})/u);
-  if (!match) return undefined;
-  return Number(match[1] || 0) * 3600 + Number(match[2]) * 60 + Number(match[3]) + Number(match[4]) / 1000;
-}
-
-function parseTimedText(text, extension) {
-  const cleaned = String(text).replace(/^WEBVTT[^\n]*\n+/u, '').trim();
-  const blocks = cleaned.split(/\n\s*\n/u);
-  const segments = [];
-  for (const block of blocks) {
-    const lines = block.split(/\r?\n/u).map((line) => line.trim()).filter(Boolean);
-    const timingIndex = lines.findIndex((line) => line.includes('-->'));
-    if (timingIndex < 0) continue;
-    const [startText, endText] = lines[timingIndex].split('-->').map((part) => part.trim().split(/\s+/u)[0]);
-    const start = parseTimestamp(startText);
-    const end = parseTimestamp(endText);
-    const content = lines.slice(timingIndex + 1).join(' ').replace(/<[^>]+>/gu, '').trim();
-    if (start === undefined || end === undefined || end <= start || !content) continue;
-    segments.push({ start, end, speaker: 'speaker-1', text: content });
-  }
-  return { language: 'und', provider: extension.slice(1), segments };
-}
-
-async function loadTranscript(file) {
-  if (!file) return { language: 'und', provider: 'none', segments: [] };
-  const extension = path.extname(file).toLowerCase();
-  const text = await fs.readFile(file, 'utf8');
-  if (extension === '.json') return normalizeTranscript(JSON.parse(text));
-  if (extension === '.srt' || extension === '.vtt') return normalizeTranscript(parseTimedText(text, extension));
-  throw new Error(`Unsupported transcript format: ${extension}`);
 }
 
 async function run(file, args, options = {}) {
@@ -224,12 +191,26 @@ async function main() {
   const outputDir = path.resolve(String(options['output-dir'] || path.join(ROOT, 'data', 'projects', projectId)));
   const assetId = String(options['asset-id'] || 'cam-a');
   const generatedAt = new Date().toISOString();
+  const transcriptCommand = options['transcript-command'] ? {
+    executable: String(options['transcript-command']),
+    args: parseCommandArgs(options['transcript-command-args-json']),
+    format: String(options['transcript-format'] || 'json'),
+    provider: options['transcript-provider'] ? String(options['transcript-provider']) : undefined,
+    timeoutMs: options['transcript-timeout-ms'] ? Number(options['transcript-timeout-ms']) : undefined,
+    cwd: options['transcript-cwd'] ? String(options['transcript-cwd']) : undefined,
+  } : undefined;
 
-  const [media, transcript, fingerprint] = await Promise.all([
+  const [media, transcriptResolution, fingerprint] = await Promise.all([
     probeMedia(mediaPath),
-    loadTranscript(transcriptPath),
+    resolveTranscript({
+      mediaPath,
+      transcriptPath,
+      autoSidecar: !options['no-auto-transcript'],
+      command: transcriptCommand,
+    }),
     fileSha256(mediaPath),
   ]);
+  const transcript = transcriptResolution.transcript;
   media.fingerprint = fingerprint;
   const policy = {
     ...DEFAULT_ANALYSIS_POLICY,
@@ -266,6 +247,13 @@ async function main() {
     removalCount: plan.removals.length,
     captionCount: editorialIr.timeline.operations.filter((operation) => operation.type === 'caption').length,
     qcStatus: qc.status,
+    transcriptSource: {
+      source: transcriptResolution.source,
+      sourcePath: transcriptResolution.sourcePath,
+      format: transcriptResolution.format,
+      provider: transcript.provider,
+      segmentCount: transcript.segments.length,
+    },
     files: ['project.json', 'analysis.json', 'transcript.json', 'editorial-ir.json', 'qc-report.json'],
   };
 
