@@ -21,7 +21,9 @@ const started = updateChatProgress({
   chatLabel: "GAG進化",
   workspaceId: "ws_test",
   workspaceRoot: "/tmp/gag",
+  taskCategory: "agent-runtime",
   overallProgress: 0,
+  programProgress: 76,
   currentProgress: 0,
   currentTask: "既存確認",
   estimateMinutes: 20,
@@ -52,7 +54,11 @@ assert.equal(updated.estimatedTotalSeconds, 1_200);
 const formattedProgress = formatChatProgressResult(updated);
 assert.match(formattedProgress, /^\*\*GAG · 実行状況\*\*/u);
 assert.match(formattedProgress, /\| 状態 \| ▶️ 実行中 \|/u);
-assert.match(formattedProgress, /\| 全体進捗 \| 50% \|/u);
+assert.match(formattedProgress, /\| 日時 \| .* JST \|/u);
+assert.match(formattedProgress, /\| 今回進捗 \| 50% \|/u);
+assert.match(formattedProgress, /\| 全フェーズ完成進捗 \| 76% \|/u);
+assert.match(formattedProgress, /\| 初回予測 \|/u);
+assert.match(formattedProgress, /\| 予測学習 \|/u);
 assert.match(formattedProgress, /\| 現在の作業 \| 実装 \|/u);
 assert.match(formattedProgress, /\| 次の作業 \| テスト \|/u);
 
@@ -111,6 +117,22 @@ assert.equal(fallbackUpdated.startedAt, fallbackStarted.startedAt);
 assert.equal(fallbackUpdated.usageScope, "task-fallback");
 assert.match(formatChatProgressResult({ ...fallbackUpdated, status: "completed" }), /このタスク内のGAG累計/u);
 assert.equal(listChatProgress().length, 3);
+
+const nextTaskSameChat = updateChatProgress({
+  sessionId: "next_task_same_chat",
+  conversationId: "11111111-2222-3333-4444-555555555555",
+  chatLabel: "GAG進化",
+  workspaceId: "ws_test",
+  workspaceRoot: "/tmp/gag",
+  taskCategory: "agent-runtime",
+  overallProgress: 0,
+  programProgress: 77,
+  currentTask: "次の作業を開始",
+  estimateMinutes: 10,
+});
+assert.notEqual(nextTaskSameChat.id, completed.id);
+assert.equal(nextTaskSameChat.programProgress, 77);
+assert.equal(listChatProgress().length, 4);
 
 if (previousPath === undefined) {
   delete process.env.DEVSPACE_CHAT_PROGRESS_PATH;
