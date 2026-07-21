@@ -86,6 +86,11 @@ try {
   assert.equal(ready, true);
   const health = await (await fetch(`${base}/api/health`)).json();
   assert.equal(health.ok, true);
+  const qualityLab = await (await fetch(`${base}/api/quality-lab?profile=explainer`)).json();
+  assert.equal(qualityLab.categoryCount, 12);
+  assert.equal(qualityLab.criterionCount, 82);
+  assert.equal(qualityLab.categories.reduce((sum, category) => sum + category.weight, 0), 100);
+  assert.equal(qualityLab.releases.filter((row) => row.kind === 'editing-test').at(-1).humanScore, 20);
   const projects = await (await fetch(`${base}/api/projects`)).json();
   assert.ok(projects.projects.some((project) => project.id === 'demo-talk'));
   const project = await (await fetch(`${base}/api/projects/demo-talk`)).json();
@@ -157,9 +162,9 @@ try {
   })).json();
   assert.equal(patched.status, 'claimed');
   const html = await (await fetch(base)).text();
-  assert.match(html, /AI Video Production/);
-  assert.match(html, /実素材品質評価/);
-  assert.match(html, /メディア解析/);
+  assert.match(html, /AI Video Quality Lab/);
+  assert.match(html, /品質基準/);
+  assert.match(html, /進化履歴/);
   console.log('ai-video-dashboard tests passed');
 } finally {
   child.kill('SIGTERM');

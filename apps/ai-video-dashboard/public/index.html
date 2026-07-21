@@ -3,52 +3,93 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-  <meta name="theme-color" content="#0d1117">
-  <title>AI Video Production</title>
-  <style>
-    :root{color-scheme:dark;--bg:#0d1117;--panel:#161b22;--line:#30363d;--muted:#8b949e;--text:#f0f6fc;--accent:#58a6ff;--ok:#3fb950;--warn:#d29922;--bad:#f85149}
-    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
-    header{position:sticky;top:0;z-index:5;padding:max(14px,env(safe-area-inset-top)) 18px 14px;background:rgba(13,17,23,.94);backdrop-filter:blur(14px);border-bottom:1px solid var(--line)}
-    header h1{font-size:18px;margin:0}header p{margin:3px 0 0;color:var(--muted);font-size:12px}
-    main{max-width:1180px;margin:auto;padding:18px 16px calc(40px + env(safe-area-inset-bottom));display:grid;grid-template-columns:310px 1fr;gap:16px}
-    .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;overflow:hidden}.card h2{font-size:14px;margin:0;padding:14px 15px;border-bottom:1px solid var(--line)}
-    .project{display:block;width:100%;border:0;border-bottom:1px solid var(--line);background:transparent;color:inherit;padding:13px 15px;text-align:left}.project:last-child{border-bottom:0}.project.active{background:#1f2937}.project strong,.project span{display:block}.project span{color:var(--muted);font-size:12px;margin-top:4px}
-    .content{display:grid;gap:16px}.hero{padding:18px}.hero h2{font-size:22px;padding:0;border:0}.meta{color:var(--muted);font-size:13px;margin-top:5px}.pills{display:flex;gap:7px;flex-wrap:wrap;margin-top:13px}.pill{border:1px solid var(--line);border-radius:999px;padding:4px 9px;font-size:12px}.ok{color:var(--ok)}.warn{color:var(--warn)}
-    .grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}.section{padding:14px 15px}.section pre{white-space:pre-wrap;word-break:break-word;margin:0;color:#c9d1d9;font:12px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace;max-height:330px;overflow:auto}
-    table{width:100%;border-collapse:collapse;font-size:13px}th,td{text-align:left;padding:10px 12px;border-bottom:1px solid var(--line);vertical-align:top}th{color:var(--muted);font-weight:500}tr:last-child td{border-bottom:0}
-    button.action{appearance:none;border:1px solid #388bfd;background:#1f6feb;color:white;border-radius:9px;padding:10px 12px;font-weight:600}.actions{display:flex;gap:9px;flex-wrap:wrap;padding:14px 15px}.empty{padding:22px;color:var(--muted)}
-    .artifacts{display:grid;gap:10px;padding:14px 15px}.artifact{display:flex;gap:12px;justify-content:space-between;align-items:flex-start;border:1px solid var(--line);border-radius:10px;padding:11px 12px}.artifact strong,.artifact span{display:block}.artifact span{color:var(--muted);font-size:12px;margin-top:3px}.artifact a{flex:none;color:var(--accent);text-decoration:none;border:1px solid var(--line);border-radius:8px;padding:7px 9px;font-size:13px}
-    .status{display:inline-flex;align-items:center;gap:6px}.dot{width:8px;height:8px;border-radius:50%;background:var(--warn)}.dot.online{background:var(--ok)}
-    @media(max-width:760px){main{grid-template-columns:1fr;padding-top:12px}.grid{grid-template-columns:1fr}.projects{max-height:235px;overflow:auto}.hero h2{font-size:19px}}
-  </style>
+  <meta name="theme-color" content="#0b0d12">
+  <meta name="color-scheme" content="dark">
+  <title>AI Video Quality Lab</title>
+  <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
-<header><h1>AI Video Production</h1><p><span class="status"><i id="healthDot" class="dot"></i><span id="health">接続確認中</span></span> · Tailnet review console</p></header>
-<main>
-  <section class="card"><h2>プロジェクト</h2><div id="projects" class="projects"><div class="empty">読み込み中</div></div></section>
-  <section class="content">
-    <article class="card hero"><h2 id="title">プロジェクトを選択</h2><div id="meta" class="meta">解析結果・IR・QC・Mac反映待ちキューを確認できます。</div><div id="pills" class="pills"></div></article>
-    <article class="card"><h2>実素材品質評価</h2><div class="section"><pre id="evaluation">実素材評価前</pre></div></article>
-    <article class="card"><h2>メディア解析</h2><div class="section"><pre id="analysis">—</pre></div></article>
-    <div class="grid">
-      <article class="card"><h2>Editorial IR</h2><div class="section"><pre id="ir">—</pre></div></article>
-      <article class="card"><h2>QCレポート</h2><div class="section"><pre id="qc">—</pre></div></article>
+  <header class="app-header">
+    <div class="header-inner">
+      <div class="brand-block">
+        <div class="eyebrow">AI VIDEO PRODUCTION OS</div>
+        <h1>Quality Lab</h1>
+      </div>
+      <div class="connection" aria-live="polite"><i id="healthDot" class="status-dot"></i><span id="health">接続確認中</span></div>
     </div>
-    <article class="card"><h2>文字起こし</h2><div class="section"><pre id="transcript">—</pre></div></article>
-    <article class="card"><h2>確認用ファイル</h2><div id="artifacts" class="artifacts"><div class="empty">—</div></div></article>
-    <article class="card"><h2>Mac / Palmierへの反映</h2><div class="actions"><button class="action" data-action="apply_ir">IRを反映待ちへ</button><button class="action" data-action="export_xml">XML書き出し待ちへ</button><button class="action" data-action="render_preview">プレビュー生成待ちへ</button></div></article>
-    <article class="card"><h2>コマンドキュー</h2><div id="queue"><div class="empty">読み込み中</div></div></article>
-  </section>
-</main>
-<script>
-const $=s=>document.querySelector(s);let selected=null;
-async function api(path,options){const r=await fetch(path,{headers:{'content-type':'application/json'},...options});const j=await r.json();if(!r.ok)throw new Error(j.error?.message||'API error');return j}
-function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
-async function health(){try{await api('/api/health');$('#health').textContent='EC2オンライン';$('#healthDot').classList.add('online')}catch{$('#health').textContent='切断';$('#healthDot').classList.remove('online')}}
-async function loadProjects(){const {projects}=await api('/api/projects');$('#projects').innerHTML=projects.length?projects.map(p=>`<button class="project" data-id="${esc(p.id)}"><strong>${esc(p.title)}</strong><span>${esc(p.status)} · ${esc(p.updatedAt)}</span></button>`).join(''):'<div class="empty">プロジェクトなし</div>';document.querySelectorAll('.project').forEach(b=>b.onclick=()=>loadProject(b.dataset.id));if(projects[0])loadProject(projects[0].id)}
-async function loadProject(id){selected=id;document.querySelectorAll('.project').forEach(b=>b.classList.toggle('active',b.dataset.id===id));const p=await api('/api/projects/'+encodeURIComponent(id));$('#title').textContent=p.title;$('#meta').textContent=`${p.description||''} · 更新 ${p.updatedAt}`;$('#pills').innerHTML=[p.status,p.durationSeconds?`${p.durationSeconds}秒`:null,p.outputDurationSeconds?`編集後 ${p.outputDurationSeconds}秒`:null,Number.isFinite(p.qualityScore)?`品質 ${p.qualityScore}点`:null,p.evaluationStatus?`評価 ${p.evaluationStatus}`:null,p.adapterStatus||'headless'].filter(Boolean).map(x=>`<span class="pill">${esc(x)}</span>`).join('');$('#evaluation').textContent=p.evaluation?JSON.stringify(p.evaluation,null,2):'実素材評価前';$('#analysis').textContent=JSON.stringify(p.analysis,null,2)||'—';$('#ir').textContent=JSON.stringify(p.editorialIr,null,2)||'—';$('#qc').textContent=JSON.stringify(p.qc,null,2)||'—';$('#transcript').textContent=(p.transcript?.segments||[]).map(s=>`[${s.start.toFixed(2)}–${s.end.toFixed(2)}] ${s.speaker||''}: ${s.text}`).join('\n')||'—';$('#artifacts').innerHTML=(p.artifacts||[]).length?p.artifacts.map(a=>`<div class="artifact"><div><strong>${esc(a.label||a.filename)}</strong><span>${esc(a.kind||'artifact')} · ${esc(a.note||'')} · ${esc(a.createdAt||'')}</span></div><a href="${esc(a.url)}" target="_blank" rel="noopener">開く</a></div>`).join(''):'<div class="empty">確認用ファイルなし</div>'}
-async function loadQueue(){const {commands}=await api('/api/queue');$('#queue').innerHTML=commands.length?`<table><thead><tr><th>状態</th><th>操作</th><th>対象</th><th>作成</th></tr></thead><tbody>${commands.map(c=>`<tr><td>${esc(c.status)}</td><td>${esc(c.action)}</td><td>${esc(c.projectId)}</td><td>${esc(c.createdAt)}</td></tr>`).join('')}</tbody></table>`:'<div class="empty">待機コマンドなし</div>'}
-document.querySelectorAll('[data-action]').forEach(b=>b.onclick=async()=>{if(!selected)return alert('プロジェクトを選択してください');b.disabled=true;try{await api('/api/queue',{method:'POST',body:JSON.stringify({projectId:selected,action:b.dataset.action})});await loadQueue()}catch(e){alert(e.message)}finally{b.disabled=false}});
-health();loadProjects().catch(e=>$('#projects').innerHTML=`<div class="empty">${esc(e.message)}</div>`);loadQueue();setInterval(loadQueue,10000);setInterval(health,15000);
-</script>
-</body></html>
+    <nav class="tab-bar" aria-label="主要画面">
+      <button class="tab active" data-tab="quality">品質基準</button>
+      <button class="tab" data-tab="history">進化履歴</button>
+      <button class="tab" data-tab="projects">プロジェクト</button>
+      <button class="tab" data-tab="sources">Research</button>
+    </nav>
+  </header>
+
+  <main class="app-main">
+    <section id="qualityView" class="view active" aria-labelledby="qualityTitle">
+      <div id="qualityHero" class="hero-panel skeleton"></div>
+      <div id="qualityStats" class="stat-grid"></div>
+      <section class="panel profile-panel">
+        <div class="panel-heading">
+          <div><span class="section-kicker">SCORING PROFILE</span><h2>動画形式に合わせた配点</h2></div>
+          <select id="profileSelect" class="select" aria-label="採点プロファイル"></select>
+        </div>
+        <p id="profileDescription" class="muted"></p>
+      </section>
+      <section class="panel">
+        <div class="panel-heading"><div><span class="section-kicker">SCORE BANDS</span><h2>点数の意味</h2></div></div>
+        <div id="scoreBands" class="score-bands"></div>
+      </section>
+      <section class="panel">
+        <div class="panel-heading"><div><span class="section-kicker">HARD GATES</span><h2>重大欠陥による上限</h2></div><span class="panel-note">加点より優先</span></div>
+        <div id="gates" class="gate-grid"></div>
+      </section>
+      <section class="rubric-section">
+        <div class="rubric-toolbar">
+          <div><span class="section-kicker">82 CRITERIA</span><h2 id="qualityTitle">最強のYouTube動画採点基準</h2></div>
+          <label class="search-box"><span>検索</span><input id="rubricSearch" type="search" placeholder="字幕、BGM、カット…"></label>
+        </div>
+        <div id="categoryNav" class="category-nav" aria-label="評価カテゴリ"></div>
+        <div id="rubricCategories" class="rubric-list"></div>
+      </section>
+    </section>
+
+    <section id="historyView" class="view" aria-labelledby="historyTitle">
+      <div class="page-title"><span class="section-kicker">VERSION HISTORY</span><h2 id="historyTitle">編集品質の進化履歴</h2><p>人間評価を正本として、前回との差分・テスト結果・次の弱点を記録します。</p></div>
+      <div class="history-layout">
+        <section class="panel chart-panel"><div class="panel-heading"><div><span class="section-kicker">HUMAN SCORE</span><h2>人間評価の推移</h2></div><span class="panel-note">旧機械点は廃止</span></div><div id="scoreChart" class="score-chart"></div></section>
+        <section class="panel current-panel"><div id="currentRelease"></div></section>
+      </div>
+      <section class="panel compare-panel">
+        <div class="panel-heading"><div><span class="section-kicker">COMPARE</span><h2>バージョン比較</h2></div><div class="compare-controls"><select id="compareA" class="select"></select><span>→</span><select id="compareB" class="select"></select></div></div>
+        <div id="versionComparison"></div>
+      </section>
+      <div id="releaseTimeline" class="release-timeline"></div>
+    </section>
+
+    <section id="projectsView" class="view" aria-labelledby="projectsTitle">
+      <div class="page-title"><span class="section-kicker">PRODUCTION</span><h2 id="projectsTitle">プロジェクトと成果物</h2><p>解析、Editorial IR、QC、確認動画、Mac Bridgeキューを確認します。</p></div>
+      <div class="project-layout">
+        <section class="panel project-list-panel"><div class="panel-heading"><h2>プロジェクト</h2></div><div id="projects" class="project-list"><div class="empty">読み込み中</div></div></section>
+        <section class="project-detail">
+          <article class="panel project-hero"><div id="projectHero" class="empty">プロジェクトを選択</div></article>
+          <article class="panel"><div class="panel-heading"><h2>確認用ファイル</h2></div><div id="artifacts" class="artifact-list"><div class="empty">—</div></div></article>
+          <article class="panel"><div class="panel-heading"><h2>Mac / Palmier操作</h2></div><div class="action-row"><button class="primary" data-action="apply_ir">IR反映</button><button class="secondary" data-action="export_xml">XML出力</button><button class="secondary" data-action="render_preview">プレビュー生成</button></div></article>
+          <article class="panel"><details><summary>解析・IR・QCの詳細</summary><div class="detail-tabs"><button data-detail="evaluation" class="active">評価</button><button data-detail="analysis">解析</button><button data-detail="ir">IR</button><button data-detail="qc">QC</button><button data-detail="transcript">字幕</button></div><pre id="projectRaw">—</pre></details></article>
+          <article class="panel"><div class="panel-heading"><h2>コマンドキュー</h2></div><div id="queue"><div class="empty">読み込み中</div></div></article>
+        </section>
+      </div>
+    </section>
+
+    <section id="sourcesView" class="view" aria-labelledby="sourcesTitle">
+      <div class="page-title"><span class="section-kicker">EVIDENCE BASE</span><h2 id="sourcesTitle">採点基準のResearch根拠</h2><p>YouTube公式、Web標準、音響標準、認知・映像研究を区別して表示します。</p></div>
+      <div id="sourceFilters" class="filter-chips"></div>
+      <div id="sources" class="source-grid"></div>
+      <section class="panel methodology"><div class="panel-heading"><div><span class="section-kicker">METHOD</span><h2>採点の運用原則</h2></div></div><div id="scoringModel" class="method-grid"></div></section>
+    </section>
+  </main>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

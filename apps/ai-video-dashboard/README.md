@@ -283,7 +283,19 @@ node mix-retention-audio.mjs \
   --output /absolute/path/to/final.mp4
 ```
 
-`score-full-caption-edit.mjs`は、フルテロップ95%以上、最大開始遅延2フレーム以内、BGM、3件以上のSE、映像・音声・尺QCを必須条件として60点判定します。
+`score-full-caption-edit.mjs`は、フルテロップ95%以上、最大開始遅延2フレーム以内、BGM、3件以上のSE、映像・音声・尺QCを確認する旧制約テストです。旧機械点86・100は人間評価を過大推定したため、総合品質点としては廃止しました。
+
+## Quality Lab採点基準
+
+Dashboardの既定画面はQuality Labです。`GET /api/quality-lab?profile=explainer`から、12カテゴリ・82評価項目、0〜4段階の判定条件、重大欠陥ゲート、Research根拠、編集版履歴を返します。
+
+品質は次の3層を混同しません。
+
+- 制作品質: 構成、カット、視覚証拠、字幕、音響、認知負荷などを82項目で採点
+- 人間視聴: 全編視聴後の理解、退屈、違和感、満足度。画面上の見出し点はこれを優先
+- 公開実績: 30秒維持率、平均視聴率、Dips、Spikes、再視聴、共有、満足度。公開後のみ算出
+
+タイトルとの不一致、重大な事実誤認、音声明瞭度破綻、字幕同期破綻、技術的破損、権利条件不明、人間レビュー未実施には39〜74点の上限を適用します。用途別に`explainer`、`entertainment`、`documentary`、`tutorial`の配点を切り替えられます。
 
 ## テスト
 
@@ -293,6 +305,7 @@ node analysis-core.test.mjs
 node multicam-core.test.mjs
 node real-footage-quality.test.mjs
 node export-premiere-xml.test.mjs
+node quality-rubric.test.mjs
 node build-retention-edit.mjs --self-test
 node score-retention-edit.mjs --self-test
 node render-preview.mjs --self-test

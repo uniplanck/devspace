@@ -3,6 +3,7 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import crypto from 'node:crypto';
+import { getQualityLabData } from './quality-rubric.mjs';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = process.env.AIVIDEO_DATA_DIR || path.join(ROOT, 'data');
@@ -220,10 +221,13 @@ async function handler(req, res) {
     }
     if (pathname === '/api/capabilities' && req.method === 'GET') {
       return sendJson(res, 200, {
-        dashboard: ['project_list', 'project_detail', 'project_sync', 'artifact_register', 'media_analysis', 'editorial_ir', 'transcript', 'qc_report', 'command_queue'],
+        dashboard: ['quality_lab', 'quality_history', 'rubric_profiles', 'project_list', 'project_detail', 'project_sync', 'artifact_register', 'media_analysis', 'editorial_ir', 'transcript', 'qc_report', 'command_queue'],
         queueActions: ['apply_ir', 'export_xml', 'render_preview', 'sync_timeline'],
         adapters: { headless: 'available', palmier: 'contract_ready_mac_required', premiere: 'planned_via_xml_or_uxp' },
       });
+    }
+    if (pathname === '/api/quality-lab' && req.method === 'GET') {
+      return sendJson(res, 200, getQualityLabData(url.searchParams.get('profile') || 'explainer'));
     }
     if (pathname === '/api/projects' && req.method === 'GET') return sendJson(res, 200, { projects: await listProjects() });
     const projectMatch = pathname.match(/^\/api\/projects\/([^/]+)$/);
