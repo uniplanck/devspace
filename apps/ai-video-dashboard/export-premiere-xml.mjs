@@ -7,7 +7,7 @@ import { buildRenderPlan } from './render-preview.mjs';
 
 const execFileAsync = promisify(execFile);
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
-const DEFAULT_FFPROBE = process.env.FFPROBE_PATH || '/usr/local/bin/ffprobe';
+const DEFAULT_FFPROBE = process.env.FFPROBE_PATH || 'ffprobe';
 
 function usage(message) {
   if (message) process.stderr.write(`${message}\n`);
