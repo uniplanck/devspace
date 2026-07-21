@@ -5,6 +5,7 @@ import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { renderPreview } from './render-preview.mjs';
+import { exportPremiereXml } from './export-premiere-xml.mjs';
 import { uploadArtifact } from './upload-artifact.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -457,6 +458,84 @@ async function handleCommand(command) {
     return { status: 'completed', mode: 'headless_ffmpeg_preview', render, artifact };
   }
 
+  if (command.action === 'export_xml') {
+    const project = await requestJson(`${DASHBOARD}/api/projects/${command.projectId}`);
+    const operations = project?.editorialIr?.timeline?.operations;
+    if (!Array.isArray(operations)) return { status: 'unsupported', reason: 'Project has no Editorial IR operations' };
+    const assetIds = [...new Set(operations
+      .filter((operation) => operation?.type === 'select_range')
+      .flatMap((operation) => [operation.assetId, operation.audioAssetId])
+      .filter(Boolean))];
+    if (!assetIds.length) return { status: 'unsupported', reason: 'Project has no selected source assets' };
+    const bindings = normalizeAssetBindings(command.payload);
+    const projectPaths = project.sourceMediaPaths && typeof project.sourceMediaPaths === 'object'
+      ? project.sourceMediaPaths
+      : {};
+    const assetBindings = {};
+    for (const assetId of assetIds) {
+      const binding = bindings[assetId] || {};
+      const mediaPath = typeof binding.path === 'string' && path.isAbsolute(binding.path)
+        ? binding.path
+        : typeof projectPaths[assetId] === 'string' && path.isAbsolute(projectPaths[assetId])
+          ? projectPaths[assetId]
+          : assetIds.length === 1 && typeof project.sourceMediaPath === 'string' && path.isAbsolute(project.sourceMediaPath)
+            ? project.sourceMediaPath
+            : null;
+      if (!mediaPath) return { status: 'unsupported', reason: `Premiere XML source path is missing for ${assetId}` };
+      await fs.access(mediaPath);
+      assetBindings[assetId] = { path: mediaPath };
+    }
+
+    const fingerprint = stableHash(project.editorialIr).slice(0, 16);
+    const exportDir = path.join(STATE_DIR, 'exports');
+    await fs.mkdir(exportDir, { recursive: true });
+    const outputPath = typeof command.payload?.outputPath === 'string' && path.isAbsolute(command.payload.outputPath)
+      ? command.payload.outputPath
+      : path.join(exportDir, `${command.projectId}-${fingerprint}.xml`);
+    const captionsOutput = typeof command.payload?.captionsOutputPath === 'string' && path.isAbsolute(command.payload.captionsOutputPath)
+      ? command.payload.captionsOutputPath
+      : path.join(exportDir, `${command.projectId}-${fingerprint}.srt`);
+    const exported = await exportPremiereXml({
+      project,
+      editorialIr: project.editorialIr,
+      assetBindings,
+      output: outputPath,
+      captionsOutput,
+      ...(command.payload?.ffprobe ? { ffprobePath: command.payload.ffprobe } : {}),
+    });
+
+    const artifacts = [];
+    if (command.payload?.publishToDrive !== false) {
+      const xmlUpload = await uploadArtifact({
+        projectId: command.projectId,
+        file: outputPath,
+        kind: 'export',
+        label: command.payload?.label || 'Premiere Pro XML',
+        note: command.payload?.note || 'Editorial IRから生成したXMEML v5',
+        dataDir: STATE_DIR,
+      });
+      artifacts.push(xmlUpload.artifact);
+      if (exported.captionMarkerCount > 0) {
+        const captionsUpload = await uploadArtifact({
+          projectId: command.projectId,
+          file: captionsOutput,
+          kind: 'captions',
+          label: command.payload?.captionsLabel || 'Premiere字幕 SRT',
+          note: command.payload?.captionsNote || 'Editorial IR字幕のsidecar',
+          dataDir: STATE_DIR,
+        });
+        artifacts.push(captionsUpload.artifact);
+      }
+      for (const artifact of artifacts) {
+        await requestJson(`${DASHBOARD}/api/projects/${command.projectId}/artifacts`, {
+          method: 'POST',
+          body: JSON.stringify({ artifact }),
+        });
+      }
+    }
+    return { status: 'completed', mode: 'premiere_xmeml_v5', export: exported, artifacts };
+  }
+
   const capabilitySnapshot = await inventoryCapabilities();
   const tools = capabilitySnapshot.tools;
   if (command.action === 'sync_timeline') {
@@ -466,11 +545,6 @@ async function handleCommand(command) {
     if (Number.isInteger(command.payload?.startFrame)) args.startFrame = command.payload.startFrame;
     if (Number.isInteger(command.payload?.endFrame)) args.endFrame = command.payload.endFrame;
     return { status: 'completed', tool: tool.name, output: await callTool(tool.name, args) };
-  }
-  if (command.action === 'export_xml') {
-    const tool = chooseTool(tools, [/export.*xml/i, /xml.*export/i, /nle.*xml/i]);
-    if (!tool) return { status: 'unsupported', reason: 'No XML export tool found', capabilityCount: tools.length };
-    return { status: 'completed', tool: tool.name, output: await callTool(tool.name, command.payload || {}) };
   }
   if (command.action === 'apply_ir') {
     const timelineTool = chooseTool(tools, [/^get_timeline$/i]);
@@ -723,7 +797,7 @@ export async function pollOnce() {
       if (result.status === 'unsupported') {
         await patchCommand(command.id, { status: 'failed', message: result.reason, result });
       } else {
-        await patchCommand(command.id, { status: 'completed', message: 'Palmier command completed', result });
+        await patchCommand(command.id, { status: 'completed', message: 'Bridge command completed', result });
       }
     } catch (error) {
       await patchCommand(command.id, { status: 'failed', message: error instanceof Error ? error.message : String(error) });

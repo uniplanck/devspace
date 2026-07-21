@@ -199,6 +199,19 @@ node render-preview.mjs \
 
 Palmier Bridgeも`master_audio`へ対応します。選択カメラの映像配置時に自動生成されるリンク音声を消音し、master素材から抽出・importした音声clipを別トラックへ配置します。抽出音声名には元ファイルのsize・更新時刻由来fingerprintを含めるため、素材更新後に古い音声assetを再利用しません。同一IRの再実行は`already_applied`となります。
 
+## Premiere Pro XMLを書き出す
+
+```bash
+node export-premiere-xml.mjs \
+  --project /absolute/path/to/project.json \
+  --ir /absolute/path/to/editorial-ir.json \
+  --asset-bindings /absolute/path/to/asset-bindings.json \
+  --output /absolute/path/to/sequence.xml \
+  --captions /absolute/path/to/captions.srt
+```
+
+Final Cut Pro 7系の`xmeml version="5"`として、映像カット、独立した音声カット、素材参照、sequence markerを生成します。`master_audio`では映像の選択カメラと音声素材を分離してA1へ配置します。字幕本文はSRT sidecarにも保存します。Dashboardの「XML書き出し待ちへ」はMac BridgeでXML・SRTを生成し、Driveへ登録します。
+
 ## 確認用ファイルをGoogle Driveへ保存
 
 ```bash
@@ -232,6 +245,7 @@ node transcription-adapters.test.mjs
 node analysis-core.test.mjs
 node multicam-core.test.mjs
 node real-footage-quality.test.mjs
+node export-premiere-xml.test.mjs
 node render-preview.mjs --self-test
 node test.mjs
 ```
@@ -240,6 +254,6 @@ node test.mjs
 
 - EC2: ダッシュボード、IR/QC/文字起こし閲覧、コマンド永続化
 - Mac/GAG: キューclaim、Palmier localhost MCP操作、結果返却
-- Premiere: 将来、同じEditorial IRからXMLまたはUXPへ変換
+- Premiere: XMEML v5＋SRT adapter対応。複雑なEssential Graphics・エフェクト・トランジションは未変換
 
 認証はTailscale Serveによるtailnet境界を前提としています。公開インターネットへ直接bindしないでください。
