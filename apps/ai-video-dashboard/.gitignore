@@ -1,3 +1,7 @@
 data/queue/*.json
 !data/queue/.gitkeep
 data/mac-bridge/
+fixtures/**/*.palmier/generation-log.json
+fixtures/**/*.palmier/media.json
+fixtures/**/*.palmier/thumbnail.jpg
+fixtures/**/*.palmier/media/
