@@ -1,15 +1,20 @@
+import { execFile } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 import { renderPreview } from './render-preview.mjs';
 import { uploadArtifact } from './upload-artifact.mjs';
 
-const ROOT = path.dirname(new URL(import.meta.url).pathname);
+const execFileAsync = promisify(execFile);
+const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const DASHBOARD = process.env.AIVIDEO_DASHBOARD_URL || 'http://100.66.201.64:4317';
 const PALMIER = process.env.PALMIER_MCP_URL || 'http://127.0.0.1:19789/mcp';
 const POLL_MS = Number(process.env.AIVIDEO_POLL_MS || 5000);
 const TARGET = process.env.AIVIDEO_BRIDGE_TARGET || 'palmier-mac';
 const STATE_DIR = process.env.AIVIDEO_BRIDGE_STATE_DIR || path.join(ROOT, 'data', 'mac-bridge');
+const FFMPEG = process.env.FFMPEG_PATH || 'ffmpeg';
 let mcpSessionId = null;
 
 async function requestJson(url, options = {}) {
@@ -136,21 +141,42 @@ function normalizeAssetBindings(payload) {
   return bindings;
 }
 
-function compileEditorialPlan(operations, fps) {
+export function compileEditorialPlan(operations, fps, multicam = {}) {
   const selected = operations
     .filter((operation) => operation?.type === 'select_range')
     .map((operation, index) => {
-      const sourceInFrame = secondsToFrame(operation.sourceIn, fps);
-      const sourceOutFrame = secondsToFrame(operation.sourceOut, fps);
+      const sourceIn = Number(operation.sourceIn);
+      const sourceOut = Number(operation.sourceOut);
+      const sourceInFrame = secondsToFrame(sourceIn, fps);
+      const sourceOutFrame = secondsToFrame(sourceOut, fps);
       if (sourceOutFrame <= sourceInFrame) throw new Error(`select_range ${operation.id || index} has an empty range`);
+      const requestedTimelineFrame = Number.isFinite(Number(operation.timelineIn))
+        ? secondsToFrame(operation.timelineIn, fps)
+        : null;
+      const requestedTimelineEndFrame = requestedTimelineFrame === null
+        ? null
+        : secondsToFrame(Number(operation.timelineIn) + (sourceOut - sourceIn), fps);
+      const durationFrames = requestedTimelineEndFrame === null
+        ? sourceOutFrame - sourceInFrame
+        : requestedTimelineEndFrame - requestedTimelineFrame;
+      if (durationFrames <= 0) throw new Error(`select_range ${operation.id || index} has an empty timeline range`);
+      const audioAssetId = operation.audioAssetId || operation.assetId;
+      const audioSourceIn = Number(operation.audioSourceIn ?? operation.sourceIn);
+      const audioSourceOut = Number(operation.audioSourceOut ?? operation.sourceOut);
+      if (!Number.isFinite(audioSourceIn) || !Number.isFinite(audioSourceOut) || audioSourceOut <= audioSourceIn) {
+        throw new Error(`select_range ${operation.id || index} has an invalid audio range`);
+      }
+      if (Math.abs((audioSourceOut - audioSourceIn) - (sourceOut - sourceIn)) > 0.05) {
+        throw new Error(`select_range ${operation.id || index} has mismatched audio/video duration`);
+      }
       return {
         operationId: operation.id || `select-${index}`,
         assetId: operation.assetId,
         sourceInFrame,
-        durationFrames: sourceOutFrame - sourceInFrame,
-        requestedTimelineFrame: Number.isFinite(Number(operation.timelineIn))
-          ? secondsToFrame(operation.timelineIn, fps)
-          : null,
+        durationFrames,
+        audioAssetId,
+        audioSourceInFrame: secondsToFrame(audioSourceIn, fps),
+        requestedTimelineFrame,
         ordinal: index,
       };
     });
@@ -178,7 +204,13 @@ function compileEditorialPlan(operations, fps) {
       };
     });
 
-  return { fps, clips, captions };
+  return {
+    fps,
+    clips,
+    captions,
+    audioStrategy: String(multicam?.audioStrategy || 'selected_asset'),
+    masterAudioAssetId: multicam?.masterAudioAssetId ? String(multicam.masterAudioAssetId) : undefined,
+  };
 }
 
 function existingTextEventKeys(timeline) {
@@ -266,6 +298,78 @@ async function resolveMediaBindings({ command, projectId, plan, tools }) {
   return resolved;
 }
 
+async function resolveMasterAudioMedia({ command, projectId, plan, tools }) {
+  if (plan.audioStrategy !== 'master_audio') return null;
+  const audioAssetIds = [...new Set(plan.clips.map((clip) => clip.audioAssetId).filter(Boolean))];
+  if (audioAssetIds.length !== 1) throw new Error('master_audio requires exactly one audio asset');
+  const audioAssetId = audioAssetIds[0];
+  if (plan.masterAudioAssetId && plan.masterAudioAssetId !== audioAssetId) {
+    throw new Error(`masterAudioAssetId mismatch: ${plan.masterAudioAssetId} != ${audioAssetId}`);
+  }
+
+  const getMediaTool = chooseTool(tools, [/^get_media$/i]);
+  const importMediaTool = chooseTool(tools, [/^import_media$/i]);
+  if (!getMediaTool || !importMediaTool) throw new Error('Palmier requires get_media and import_media for master audio');
+  const bindings = normalizeAssetBindings(command.payload);
+  const binding = bindings[audioAssetId];
+  if (!binding) throw new Error(`No asset binding supplied for master audio ${audioAssetId}`);
+  let media = mediaItemsFromResult(await callTool(getMediaTool.name, {}));
+
+  if (typeof binding.audioMediaRef === 'string' && binding.audioMediaRef) {
+    const found = media.find((item) => mediaIdentity(item) === binding.audioMediaRef);
+    if (!found) throw new Error(`Bound audioMediaRef not found in Palmier: ${binding.audioMediaRef}`);
+    if (String(found.type || '').toLowerCase() !== 'audio') throw new Error(`audioMediaRef is not an audio asset: ${binding.audioMediaRef}`);
+    return { audioAssetId, mediaRef: binding.audioMediaRef, source: 'audioMediaRef' };
+  }
+
+  const sourcePath = typeof binding.audioPath === 'string' && path.isAbsolute(binding.audioPath)
+    ? binding.audioPath
+    : typeof binding.path === 'string' && path.isAbsolute(binding.path)
+      ? binding.path
+      : null;
+  if (!sourcePath) {
+    throw new Error(`master_audio ${audioAssetId} requires audioMediaRef, audioPath, or a local video path`);
+  }
+  const sourceStat = await fs.stat(sourcePath);
+  const sourceFingerprint = stableHash({
+    path: sourcePath,
+    size: sourceStat.size,
+    mtimeMs: sourceStat.mtimeMs,
+  }).slice(0, 16);
+  const importNameBase = binding.audioName || `gag-${projectId}-${audioAssetId}-master-audio`;
+  const importName = `${importNameBase}-${sourceFingerprint}`;
+  const existing = media.find((item) => mediaDisplayName(item) === importName && String(item.type || '').toLowerCase() === 'audio');
+  if (existing && mediaIdentity(existing)) {
+    return { audioAssetId, mediaRef: mediaIdentity(existing), source: 'existing_audio_asset', sourceFingerprint };
+  }
+
+  let audioPath;
+  if (typeof binding.audioPath === 'string' && path.isAbsolute(binding.audioPath)) {
+    audioPath = binding.audioPath;
+  } else {
+    const audioDir = path.join(STATE_DIR, 'master-audio');
+    await fs.mkdir(audioDir, { recursive: true });
+    audioPath = path.join(audioDir, `${projectId}-${audioAssetId}-${sourceFingerprint}.m4a`);
+    const exists = await fs.access(audioPath).then(() => true).catch(() => false);
+    if (!exists) {
+      await execFileAsync(FFMPEG, [
+        '-hide_banner', '-loglevel', 'error', '-y',
+        '-i', sourcePath,
+        '-map', '0:a:0',
+        '-vn', '-c:a', 'aac', '-b:a', '192k',
+        audioPath,
+      ], { timeout: 10 * 60_000, maxBuffer: 4_000_000 });
+    }
+  }
+
+  await callTool(importMediaTool.name, { source: { path: audioPath }, name: importName });
+  media = mediaItemsFromResult(await callTool(getMediaTool.name, {}));
+  const imported = media.find((item) => mediaDisplayName(item) === importName && String(item.type || '').toLowerCase() === 'audio');
+  const mediaRef = mediaIdentity(imported);
+  if (!mediaRef) throw new Error(`Palmier imported master audio ${audioAssetId} but did not expose an audio mediaRef`);
+  return { audioAssetId, mediaRef, audioPath, source: 'extracted_audio', sourceFingerprint };
+}
+
 function allTimelineClips(timeline) {
   const clips = [];
   for (const [trackIndex, track] of (timeline?.tracks || []).entries()) {
@@ -294,7 +398,10 @@ async function handleCommand(command) {
     const project = await requestJson(`${DASHBOARD}/api/projects/${command.projectId}`);
     const operations = project?.editorialIr?.timeline?.operations;
     if (!Array.isArray(operations)) return { status: 'unsupported', reason: 'Project has no Editorial IR operations' };
-    const assetIds = [...new Set(operations.filter((operation) => operation?.type === 'select_range').map((operation) => operation.assetId).filter(Boolean))];
+    const assetIds = [...new Set(operations
+      .filter((operation) => operation?.type === 'select_range')
+      .flatMap((operation) => [operation.assetId, operation.audioAssetId])
+      .filter(Boolean))];
     if (!assetIds.length) return { status: 'unsupported', reason: 'Project has no selected source assets' };
     const bindings = normalizeAssetBindings(command.payload);
     const projectPaths = project.sourceMediaPaths && typeof project.sourceMediaPaths === 'object'
@@ -386,21 +493,34 @@ async function handleCommand(command) {
     const initialTimeline = toolContentJson(await callTool(timelineTool.name, {})) || {};
     const fps = Number(initialTimeline.fps || project.editorialIr.timeline.frameRate || 30);
     if (!Number.isFinite(fps) || fps <= 0) throw new Error(`Invalid project fps: ${fps}`);
-    const plan = compileEditorialPlan(operations, fps);
+    const plan = compileEditorialPlan(operations, fps, project.editorialIr.multicam);
     const bindings = await resolveMediaBindings({ command, projectId: command.projectId, plan, tools });
+    const masterAudio = await resolveMasterAudioMedia({ command, projectId: command.projectId, plan, tools });
     const expectedClips = plan.clips.map((clip) => ({ ...clip, mediaRef: bindings[clip.assetId] }));
-    const fingerprint = stableHash({ plan, bindings });
+    const expectedMasterAudioClips = masterAudio
+      ? plan.clips.map((clip) => ({
+          operationId: `${clip.operationId}-master-audio`,
+          mediaRef: masterAudio.mediaRef,
+          startFrame: clip.startFrame,
+          durationFrames: clip.durationFrames,
+          sourceInFrame: clip.audioSourceInFrame,
+        }))
+      : [];
+    const fingerprint = stableHash({ plan, bindings, masterAudioMediaRef: masterAudio?.mediaRef });
     const previousState = await readBridgeState(command.projectId);
     const initialClips = allTimelineClips(initialTimeline);
 
     if (previousState?.fingerprint === fingerprint) {
       const managedVideoValid = (previousState.managedVideoClipIds || []).every((id) => initialClips.some((clip) => clip.id === id));
+      const managedAudioValid = (previousState.managedAudioClipIds || []).every((id) => initialClips.some((clip) => clip.id === id));
+      const mutedLinkedAudioValid = (previousState.mutedLinkedAudioClipIds || []).every((id) => initialClips.some((clip) => clip.id === id && Number(clip.volume ?? 1) === 0));
       const captionsValid = plan.captions.every((caption) => existingTextEventKeys(initialTimeline).has(textEventKey(caption.startFrame, caption.durationFrames, caption.text)));
       const expectedValid = expectedClips.every((expected) => initialClips.some((clip) => clipMatchesExpected(clip, expected)));
-      if (managedVideoValid && captionsValid && expectedValid) {
+      const expectedMasterAudioValid = expectedMasterAudioClips.every((expected) => initialClips.some((clip) => clip.mediaType === 'audio' && clipMatchesExpected(clip, expected)));
+      if (managedVideoValid && managedAudioValid && mutedLinkedAudioValid && captionsValid && expectedValid && expectedMasterAudioValid) {
         return {
           status: 'completed',
-          mode: 'cut_caption_mvp',
+          mode: masterAudio ? 'cut_caption_master_audio_mvp' : 'cut_caption_mvp',
           result: 'already_applied',
           fps,
           fingerprint,
@@ -411,6 +531,8 @@ async function handleCommand(command) {
 
     const beforeIds = new Set(initialClips.map((clip) => clip.id));
     const createdVideoIds = [];
+    const createdAudioIds = [];
+    const mutedLinkedAudioIds = [];
     const createdTextIds = [];
     let mutationStarted = false;
     try {
@@ -434,6 +556,41 @@ async function handleCommand(command) {
             && clip.mediaType !== 'audio');
           if (!created?.id) throw new Error(`Unable to identify Palmier clip for ${expected.operationId}`);
           createdVideoIds.push(created.id);
+          if (expected.sourceInFrame > 0) {
+            await callTool(setClipTool.name, { clipIds: [created.id], trimStartFrame: expected.sourceInFrame });
+          }
+          if (masterAudio && created.linkGroupId) {
+            const linkedAudio = clips.find((clip) => clip.linkGroupId === created.linkGroupId && clip.mediaType === 'audio');
+            if (!linkedAudio?.id) throw new Error(`Unable to identify linked Palmier audio for ${expected.operationId}`);
+            mutedLinkedAudioIds.push(linkedAudio.id);
+          }
+        }
+        if (mutedLinkedAudioIds.length) {
+          await callTool(setClipTool.name, { clipIds: mutedLinkedAudioIds, volume: 0 });
+        }
+      }
+
+      if (expectedMasterAudioClips.length) {
+        mutationStarted = true;
+        const beforeMasterAudio = allTimelineClips(toolContentJson(await callTool(timelineTool.name, {})) || {});
+        const idsBeforeMasterAudio = new Set(beforeMasterAudio.map((clip) => clip.id));
+        await callTool(addClipsTool.name, {
+          entries: expectedMasterAudioClips.map((clip) => ({
+            mediaRef: clip.mediaRef,
+            startFrame: clip.startFrame,
+            durationFrames: clip.durationFrames,
+          })),
+        });
+        const timelineAfterMasterAudio = toolContentJson(await callTool(timelineTool.name, {})) || {};
+        const clipsAfterMasterAudio = allTimelineClips(timelineAfterMasterAudio);
+        for (const expected of expectedMasterAudioClips) {
+          const created = clipsAfterMasterAudio.find((clip) => !idsBeforeMasterAudio.has(clip.id)
+            && clip.mediaType === 'audio'
+            && clip.mediaRef === expected.mediaRef
+            && clip.startFrame === expected.startFrame
+            && clip.durationFrames === expected.durationFrames);
+          if (!created?.id) throw new Error(`Unable to identify Palmier master audio for ${expected.operationId}`);
+          createdAudioIds.push(created.id);
           if (expected.sourceInFrame > 0) {
             await callTool(setClipTool.name, { clipIds: [created.id], trimStartFrame: expected.sourceInFrame });
           }
@@ -470,35 +627,52 @@ async function handleCommand(command) {
         operationId: expected.operationId,
         valid: finalClips.some((clip) => clipMatchesExpected(clip, expected)),
       }));
+      const audioChecks = expectedMasterAudioClips.map((expected) => ({
+        operationId: expected.operationId,
+        valid: finalClips.some((clip) => clip.mediaType === 'audio' && clipMatchesExpected(clip, expected)),
+      }));
+      const mutedLinkedAudioChecks = mutedLinkedAudioIds.map((clipId) => ({
+        operationId: `mute-${clipId}`,
+        valid: finalClips.some((clip) => clip.id === clipId && clip.mediaType === 'audio' && Number(clip.volume ?? 1) === 0),
+      }));
       const captionChecks = plan.captions.map((caption) => ({
         operationId: caption.operationId,
         valid: existingTextEventKeys(finalTimeline).has(textEventKey(caption.startFrame, caption.durationFrames, caption.text)),
       }));
-      const failedCheck = [...clipChecks, ...captionChecks].find((check) => !check.valid);
+      const failedCheck = [...clipChecks, ...audioChecks, ...mutedLinkedAudioChecks, ...captionChecks].find((check) => !check.valid);
       if (failedCheck) throw new Error(`Postflight verification failed for ${failedCheck.operationId}`);
 
-      const oldManagedIds = [...new Set([...(previousState?.managedVideoClipIds || []), ...(previousState?.managedTextClipIds || [])])]
+      const oldManagedIds = [...new Set([
+        ...(previousState?.managedVideoClipIds || []),
+        ...(previousState?.managedAudioClipIds || []),
+        ...(previousState?.managedTextClipIds || []),
+      ])]
         .filter((id) => finalClips.some((clip) => clip.id === id))
-        .filter((id) => !createdVideoIds.includes(id) && !createdTextIds.includes(id));
+        .filter((id) => !createdVideoIds.includes(id) && !createdAudioIds.includes(id) && !createdTextIds.includes(id));
       if (oldManagedIds.length) await callTool(removeClipsTool.name, { clipIds: oldManagedIds });
 
       await writeBridgeState(command.projectId, {
-        schemaVersion: 1,
+        schemaVersion: 2,
         projectId: command.projectId,
         fingerprint,
         fps,
+        audioStrategy: plan.audioStrategy,
         managedVideoClipIds: createdVideoIds,
+        managedAudioClipIds: createdAudioIds,
+        mutedLinkedAudioClipIds: mutedLinkedAudioIds,
         managedTextClipIds: createdTextIds,
         appliedAt: new Date().toISOString(),
       });
 
       return {
         status: 'completed',
-        mode: 'cut_caption_mvp',
+        mode: masterAudio ? 'cut_caption_master_audio_mvp' : 'cut_caption_mvp',
         result: previousState ? 'replaced_managed_edit' : 'applied',
         fps,
         fingerprint,
         managedVideoClipIds: createdVideoIds,
+        managedAudioClipIds: createdAudioIds,
+        mutedLinkedAudioClipIds: mutedLinkedAudioIds,
         managedTextClipIds: createdTextIds,
         operationResults: operations.map((operation) => ({
           operationId: operation.id,
@@ -508,7 +682,26 @@ async function handleCommand(command) {
       };
     } catch (error) {
       if (mutationStarted) {
-        const rollbackIds = [...new Set([...createdVideoIds, ...createdTextIds])];
+        const expectedMediaRefs = new Set([
+          ...expectedClips.map((clip) => clip.mediaRef),
+          ...expectedMasterAudioClips.map((clip) => clip.mediaRef),
+        ]);
+        const expectedTexts = new Set(plan.captions.map((caption) => caption.text));
+        const currentTimeline = toolContentJson(await callTool(timelineTool.name, {}).catch(() => null)) || {};
+        const discovered = allTimelineClips(currentTimeline).filter((clip) => !beforeIds.has(clip.id)
+          && (expectedMediaRefs.has(clip.mediaRef) || (clip.mediaType === 'text' && expectedTexts.has(clip.textContent))));
+        const candidates = [
+          ...discovered,
+          ...allTimelineClips(currentTimeline).filter((clip) => [...createdVideoIds, ...createdAudioIds, ...createdTextIds].includes(clip.id)),
+        ];
+        const rollbackIds = [];
+        const seenGroups = new Set();
+        for (const clip of candidates) {
+          const key = clip.linkGroupId || clip.id;
+          if (!clip.id || seenGroups.has(key)) continue;
+          seenGroups.add(key);
+          rollbackIds.push(clip.id);
+        }
         if (rollbackIds.length) await callTool(removeClipsTool.name, { clipIds: rollbackIds }).catch(() => undefined);
       }
       throw error;
@@ -517,7 +710,7 @@ async function handleCommand(command) {
   throw new Error(`Unsupported command action: ${command.action}`);
 }
 
-async function pollOnce() {
+export async function pollOnce() {
   const response = await requestJson(`${DASHBOARD}/api/queue`);
   const commands = (response.commands || [])
     .filter((item) => item.target === TARGET && item.status === 'waiting_for_device')
@@ -590,4 +783,5 @@ async function main() {
   } while (!once);
 }
 
-await main();
+const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (isMain) await main();

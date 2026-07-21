@@ -156,6 +156,8 @@ node analyze-media.mjs \
     { "assetId": "cam-a", "timelineIn": 0, "timelineOut": 4.5 },
     { "assetId": "cam-b", "timelineIn": 4.5, "timelineOut": 8.0 }
   ],
+  "audioStrategy": "master_audio",
+  "masterAudioAssetId": "cam-a",
   "sync": { "maximumOffsetSeconds": 8, "minimumSyncConfidence": 0.58 }
 }
 ```
@@ -166,10 +168,14 @@ node analyze-multicam.mjs \
   --manifest /absolute/path/to/multicam-manifest.json \
   --reference-project-dir /absolute/path/to/reference-project \
   --output-dir /absolute/path/to/data/projects/multicam-project \
+  --audio-strategy master_audio \
+  --master-audio-asset cam-a \
   --dashboard-url http://127.0.0.1:4317
 ```
 
 音声RMS包絡の相互相関から、`対象素材のsourceTime = 基準素材のsourceTime + offset`として同期します。自動同期が不安定な素材は`manualOffsetSeconds`で上書きできます。同期信頼度不足や素材範囲外では基準カメラへフォールバックし、QCを`review`へ落とします。画角の良否を根拠なく自動判断せず、カメラ切替は`cameraPlan`を正本にします。
+
+音声戦略は`selected_asset`と`master_audio`に対応します。`selected_asset`は選択カメラの映像・音声を一緒に切り替えます。`master_audio`は映像だけを切り替え、`masterAudioAssetId`の音声を編集カットに沿って連続使用します。各`select_range`には映像source範囲とは別に`audioAssetId`、`audioSourceIn`、`audioSourceOut`が記録されます。
 
 ## 編集後プレビューを生成
 
@@ -189,7 +195,9 @@ node render-preview.mjs \
   --output /absolute/path/to/multicam-preview.mp4
 ```
 
-`select_range`を素材ごとに切り出し、解像度・フレームレート・音声形式を正規化して連結します。再配置済み字幕を日本語フォントで焼き込み、出力尺をEditorial IRの期待値と照合します。現MVPの音声戦略は`selected_asset`で、選択カメラの音声を映像と一緒に切り替えます。
+`select_range`を素材ごとに切り出し、解像度・フレームレート・音声形式を正規化して連結します。再配置済み字幕を日本語フォントで焼き込み、出力尺をEditorial IRの期待値と照合します。`master_audio`ではカメラ切替に関係なく指定したmaster音声だけを使用します。
+
+Palmier Bridgeも`master_audio`へ対応します。選択カメラの映像配置時に自動生成されるリンク音声を消音し、master素材から抽出・importした音声clipを別トラックへ配置します。抽出音声名には元ファイルのsize・更新時刻由来fingerprintを含めるため、素材更新後に古い音声assetを再利用しません。同一IRの再実行は`already_applied`となります。
 
 ## 確認用ファイルをGoogle Driveへ保存
 

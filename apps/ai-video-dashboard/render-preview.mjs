@@ -58,12 +58,23 @@ function normalizeSelects(operations) {
       const sourceOut = finiteNumber(operation.sourceOut, `select_range ${operation.id || index} sourceOut`);
       const timelineIn = finiteNumber(operation.timelineIn ?? 0, `select_range ${operation.id || index} timelineIn`);
       if (sourceIn < 0 || sourceOut <= sourceIn || timelineIn < 0) throw new Error(`Invalid select_range ${operation.id || index}`);
+      const assetId = String(operation.assetId || 'default');
+      const audioAssetId = String(operation.audioAssetId || assetId);
+      const audioSourceIn = finiteNumber(operation.audioSourceIn ?? sourceIn, `select_range ${operation.id || index} audioSourceIn`);
+      const audioSourceOut = finiteNumber(operation.audioSourceOut ?? sourceOut, `select_range ${operation.id || index} audioSourceOut`);
+      if (audioSourceIn < 0 || audioSourceOut <= audioSourceIn) throw new Error(`Invalid audio range for select_range ${operation.id || index}`);
+      if (Math.abs((audioSourceOut - audioSourceIn) - (sourceOut - sourceIn)) > 0.05) {
+        throw new Error(`Audio/video duration mismatch for select_range ${operation.id || index}`);
+      }
       return {
         id: operation.id || `select-${index + 1}`,
-        assetId: String(operation.assetId || 'default'),
+        assetId,
         sourceIn,
         sourceOut,
         timelineIn,
+        audioAssetId,
+        audioSourceIn,
+        audioSourceOut,
       };
     })
     .sort((left, right) => left.timelineIn - right.timelineIn || left.sourceIn - right.sourceIn);
@@ -109,6 +120,10 @@ export function buildRenderPlan(editorialIr) {
     durationSeconds,
     selects,
     captions,
+    audioStrategy: String(editorialIr?.multicam?.audioStrategy || 'selected_asset'),
+    masterAudioAssetId: editorialIr?.multicam?.masterAudioAssetId
+      ? String(editorialIr.multicam.masterAudioAssetId)
+      : undefined,
   };
 }
 
@@ -145,7 +160,7 @@ async function resolveAssetPaths(options, plan) {
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('Asset bindings JSON must be an object');
     bindings = parsed;
   }
-  const assetIds = [...new Set(plan.selects.map((select) => select.assetId))];
+  const assetIds = [...new Set(plan.selects.flatMap((select) => [select.assetId, select.audioAssetId]))];
   const result = new Map();
   for (const assetId of assetIds) {
     const binding = normalizeAssetBindingValue(bindings[assetId]);
@@ -188,10 +203,11 @@ function escapeFilterPath(value) {
 async function buildFilterScript({ plan, mediaByAsset, inputIndexByAsset, outputMedia, fontFile, tempDir }) {
   const lines = [];
   const concatInputs = [];
-  const hasAudio = plan.selects.some((select) => mediaByAsset.get(select.assetId)?.hasAudio);
+  const hasAudio = plan.selects.some((select) => mediaByAsset.get(select.audioAssetId)?.hasAudio);
   for (const [index, select] of plan.selects.entries()) {
     const inputIndex = inputIndexByAsset.get(select.assetId);
-    const media = mediaByAsset.get(select.assetId);
+    const audioInputIndex = inputIndexByAsset.get(select.audioAssetId);
+    const media = mediaByAsset.get(select.audioAssetId);
     const duration = round(select.sourceOut - select.sourceIn, 6);
     lines.push(
       `[${inputIndex}:v]trim=start=${select.sourceIn}:end=${select.sourceOut},setpts=PTS-STARTPTS,`
@@ -203,7 +219,7 @@ async function buildFilterScript({ plan, mediaByAsset, inputIndexByAsset, output
     if (hasAudio) {
       if (media?.hasAudio) {
         lines.push(
-          `[${inputIndex}:a]atrim=start=${select.sourceIn}:end=${select.sourceOut},asetpts=PTS-STARTPTS,`
+          `[${audioInputIndex}:a]atrim=start=${select.audioSourceIn}:end=${select.audioSourceOut},asetpts=PTS-STARTPTS,`
           + 'aresample=48000,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo'
           + `[a${index}]`,
         );
@@ -266,9 +282,14 @@ export async function renderPreview(options) {
   const outputMedia = mediaByAsset.get(plan.selects[0].assetId);
   for (const select of plan.selects) {
     const media = mediaByAsset.get(select.assetId);
+    const audioMedia = mediaByAsset.get(select.audioAssetId);
     if (!media) throw new Error(`Media metadata is missing for asset ${select.assetId}`);
+    if (!audioMedia) throw new Error(`Audio metadata is missing for asset ${select.audioAssetId}`);
     if (select.sourceOut > media.durationSeconds + 0.05) {
       throw new Error(`select_range ${select.id} exceeds ${select.assetId} duration`);
+    }
+    if (select.audioSourceOut > audioMedia.durationSeconds + 0.05) {
+      throw new Error(`Audio range ${select.id} exceeds ${select.audioAssetId} duration`);
     }
   }
 
@@ -310,6 +331,8 @@ export async function renderPreview(options) {
       durationErrorSeconds: round(durationError),
       selectCount: plan.selects.length,
       captionCount: plan.captions.length,
+      audioStrategy: plan.audioStrategy,
+      audioAssetIds: [...new Set(plan.selects.map((select) => select.audioAssetId))],
       hasAudio: rendered.hasAudio,
       width: rendered.width,
       height: rendered.height,
