@@ -65,6 +65,7 @@ try {
     qc: { version: 'qc.v1', status: 'pass' },
     transcript: { language: 'ja', segments: [{ start: 0, end: 1, text: 'test' }] },
     analysis: { version: 'analysis.v1', decisions: { removals: [] } },
+    evaluation: { version: 'real-footage-quality.v1', status: 'pass', score: 96, checks: [] },
     artifacts: { version: 1, artifacts: [] },
   };
   const syncResponse = await fetch(`${base}/api/projects/analysis-lab`, {
@@ -76,6 +77,7 @@ try {
   const synced = await syncResponse.json();
   assert.equal(synced.id, 'analysis-lab');
   assert.equal(synced.analysis.version, 'analysis.v1');
+  assert.equal(synced.evaluation.score, 96);
 
   const artifactResponse = await fetch(`${base}/api/projects/analysis-lab/artifacts`, {
     method: 'POST',
@@ -123,6 +125,7 @@ try {
   assert.equal(patched.status, 'claimed');
   const html = await (await fetch(base)).text();
   assert.match(html, /AI Video Production/);
+  assert.match(html, /実素材品質評価/);
   assert.match(html, /メディア解析/);
   console.log('ai-video-dashboard tests passed');
 } finally {

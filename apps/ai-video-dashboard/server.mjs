@@ -74,14 +74,15 @@ async function getProject(id) {
   const dir = path.join(DATA_DIR, 'projects', id);
   const project = await readJson(path.join(dir, 'project.json'));
   if (!project) return null;
-  const [editorialIr, qc, transcript, analysis, artifacts] = await Promise.all([
+  const [editorialIr, qc, transcript, analysis, artifacts, evaluation] = await Promise.all([
     readJson(path.join(dir, 'editorial-ir.json')),
     readJson(path.join(dir, 'qc-report.json')),
     readJson(path.join(dir, 'transcript.json')),
     readJson(path.join(dir, 'analysis.json')),
     readJson(path.join(dir, 'artifacts.json'), { version: 1, artifacts: [] }),
+    readJson(path.join(dir, 'evaluation-report.json'), null),
   ]);
-  return { ...project, editorialIr, qc, transcript, analysis, artifacts: artifacts?.artifacts || [] };
+  return { ...project, editorialIr, qc, transcript, analysis, evaluation, artifacts: artifacts?.artifacts || [] };
 }
 
 async function syncProject(id, body) {
@@ -105,14 +106,18 @@ async function syncProject(id, body) {
     : body.artifacts && typeof body.artifacts === 'object'
       ? body.artifacts
       : { version: 1, artifacts: [] };
-  await Promise.all([
+  const writes = [
     writeJsonAtomic(path.join(dir, 'project.json'), project),
     writeJsonAtomic(path.join(dir, 'editorial-ir.json'), body.editorialIr),
     writeJsonAtomic(path.join(dir, 'qc-report.json'), body.qc),
     writeJsonAtomic(path.join(dir, 'transcript.json'), body.transcript),
     writeJsonAtomic(path.join(dir, 'analysis.json'), body.analysis),
     writeJsonAtomic(path.join(dir, 'artifacts.json'), artifacts),
-  ]);
+  ];
+  if (body.evaluation && typeof body.evaluation === 'object' && !Array.isArray(body.evaluation)) {
+    writes.push(writeJsonAtomic(path.join(dir, 'evaluation-report.json'), body.evaluation));
+  }
+  await Promise.all(writes);
   return getProject(id);
 }
 
