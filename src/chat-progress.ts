@@ -123,6 +123,29 @@ interface ProgressStoreFile {
   records: ChatProgressRecord[];
 }
 
+function staleProgressMilliseconds(): number {
+  const minutes = Number(process.env.DEVSPACE_PROGRESS_STALE_MINUTES || 360);
+  const normalized = Number.isFinite(minutes) ? Math.max(15, Math.min(7 * 24 * 60, minutes)) : 360;
+  return normalized * 60_000;
+}
+
+function pauseStaleRecords(records: ChatProgressRecord[], now = Date.now()): { records: ChatProgressRecord[]; changed: boolean } {
+  let changed = false;
+  const staleAfter = staleProgressMilliseconds();
+  const normalized = records.map((record) => {
+    const updatedAt = Date.parse(record.updatedAt);
+    if (record.status !== "running" || !Number.isFinite(updatedAt) || now - updatedAt < staleAfter) return record;
+    changed = true;
+    return {
+      ...record,
+      status: "paused" as const,
+      risk: record.risk || "長時間更新がないため自動一時停止",
+      next: record.next || "同じタスクを再開すると、この履歴から継続します。",
+    };
+  });
+  return { records: normalized, changed };
+}
+
 function progressPath(): string {
   return process.env.DEVSPACE_CHAT_PROGRESS_PATH
     ?? join(homedir(), ".local", "share", "devspace", "chat-progress.json");
@@ -132,11 +155,16 @@ function readStore(): ProgressStoreFile {
   try {
     const parsed = JSON.parse(readFileSync(progressPath(), "utf8")) as Partial<ProgressStoreFile>;
     if (parsed.schemaVersion === 1 && Array.isArray(parsed.records)) {
-      return {
+      const store: ProgressStoreFile = {
         schemaVersion: 1,
         updatedAt: typeof parsed.updatedAt === "string" ? parsed.updatedAt : new Date(0).toISOString(),
         records: parsed.records.filter(isProgressRecord).slice(0, 200),
       };
+      const stale = pauseStaleRecords(store.records);
+      if (!stale.changed) return store;
+      const normalized = { ...store, updatedAt: new Date().toISOString(), records: stale.records };
+      writeStore(normalized);
+      return normalized;
     }
   } catch {
     // Missing or malformed progress state starts clean.
