@@ -1,2 +1,3 @@
 data/queue/*.json
 !data/queue/.gitkeep
+data/mac-bridge/
