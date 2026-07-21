@@ -261,6 +261,30 @@ node score-retention-edit.mjs \
 
 採点は冒頭フック、論理構成、カット密度、最短clip、画面変化間隔、字幕、実測LUFS、True Peak、CTAを対象にします。外部資料を使わないsource-only演出や要点字幕のみの編集は、過大評価しないようカテゴリ上限を制限します。
 
+## フルテロップ・BGM・効果音の視聴維持版
+
+既存の視聴維持IRへ、人手補正したフルテロップを適用できます。字幕開始時刻はtimeline frameへ量子化し、発話カバー率、最大開始誤差、2行制限をIRへ記録します。
+
+```bash
+node apply-caption-plan.mjs \
+  --ir /absolute/path/to/base-ir.json \
+  --captions /absolute/path/to/captions.json \
+  --output /absolute/path/to/full-caption-ir.json
+```
+
+字幕レンダー後は映像を再圧縮せず、BGMのsidechain duckingと時刻指定SEを音声トラックへ追加できます。
+
+```bash
+node mix-retention-audio.mjs \
+  --video /absolute/path/to/full-caption.mp4 \
+  --bgm /absolute/path/to/bgm.mp3 \
+  --sfx-plan /absolute/path/to/sfx-events.json \
+  --sfx-bindings /absolute/path/to/sfx-bindings.json \
+  --output /absolute/path/to/final.mp4
+```
+
+`score-full-caption-edit.mjs`は、フルテロップ95%以上、最大開始遅延2フレーム以内、BGM、3件以上のSE、映像・音声・尺QCを必須条件として60点判定します。
+
 ## テスト
 
 ```bash

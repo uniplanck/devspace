@@ -194,6 +194,7 @@ export function buildRenderPlan(editorialIr) {
     captions,
     overlays,
     visualEffects,
+    captionMode: String(editorialIr?.retentionPlan?.captionMode || 'standard'),
     audioProcessing: String(editorialIr?.audio?.processing || 'none'),
     audioStrategy: String(editorialIr?.multicam?.audioStrategy || 'selected_asset'),
     masterAudioAssetId: editorialIr?.multicam?.masterAudioAssetId
@@ -368,14 +369,18 @@ async function buildFilterScript({ plan, mediaByAsset, inputIndexByAsset, output
     await fs.writeFile(textFile, `${caption.text}\n`, 'utf8');
     const next = `vcap${index}`;
     const roleScale = caption.role === 'emphasis' ? 1.15 : 1;
-    const size = Math.round(fontSize * roleScale);
+    const fullCaption = plan.captionMode === 'full_aligned';
+    const size = Math.round(fontSize * roleScale * (fullCaption ? 1.06 : 1));
+    const captionStyle = fullCaption
+      ? `borderw=${Math.max(4, Math.round(size * 0.075))}:bordercolor=black@0.96:shadowx=2:shadowy=2:shadowcolor=black@0.7:line_spacing=${Math.round(size * 0.14)}:`
+      : `box=1:boxcolor=black@0.62:boxborderw=${boxBorder}:`;
     lines.push(
       `[${previous}]drawtext=`
       + `fontfile='${escapeFilterPath(fontFile)}':`
       + `textfile='${escapeFilterPath(textFile)}':`
       + `expansion=none:reload=0:fontcolor=white:fontsize=${size}:`
-      + `box=1:boxcolor=black@0.62:boxborderw=${boxBorder}:`
-      + `x=(w-text_w)/2:y=h-text_h-${Math.max(42, Math.round(outputMedia.height * 0.07))}:`
+      + captionStyle
+      + `x=(w-text_w)/2:y=h-text_h-${Math.max(54, Math.round(outputMedia.height * 0.075))}:`
       + `enable='between(t,${caption.start},${caption.end})'[${next}]`,
     );
     previous = next;
