@@ -12,6 +12,7 @@ async function health(){try{await api('/api/health');$('#health').textContent='E
 
 function switchTab(name){$$('.tab').forEach(button=>button.classList.toggle('active',button.dataset.tab===name));$$('.view').forEach(view=>view.classList.toggle('active',view.id===`${name}View`));history.replaceState(null,'',`#${name}`);if(name==='projects'&&!state.projects.length)loadProjects();}
 $$('.tab').forEach(button=>button.addEventListener('click',()=>switchTab(button.dataset.tab)));
+window.addEventListener('hashchange',()=>{const name=location.hash.slice(1);if(['quality','history','projects','sources'].includes(name))switchTab(name);});
 
 function renderQualityHero(){const latest=[...state.quality.releases].reverse().find(row=>row.kind==='editing-test');$('#qualityHero').classList.remove('skeleton');$('#qualityHero').innerHTML=`
   <div class="hero-copy"><span class="section-kicker">HUMAN SCORE IS SOURCE OF TRUTH</span><h2>編集機能の数ではなく、<br>視聴者が見続ける理由を測る。</h2><p>前回の機械点100は廃止。構成・映像・字幕・音響・理解・信頼・満足を82項目で分解し、重大な欠陥は総合点へ上限制約をかけます。</p><div class="hero-meta"><span class="meta-chip">現行版 <strong>${esc(latest.title)}</strong></span><span class="meta-chip">目標 <strong>60点以上</strong></span><span class="meta-chip">基準 <strong>${esc(state.quality.version)}</strong></span></div></div>
