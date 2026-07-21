@@ -204,7 +204,7 @@ interface ToolLogFields {
 }
 
 function serverInstructions(config: ServerConfig): string {
-  const progressInstruction = ` MCP cards and raw tool results are implementation details and must never be the only place where user-facing status appears. Before the first substantive GAG/GAE workspace action in every multi-step or file-changing task, send a normal visible commentary message containing an initial time estimate and progress 0%. When ${toolNames.reportProgress} is available, call it at start, meaningful milestones, and completion, then copy its returned Markdown verbatim into a normal visible commentary message; do not rely on the tool card being visible. When ${toolNames.reportProgress} is unavailable, provide the same visible status fields manually and continue rather than omitting progress. Send another visible progress update after roughly two to three workspace calls or fifteen seconds when work continues. Before the final response, call ${toolNames.reportProgress} with status completed or failed when available. The final user-facing response must always use exactly these headings in this order: \"## 完了結果\", \"## 変更\", \"## 検証\", \"## 残り\", and \"## 実行情報\". Never rename or omit a heading; write \"なし\" when a section has no content. Under \"## 実行情報\", paste the completed progress result's final execution table verbatim. If the progress tool is unavailable, reproduce the latest GAG/GAE usage values in a table with task elapsed time, MCP processing time, estimated input/output tokens for this task and this Chat, GPT-5.6 API-conversion yen estimate, tool calls, and errors. Explicitly state that GAG/GAE use is free under the user's current route and that the price is only an API-equivalent estimate, not ChatGPT billing.`;
+  const progressInstruction = ` MCP cards and raw tool results are implementation details and must never be the only place where user-facing status appears. For every multi-step or file-changing GAG/GAE task, call ${toolNames.reportProgress} before the first substantive workspace action with status running and progress 0%, then send its returned Markdown verbatim in a normal visible commentary message. Call it again at meaningful milestones, after forecast revisions, and after roughly two to three workspace calls or fifteen seconds while work continues. Pass taskCategory consistently, use estimateMinutes only on the first call, use remainingEstimateMinutes only when revising the remaining forecast, and pass programProgress when a broader all-phase percentage exists. For every task that used a GAG/GAE workspace tool, the last tool-state action must be ${toolNames.reportProgress} with status completed or failed. On that final call, pass finalResult, changes, verification, and remaining. The completed tool result is the canonical final response and already contains exactly these headings in this order: \"## 完了結果\", \"## 変更\", \"## 検証\", \"## 残り\", and \"## 実行情報\". Paste that returned Markdown verbatim as the entire final answer with no preamble, renamed headings, omitted sections, duplicate usage table, or postscript. Use \"なし\" for empty sections. If the connector exposes no ${toolNames.reportProgress} tool, manually reproduce the same five-heading contract and the latest GAG/GAE execution table; explicitly state that GAG/GAE use is free under the current route and the displayed price is only a GPT-5.6 API-equivalent estimate, not ChatGPT billing.`;
   const showChangesInstruction =
     config.widgets === "changes"
       ? " If the turn successfully modifies files by creating, editing, overwriting, deleting, moving, or applying patches, call show_changes exactly once for that workspace after the final related file change and before your final response so the user can inspect the aggregate diff for that turn. Do not call it after every individual file change; do not skip it because individual file-change tools already returned diffs."
@@ -1218,23 +1218,31 @@ function createMcpServer(
     {
       title: "Report progress",
       description:
-        "Persist user-facing progress for a long GPT-Agent task so GPT-Agent Tool can show the chat/task label, percentage, current step, elapsed time, ETA, risks, and GPT-5.6 API-conversion cost estimate. Call at task start, meaningful milestones, and completion.",
+        "Persist canonical GAG/GAE task progress. Call at task start and milestones. The completed or failed call must include finalResult, changes, verification, and remaining; its returned Markdown is the complete fixed five-heading final response and must be pasted verbatim.",
       inputSchema: {
         chatLabel: z.string().min(1).max(160).describe("Short human-readable chat or task label."),
         workspaceId: z.string().optional().describe("Workspace identifier when one is already open."),
-        overallProgress: z.number().min(0).max(100).describe("Overall task progress percentage."),
+        taskCategory: z.string().min(1).max(80).optional().describe("Stable category reused across similar tasks for ETA calibration."),
+        overallProgress: z.number().min(0).max(100).describe("Current task progress percentage."),
+        programProgress: z.number().min(0).max(100).optional().describe("Broader all-phase or program completion percentage."),
         currentProgress: z.number().min(0).max(100).optional().describe("Current subtask progress percentage."),
         currentTask: z.string().min(1).max(240).describe("Current user-relevant task."),
         completed: z.string().max(500).optional().describe("Short summary of what is complete."),
         next: z.string().max(500).optional().describe("Short summary of the next action."),
         risk: z.string().max(500).optional().describe("Current blocker or risk, if any."),
         status: z.enum(["running", "paused", "completed", "failed"]).optional(),
-        estimateMinutes: z.number().min(1).max(1440).optional().describe("Initial completion estimate in minutes."),
+        estimateMinutes: z.number().min(1).max(1440).optional().describe("Initial completion estimate in minutes. Pass only at task start."),
+        remainingEstimateMinutes: z.number().min(1).max(1440).optional().describe("Revised remaining estimate in minutes. Pass whenever revising the forecast."),
+        finalResult: z.string().max(4000).optional().describe("Final outcome text. Pass on completed or failed calls."),
+        changes: z.string().max(4000).optional().describe("Final changed-items summary, or 'なし'. Pass on completed or failed calls."),
+        verification: z.string().max(4000).optional().describe("Final verification summary, or 'なし'. Pass on completed or failed calls."),
+        remaining: z.string().max(4000).optional().describe("Final remaining-work summary, or 'なし'. Pass on completed or failed calls."),
       },
       outputSchema: {
         result: z.string(),
         id: z.string(),
         overallProgress: z.number(),
+        programProgress: z.number().optional(),
         currentProgress: z.number(),
         elapsedSeconds: z.number(),
         remainingSeconds: z.number().optional(),
@@ -1250,6 +1258,7 @@ function createMcpServer(
         sessionErrors: z.number(),
         estimatedJpy: z.number(),
         estimatedJpyMax: z.number(),
+        isFinal: z.boolean(),
       },
       annotations: {
         readOnlyHint: false,
@@ -1272,7 +1281,9 @@ function createMcpServer(
         chatLabel: input.chatLabel,
         workspaceId: input.workspaceId,
         workspaceRoot: workspace?.root,
+        taskCategory: input.taskCategory,
         overallProgress: input.overallProgress,
+        programProgress: input.programProgress,
         currentProgress: input.currentProgress,
         currentTask: input.currentTask,
         completed: input.completed,
@@ -1280,6 +1291,11 @@ function createMcpServer(
         risk: input.risk,
         status: input.status,
         estimateMinutes: input.estimateMinutes,
+        remainingEstimateMinutes: input.remainingEstimateMinutes,
+        finalResult: input.finalResult,
+        changes: input.changes,
+        verification: input.verification,
+        remaining: input.remaining,
       });
       const result = formatChatProgressResult(record);
       return {
@@ -1288,6 +1304,7 @@ function createMcpServer(
           result,
           id: record.id,
           overallProgress: record.overallProgress,
+          programProgress: record.programProgress,
           currentProgress: record.currentProgress,
           elapsedSeconds: record.elapsedSeconds,
           remainingSeconds: record.remainingSeconds,
@@ -1303,6 +1320,7 @@ function createMcpServer(
           sessionErrors: record.sessionErrors,
           estimatedJpy: record.sessionEstimatedJpy,
           estimatedJpyMax: record.sessionEstimatedJpyMax ?? record.sessionEstimatedJpy,
+          isFinal: record.status === "completed" || record.status === "failed",
         },
       };
     },

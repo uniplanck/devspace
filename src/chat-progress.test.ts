@@ -21,7 +21,9 @@ const started = updateChatProgress({
   chatLabel: "GAG進化",
   workspaceId: "ws_test",
   workspaceRoot: "/tmp/gag",
+  taskCategory: "agent-runtime",
   overallProgress: 0,
+  programProgress: 76,
   currentProgress: 0,
   currentTask: "既存確認",
   estimateMinutes: 20,
@@ -52,7 +54,11 @@ assert.equal(updated.estimatedTotalSeconds, 1_200);
 const formattedProgress = formatChatProgressResult(updated);
 assert.match(formattedProgress, /^\*\*GAG · 実行状況\*\*/u);
 assert.match(formattedProgress, /\| 状態 \| ▶️ 実行中 \|/u);
-assert.match(formattedProgress, /\| 全体進捗 \| 50% \|/u);
+assert.match(formattedProgress, /\| 日時 \| .* JST \|/u);
+assert.match(formattedProgress, /\| 今回進捗 \| 50% \|/u);
+assert.match(formattedProgress, /\| 全フェーズ完成進捗 \| 76% \|/u);
+assert.match(formattedProgress, /\| 初回予測 \|/u);
+assert.match(formattedProgress, /\| 予測学習 \|/u);
 assert.match(formattedProgress, /\| 現在の作業 \| 実装 \|/u);
 assert.match(formattedProgress, /\| 次の作業 \| テスト \|/u);
 
@@ -66,18 +72,32 @@ const completed = updateChatProgress({
   currentProgress: 100,
   currentTask: "完了",
   status: "completed",
+  finalResult: "統合が完了しました。",
+  changes: "- gagとGAEの出力契約を統一\n- 完了応答を固定化",
+  verification: "- typecheck成功\n- formatter test成功",
+  remaining: "なし",
 });
 assert.equal(completed.status, "completed");
 assert.equal(completed.remainingSeconds, 0);
 assert.equal(completed.taskInputTokens >= 0, true);
 assert.equal(completed.taskOutputTokens >= 0, true);
 const completedProgress = formatChatProgressResult(completed);
-assert.match(completedProgress, /最終実行情報（GPT-5\.6 API換算）/u);
+assert.match(completedProgress, /^## 完了結果\n\n統合が完了しました。/u);
+assert.match(completedProgress, /## 変更\n\n- gagとGAEの出力契約を統一\n- 完了応答を固定化/u);
+assert.match(completedProgress, /## 検証\n\n- typecheck成功\n- formatter test成功/u);
+assert.match(completedProgress, /## 残り\n\nなし/u);
+assert.match(completedProgress, /## 実行情報\n\n\*\*GAG · 最終実行情報（GPT-5\.6 API換算）\*\*/u);
+const finalHeadings = ["## 完了結果", "## 変更", "## 検証", "## 残り", "## 実行情報"];
+assert.deepEqual(
+  completedProgress.split("\n").filter((line) => line.startsWith("## ")),
+  finalHeadings,
+);
+assert.doesNotMatch(completedProgress, /\*\*GAG · 実行状況\*\*/u);
 assert.match(completedProgress, /\| 作業経過時間 \|/u);
 assert.match(completedProgress, /\| MCP処理時間 \|/u);
 assert.match(completedProgress, /\| 入力推定 \|/u);
 assert.match(completedProgress, /\| 出力推定 \|/u);
-assert.match(completedProgress, /GAG\/GAE利用自体の請求額やChatGPT本体の全token数ではありません/u);
+assert.match(completedProgress, /GAG\/GAE利用自体は現在の接続経路では無料/u);
 assert.equal(listChatProgress().length, 1);
 
 const parallel = updateChatProgress({
@@ -109,8 +129,26 @@ const fallbackUpdated = updateChatProgress({
 assert.equal(fallbackUpdated.id, fallbackStarted.id);
 assert.equal(fallbackUpdated.startedAt, fallbackStarted.startedAt);
 assert.equal(fallbackUpdated.usageScope, "task-fallback");
-assert.match(formatChatProgressResult({ ...fallbackUpdated, status: "completed" }), /このタスク内のGAG累計/u);
+const fallbackCompleted = formatChatProgressResult({ ...fallbackUpdated, status: "completed" });
+assert.match(fallbackCompleted, /このタスク内のGAG累計/u);
+assert.match(fallbackCompleted, /^## 完了結果/u);
 assert.equal(listChatProgress().length, 3);
+
+const nextTaskSameChat = updateChatProgress({
+  sessionId: "next_task_same_chat",
+  conversationId: "11111111-2222-3333-4444-555555555555",
+  chatLabel: "GAG進化",
+  workspaceId: "ws_test",
+  workspaceRoot: "/tmp/gag",
+  taskCategory: "agent-runtime",
+  overallProgress: 0,
+  programProgress: 77,
+  currentTask: "次の作業を開始",
+  estimateMinutes: 10,
+});
+assert.notEqual(nextTaskSameChat.id, completed.id);
+assert.equal(nextTaskSameChat.programProgress, 77);
+assert.equal(listChatProgress().length, 4);
 
 if (previousPath === undefined) {
   delete process.env.DEVSPACE_CHAT_PROGRESS_PATH;
