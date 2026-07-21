@@ -42,6 +42,10 @@ export interface ChatProgressInput {
   status?: ChatProgressStatus;
   estimateMinutes?: number;
   remainingEstimateMinutes?: number;
+  finalResult?: string;
+  changes?: string;
+  verification?: string;
+  remaining?: string;
 }
 
 export interface ChatProgressRecord {
@@ -64,6 +68,10 @@ export interface ChatProgressRecord {
   completed: string;
   next: string;
   risk: string;
+  finalResult?: string;
+  changes?: string;
+  verification?: string;
+  remaining?: string;
   startedAt: string;
   updatedAt: string;
   finishedAt?: string;
@@ -166,6 +174,15 @@ function normalizeMinutes(value: number | undefined): number | undefined {
 
 function sanitizeText(value: string | undefined, limit: number, fallback = ""): string {
   const normalized = String(value ?? "").normalize("NFKC").replace(/[\r\n\t]+/gu, " ").trim();
+  return (normalized || fallback).slice(0, limit);
+}
+
+function sanitizeMarkdown(value: string | undefined, limit: number, fallback = ""): string {
+  const normalized = String(value ?? "")
+    .normalize("NFKC")
+    .replace(/\r\n?/gu, "\n")
+    .replace(/\u0000/gu, "")
+    .trim();
   return (normalized || fallback).slice(0, limit);
 }
 
@@ -362,6 +379,10 @@ export function updateChatProgress(input: ChatProgressInput): ChatProgressRecord
     completed: sanitizeText(input.completed, 500),
     next: sanitizeText(input.next, 500),
     risk: sanitizeText(input.risk, 500),
+    finalResult: sanitizeMarkdown(input.finalResult, 4_000) || existing?.finalResult,
+    changes: sanitizeMarkdown(input.changes, 4_000) || existing?.changes,
+    verification: sanitizeMarkdown(input.verification, 4_000) || existing?.verification,
+    remaining: sanitizeMarkdown(input.remaining, 4_000) || existing?.remaining,
     startedAt,
     updatedAt: now.toISOString(),
     finishedAt,
@@ -470,16 +491,8 @@ function formatPercent(value: number | undefined): string {
   return value === undefined ? "—" : `${value.toFixed(value % 1 === 0 ? 0 : 1)}%`;
 }
 
-export function formatChatProgressResult(record: ChatProgressRecord): string {
-  const label = runtimeProgressLabel();
+function formatFinalExecutionInformation(record: ChatProgressRecord, label: string): string[] {
   const elapsed = compactDuration(record.elapsedSeconds * 1000);
-  const remaining = record.remainingSeconds === undefined
-    ? "算出中"
-    : compactDuration(record.remainingSeconds * 1000);
-  const estimatedCost = compactYenRange(
-    record.sessionEstimatedJpy,
-    record.sessionEstimatedJpyMax ?? record.sessionEstimatedJpy,
-  );
   const taskCost = compactYenRange(record.taskEstimatedJpy, record.taskEstimatedJpyMax);
   const sessionCost = compactYenRange(
     record.sessionEstimatedJpy,
@@ -491,26 +504,74 @@ export function formatChatProgressResult(record: ChatProgressRecord): string {
   const scopeNote = record.usageScope === "conversation"
     ? ""
     : " Chat会話IDが渡されない経路では、同じchatLabelのタスク開始時点から集計します。";
-  const finalExecutionInformation = record.status === "completed" || record.status === "failed"
-    ? [
-        "",
-        `**${label} · 最終実行情報（GPT-5.6 API換算）**`,
-        "",
-        `| 指標 | 今回 | ${cumulativeLabel} |`,
-        "|---|---:|---:|",
-        `| 作業経過時間 | ${elapsed} | — |`,
-        `| MCP処理時間 | ${compactDuration(record.taskToolDurationMs)} | ${compactDuration(record.sessionToolDurationMs)} |`,
-        `| 入力推定 | 約${record.taskInputTokens.toLocaleString("ja-JP")} tok | 約${record.sessionInputTokens.toLocaleString("ja-JP")} tok |`,
-        `| 出力推定 | 約${record.taskOutputTokens.toLocaleString("ja-JP")} tok | 約${record.sessionOutputTokens.toLocaleString("ja-JP")} tok |`,
-        `| 推定費用 | ${taskCost} | ${sessionCost} |`,
-        `| ツール呼出 | ${record.taskCalls} | ${record.sessionCalls} |`,
-        `| エラー | ${record.taskErrors} | ${record.sessionErrors} |`,
-        `| 初回予測誤差 | ${formatPercent(record.initialEstimateErrorPercent)} | — |`,
-        `| 最終予測誤差 | ${formatPercent(record.finalEstimateErrorPercent)} | — |`,
-        "",
-        `※ ${label}のMCP入出力をGPT-5.6 API料金へ換算した参考値です。GAG/GAE利用自体の請求額やChatGPT本体の全token数ではありません。${scopeNote}`,
-      ]
-    : [];
+  return [
+    `**${label} · 最終実行情報（GPT-5.6 API換算）**`,
+    "",
+    `| 指標 | 今回 | ${cumulativeLabel} |`,
+    "|---|---:|---:|",
+    `| 作業経過時間 | ${elapsed} | — |`,
+    `| MCP処理時間 | ${compactDuration(record.taskToolDurationMs)} | ${compactDuration(record.sessionToolDurationMs)} |`,
+    `| 入力推定 | 約${record.taskInputTokens.toLocaleString("ja-JP")} tok | 約${record.sessionInputTokens.toLocaleString("ja-JP")} tok |`,
+    `| 出力推定 | 約${record.taskOutputTokens.toLocaleString("ja-JP")} tok | 約${record.sessionOutputTokens.toLocaleString("ja-JP")} tok |`,
+    `| 推定費用 | ${taskCost} | ${sessionCost} |`,
+    `| ツール呼出 | ${record.taskCalls} | ${record.sessionCalls} |`,
+    `| エラー | ${record.taskErrors} | ${record.sessionErrors} |`,
+    `| 初回予測誤差 | ${formatPercent(record.initialEstimateErrorPercent)} | — |`,
+    `| 最終予測誤差 | ${formatPercent(record.finalEstimateErrorPercent)} | — |`,
+    "",
+    `※ ${label}のMCP入出力をGPT-5.6 API料金へ換算した参考値です。GAG/GAE利用自体は現在の接続経路では無料で、表示価格はAPI換算の参考値です。ChatGPT本体の請求額や全token数ではありません。${scopeNote}`,
+  ];
+}
+
+export function formatFinalTaskResponse(record: ChatProgressRecord): string {
+  const label = runtimeProgressLabel();
+  const failed = record.status === "failed";
+  const finalResult = record.finalResult?.trim()
+    || record.completed.trim()
+    || (failed ? "タスクは失敗しました。" : "タスクは完了しました。");
+  const changes = record.changes?.trim() || "なし";
+  const verification = record.verification?.trim()
+    || (failed ? "完了条件を満たしていません。" : "なし");
+  const remaining = record.remaining?.trim()
+    || (failed ? record.risk.trim() || "失敗原因の解消が必要です。" : "なし");
+
+  return [
+    "## 完了結果",
+    "",
+    finalResult,
+    "",
+    "## 変更",
+    "",
+    changes,
+    "",
+    "## 検証",
+    "",
+    verification,
+    "",
+    "## 残り",
+    "",
+    remaining,
+    "",
+    "## 実行情報",
+    "",
+    ...formatFinalExecutionInformation(record, label),
+  ].join("\n");
+}
+
+export function formatChatProgressResult(record: ChatProgressRecord): string {
+  if (record.status === "completed" || record.status === "failed") {
+    return formatFinalTaskResponse(record);
+  }
+
+  const label = runtimeProgressLabel();
+  const elapsed = compactDuration(record.elapsedSeconds * 1000);
+  const remaining = record.remainingSeconds === undefined
+    ? "算出中"
+    : compactDuration(record.remainingSeconds * 1000);
+  const estimatedCost = compactYenRange(
+    record.sessionEstimatedJpy,
+    record.sessionEstimatedJpyMax ?? record.sessionEstimatedJpy,
+  );
 
   return [
     `**${label} · 実行状況**`,
@@ -533,6 +594,5 @@ export function formatChatProgressResult(record: ChatProgressRecord): string {
     `| 推定費用 | ${estimatedCost} |`,
     "",
     "※ 推定費用はGAG/GAEのMCP入出力をGPT-5.6 API料金へ換算した参考値です。ChatGPT本体の請求額ではありません。",
-    ...finalExecutionInformation,
   ].join("\n");
 }
