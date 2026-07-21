@@ -96,6 +96,19 @@ node apps/ai-video-dashboard/mac-bridge.mjs
 
 検証用の空プロジェクトは `fixtures/empty-lab.palmier` です。
 
+## 確認用ファイルをGoogle Driveへ保存
+
+```bash
+node upload-artifact.mjs \
+  --project demo-talk \
+  --file /absolute/path/to/preview.mp4 \
+  --kind preview \
+  --label "初回カットプレビュー" \
+  --note "無音除去とテロップ位置の確認用"
+```
+
+既定では`grive:AI-Video-Production-OS/Test-Artifacts/YYYY-MM-DD/<projectId>/`へアップロードし、共有URL・SHA-256・用途を`artifacts.json`へ記録します。Dashboardの「確認用ファイル」から直接開けます。保存先は`AIVIDEO_DRIVE_REMOTE`と`AIVIDEO_DRIVE_BASE`で変更できます。
+
 ## テスト
 
 ```bash
