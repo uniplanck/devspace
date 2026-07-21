@@ -238,6 +238,29 @@ node evaluate-real-footage.mjs \
 
 冒頭・中央・終端の音声を再照合し、同期ドリフトを`ms/分`で算出します。さらに出力尺、source範囲、master音声統一、平均音量、クリッピングリスク、カット境界の音切れを100点満点で採点し、`evaluation-report.json`へ改善指示付きで保存します。Dashboardの「実素材品質評価」に同じ結果を表示します。
 
+## 視聴維持向けに再構成して採点
+
+結論先出し、章構成、要点字幕、パンチイン、CTA、会話向け音量処理を含む編集計画からEditorial IRを生成します。
+
+```bash
+node build-retention-edit.mjs \
+  --project retention-edit \
+  --plan /absolute/path/to/retention-plan.json \
+  --output /absolute/path/to/retention-editorial-ir.json
+
+node render-preview.mjs \
+  --media /absolute/path/to/source.mp4 \
+  --ir /absolute/path/to/retention-editorial-ir.json \
+  --output /absolute/path/to/retention-preview.mp4
+
+node score-retention-edit.mjs \
+  --ir /absolute/path/to/retention-editorial-ir.json \
+  --video /absolute/path/to/retention-preview.mp4 \
+  --output /absolute/path/to/retention-score.json
+```
+
+採点は冒頭フック、論理構成、カット密度、最短clip、画面変化間隔、字幕、実測LUFS、True Peak、CTAを対象にします。外部資料を使わないsource-only演出や要点字幕のみの編集は、過大評価しないようカテゴリ上限を制限します。
+
 ## テスト
 
 ```bash
@@ -246,6 +269,8 @@ node analysis-core.test.mjs
 node multicam-core.test.mjs
 node real-footage-quality.test.mjs
 node export-premiere-xml.test.mjs
+node build-retention-edit.mjs --self-test
+node score-retention-edit.mjs --self-test
 node render-preview.mjs --self-test
 node test.mjs
 ```
