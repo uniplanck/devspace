@@ -209,6 +209,50 @@ function mapSelectSegments(baseSelects, cameraPlan, synchronization, assetsById,
   return { operations, warnings };
 }
 
+function attachAudioPlan(operations, {
+  audioStrategy,
+  masterAudioAssetId,
+  referenceAssetId,
+  synchronization,
+  assetsById,
+}) {
+  const strategy = String(audioStrategy || 'selected_asset');
+  if (strategy !== 'selected_asset' && strategy !== 'master_audio') {
+    throw new Error(`Unsupported multicam audio strategy: ${strategy}`);
+  }
+  if (strategy === 'selected_asset') {
+    return operations.map((operation) => ({
+      ...operation,
+      audioAssetId: operation.assetId,
+      audioSourceIn: operation.sourceIn,
+      audioSourceOut: operation.sourceOut,
+    }));
+  }
+
+  const audioAssetId = String(masterAudioAssetId || referenceAssetId).trim();
+  const audioAsset = assetsById.get(audioAssetId);
+  const sync = synchronization[audioAssetId];
+  if (!audioAsset) throw new Error(`Master audio asset not found: ${audioAssetId}`);
+  if (audioAssetId !== referenceAssetId && (!sync || sync.status !== 'synced')) {
+    throw new Error(`Master audio asset is not synchronized: ${audioAssetId}`);
+  }
+  if (!audioAsset.hasAudio) throw new Error(`Master audio asset has no audio stream: ${audioAssetId}`);
+  const sourceOffsetSeconds = Number(sync?.sourceOffsetSeconds || 0);
+  return operations.map((operation) => {
+    const audioSourceIn = Number(operation.referenceSourceIn) + sourceOffsetSeconds;
+    const audioSourceOut = Number(operation.referenceSourceOut) + sourceOffsetSeconds;
+    if (audioSourceIn < -0.05 || audioSourceOut > Number(audioAsset.durationSeconds) + 0.05) {
+      throw new Error(`Master audio range exceeds ${audioAssetId} duration for ${operation.id}`);
+    }
+    return {
+      ...operation,
+      audioAssetId,
+      audioSourceIn: round(Math.max(0, audioSourceIn)),
+      audioSourceOut: round(audioSourceOut),
+    };
+  });
+}
+
 export function buildMulticamEditorialIr({
   projectId,
   referenceEditorialIr,
@@ -216,6 +260,8 @@ export function buildMulticamEditorialIr({
   assets,
   synchronization,
   cameraPlan,
+  audioStrategy = 'selected_asset',
+  masterAudioAssetId = referenceAssetId,
   policy: policyInput = {},
   generatedAt = new Date().toISOString(),
 }) {
@@ -229,7 +275,14 @@ export function buildMulticamEditorialIr({
   const baseSelects = baseOperations.filter((operation) => operation?.type === 'select_range' && operation.enabled !== false);
   const passthrough = baseOperations.filter((operation) => operation?.type !== 'select_range');
   const mapped = mapSelectSegments(baseSelects, normalizedPlan, synchronization, assetsById, referenceAssetId, policy);
-  const assetIds = [...new Set(mapped.operations.map((operation) => operation.assetId))];
+  const operationsWithAudio = attachAudioPlan(mapped.operations, {
+    audioStrategy,
+    masterAudioAssetId,
+    referenceAssetId,
+    synchronization,
+    assetsById,
+  });
+  const assetIds = [...new Set(operationsWithAudio.flatMap((operation) => [operation.assetId, operation.audioAssetId]))];
   return {
     editorialIr: {
       ...referenceEditorialIr,
@@ -238,12 +291,15 @@ export function buildMulticamEditorialIr({
       intent: `${String(referenceEditorialIr.intent || '').trim()} / 同期済み複数素材を明示カメラプランで切替`.replace(/^ \/ /u, ''),
       timeline: {
         ...referenceEditorialIr.timeline,
-        operations: [...mapped.operations, ...passthrough],
+        operations: [...operationsWithAudio, ...passthrough],
       },
       multicam: {
         version: 'multicam.v1',
         referenceAssetId,
-        audioStrategy: 'selected_asset',
+        audioStrategy: String(audioStrategy || 'selected_asset'),
+        masterAudioAssetId: String(audioStrategy || 'selected_asset') === 'master_audio'
+          ? String(masterAudioAssetId || referenceAssetId)
+          : undefined,
         assetIds,
         cameraPlan: normalizedPlan,
         synchronization,
@@ -259,6 +315,13 @@ export function buildMulticamQc({ editorialIr, assets, synchronization, warnings
   const assetIds = new Set((assets || []).map((asset) => String(asset.id)));
   const selected = editorialIr?.timeline?.operations?.filter((operation) => operation?.type === 'select_range') || [];
   const syncRows = Object.entries(synchronization || {}).map(([assetId, sync]) => ({ assetId, ...sync }));
+  const audioStrategy = String(editorialIr?.multicam?.audioStrategy || 'selected_asset');
+  const audioAssetIds = new Set(selected.map((operation) => operation.audioAssetId || operation.assetId));
+  const audioRangesValid = selected.every((operation) => {
+    const start = Number(operation.audioSourceIn ?? operation.sourceIn);
+    const end = Number(operation.audioSourceOut ?? operation.sourceOut);
+    return Number.isFinite(start) && Number.isFinite(end) && start >= 0 && end > start;
+  });
   const checks = [
     {
       id: 'multicam-assets',
@@ -285,6 +348,14 @@ export function buildMulticamQc({ editorialIr, assets, synchronization, warnings
       status: warnings.length ? 'review' : 'pass',
       value: warnings.length,
     },
+    {
+      id: 'multicam-audio-strategy',
+      status: audioRangesValid && (audioStrategy !== 'master_audio' || audioAssetIds.size === 1) ? 'pass' : 'fail',
+      value: {
+        strategy: audioStrategy,
+        audioAssetIds: [...audioAssetIds],
+      },
+    },
   ];
   const failed = checks.some((check) => check.status === 'fail');
   const review = warnings.length || checks.some((check) => check.status === 'review');
@@ -296,6 +367,8 @@ export function buildMulticamQc({ editorialIr, assets, synchronization, warnings
       selectedAssetCount: new Set(selected.map((operation) => operation.assetId)).size,
       selectCount: selected.length,
       fallbackCount: warnings.length,
+      audioStrategy,
+      audioAssetIds: [...audioAssetIds],
       outputDurationSeconds: editorialIr?.timeline?.durationSeconds,
     },
     checks,

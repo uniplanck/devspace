@@ -63,8 +63,8 @@ const referenceIr = {
   generatedAt: '2026-07-21T00:00:00.000Z',
 };
 const assets = [
-  { id: 'cam-a', durationSeconds: 7 },
-  { id: 'cam-b', durationSeconds: 9 },
+  { id: 'cam-a', durationSeconds: 7, hasAudio: true },
+  { id: 'cam-b', durationSeconds: 9, hasAudio: true },
 ];
 const synchronization = {
   'cam-a': { method: 'reference', status: 'synced', sourceOffsetSeconds: 0, confidence: 1 },
@@ -89,6 +89,8 @@ assert.equal(selects[2].timelineIn, 2.5);
 assert.equal(selects[2].referenceSourceIn, 4.5);
 assert.equal(selects[2].sourceIn, 5.5);
 assert.equal(selects[2].sourceOut, 8);
+assert.equal(selects[2].audioAssetId, 'cam-b');
+assert.equal(selects[2].audioSourceIn, 5.5);
 assert.ok(built.editorialIr.timeline.operations.some((operation) => operation.type === 'caption'));
 assert.equal(built.warnings.length, 0);
 
@@ -100,6 +102,48 @@ const qc = buildMulticamQc({
 });
 assert.equal(qc.status, 'pass');
 assert.equal(qc.summary.selectedAssetCount, 2);
+assert.equal(qc.summary.audioStrategy, 'selected_asset');
+
+const masterBuilt = buildMulticamEditorialIr({
+  projectId: 'multicam-master-audio',
+  referenceEditorialIr: referenceIr,
+  referenceAssetId: 'cam-a',
+  assets,
+  synchronization,
+  cameraPlan: [
+    { assetId: 'cam-a', timelineIn: 0, timelineOut: 2.5 },
+    { assetId: 'cam-b', timelineIn: 2.5, timelineOut: 5 },
+  ],
+  audioStrategy: 'master_audio',
+  masterAudioAssetId: 'cam-a',
+});
+const masterSelects = masterBuilt.editorialIr.timeline.operations.filter((operation) => operation.type === 'select_range');
+assert.equal(masterBuilt.editorialIr.multicam.audioStrategy, 'master_audio');
+assert.equal(masterBuilt.editorialIr.multicam.masterAudioAssetId, 'cam-a');
+assert.deepEqual([...new Set(masterSelects.map((operation) => operation.audioAssetId))], ['cam-a']);
+assert.deepEqual(masterSelects.map((operation) => operation.audioSourceIn), [0, 4, 4.5]);
+const masterQc = buildMulticamQc({
+  editorialIr: masterBuilt.editorialIr,
+  assets,
+  synchronization,
+  warnings: masterBuilt.warnings,
+});
+assert.equal(masterQc.status, 'pass');
+assert.equal(masterQc.summary.audioStrategy, 'master_audio');
+assert.deepEqual(masterQc.summary.audioAssetIds, ['cam-a']);
+assert.throws(() => buildMulticamEditorialIr({
+  projectId: 'multicam-invalid-master',
+  referenceEditorialIr: referenceIr,
+  referenceAssetId: 'cam-a',
+  assets,
+  synchronization: {
+    ...synchronization,
+    'cam-b': { method: 'audio_correlation', status: 'review', sourceOffsetSeconds: 1, confidence: 0.2 },
+  },
+  cameraPlan: [{ assetId: 'cam-a', timelineIn: 0, timelineOut: 5 }],
+  audioStrategy: 'master_audio',
+  masterAudioAssetId: 'cam-b',
+}), /not synchronized/u);
 
 const reviewBuilt = buildMulticamEditorialIr({
   projectId: 'multicam-review',

@@ -307,6 +307,8 @@ async function main() {
     reference.editorialIr.timeline.durationSeconds,
     referenceAssetId,
   );
+  const audioStrategy = String(options['audio-strategy'] || manifest.audioStrategy || manifest.audio?.strategy || 'selected_asset');
+  const masterAudioAssetId = String(options['master-audio-asset'] || manifest.masterAudioAssetId || manifest.audio?.assetId || referenceAssetId);
   const generatedAt = new Date().toISOString();
   const built = buildMulticamEditorialIr({
     projectId,
@@ -315,6 +317,8 @@ async function main() {
     assets: probedAssets,
     synchronization,
     cameraPlan,
+    audioStrategy,
+    masterAudioAssetId,
     policy: syncPolicy,
     generatedAt,
   });
@@ -333,6 +337,10 @@ async function main() {
     assets: probedAssets,
     synchronization,
     cameraPlan,
+    audio: {
+      strategy: built.editorialIr.multicam.audioStrategy,
+      masterAudioAssetId: built.editorialIr.multicam.masterAudioAssetId,
+    },
     sourceAnalysis: reference.analysis,
     policy: syncPolicy,
   };
@@ -374,6 +382,8 @@ async function main() {
     }])),
     qcStatus: qc.status,
     fallbackCount: built.warnings.length,
+    audioStrategy: built.editorialIr.multicam.audioStrategy,
+    masterAudioAssetId: built.editorialIr.multicam.masterAudioAssetId,
     files: ['project.json', 'analysis.json', 'transcript.json', 'editorial-ir.json', 'qc-report.json', 'asset-manifest.json'],
   };
 
