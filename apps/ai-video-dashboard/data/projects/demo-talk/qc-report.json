@@ -1,0 +1,9 @@
+{
+  "status": "pass_with_notes",
+  "score": 86,
+  "checks": [
+    { "name": "timeline_integrity", "status": "pass" },
+    { "name": "caption_readability", "status": "pass" },
+    { "name": "audio_continuity", "status": "note", "message": "実素材接続後にカット点クロスフェードを確認" }
+  ]
+}

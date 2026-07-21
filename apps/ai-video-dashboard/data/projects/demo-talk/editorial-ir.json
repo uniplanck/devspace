@@ -1,0 +1,15 @@
+{
+  "schemaVersion": "0.1.0",
+  "projectId": "demo-talk",
+  "intent": "冒頭で論点を提示し、言い直しを除いて自然な対談テンポを保つ",
+  "timeline": {
+    "frameRate": 30,
+    "durationSeconds": 18.4,
+    "operations": [
+      { "id": "op-1", "type": "select_range", "assetId": "cam-a", "sourceIn": 0.0, "sourceOut": 6.8, "timelineIn": 0.0, "reason": "導入を保持" },
+      { "id": "op-2", "type": "remove_range", "assetId": "cam-a", "sourceIn": 6.8, "sourceOut": 7.7, "reason": "言い直しを除去" },
+      { "id": "op-3", "type": "caption", "timelineIn": 1.1, "timelineOut": 4.3, "text": "編集判断を正本にする", "role": "emphasis" }
+    ]
+  },
+  "generatedAt": "2026-07-21T08:30:00.000Z"
+}

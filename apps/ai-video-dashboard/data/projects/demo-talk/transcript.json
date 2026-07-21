@@ -1,0 +1,9 @@
+{
+  "language": "ja",
+  "segments": [
+    { "start": 0.0, "end": 3.4, "speaker": "A", "text": "編集ソフトを直接動かすことが中心ではありません。" },
+    { "start": 3.4, "end": 7.7, "speaker": "A", "text": "編集判断そのものを、ソフトから独立した正本にします。" },
+    { "start": 7.7, "end": 12.8, "speaker": "B", "text": "それならPremiereがなくても検証できますね。" },
+    { "start": 12.8, "end": 18.4, "speaker": "A", "text": "はい。Macが戻った時にPalmierへ同じ判断を反映します。" }
+  ]
+}

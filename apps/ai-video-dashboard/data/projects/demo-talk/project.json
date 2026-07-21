@@ -1,0 +1,9 @@
+{
+  "id": "demo-talk",
+  "title": "対談MVP デモ",
+  "description": "PremiereなしでEditorial IR・字幕・QC・反映待ちキューを確認するfixture",
+  "status": "review_ready",
+  "durationSeconds": 18.4,
+  "adapterStatus": "headless_preview_ready",
+  "updatedAt": "2026-07-21T08:30:00.000Z"
+}

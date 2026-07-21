@@ -1,0 +1,22 @@
+[Unit]
+Description=AI Video Tailnet Dashboard
+After=network-online.target tailscaled.service
+Wants=network-online.target tailscaled.service
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/GPT-Agent/apps/ai-video-dashboard
+Environment=AIVIDEO_HOST=100.66.201.64
+Environment=AIVIDEO_PORT=4317
+ExecStart=/usr/bin/node /home/ubuntu/GPT-Agent/apps/ai-video-dashboard/server.mjs
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/ubuntu/GPT-Agent/apps/ai-video-dashboard/data
+
+[Install]
+WantedBy=multi-user.target
