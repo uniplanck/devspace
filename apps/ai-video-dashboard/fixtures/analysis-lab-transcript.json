@@ -1,0 +1,46 @@
+{
+  "language": "ja",
+  "provider": "fixture-sidecar",
+  "segments": [
+    {
+      "id": "s1",
+      "start": 0.0,
+      "end": 1.8,
+      "speaker": "A",
+      "text": "今日はAI動画編集の検証をします。",
+      "confidence": 0.98
+    },
+    {
+      "id": "s2",
+      "start": 3.2,
+      "end": 4.1,
+      "speaker": "A",
+      "text": "えっと",
+      "confidence": 0.96
+    },
+    {
+      "id": "s3",
+      "start": 4.1,
+      "end": 5.0,
+      "speaker": "A",
+      "text": "編集ソフトを、いや",
+      "confidence": 0.94
+    },
+    {
+      "id": "s4",
+      "start": 6.3,
+      "end": 8.5,
+      "speaker": "A",
+      "text": "編集判断を正本にします。",
+      "confidence": 0.98
+    },
+    {
+      "id": "s5",
+      "start": 8.5,
+      "end": 11.5,
+      "speaker": "A",
+      "text": "同じ判断をPalmierへ反映します。",
+      "confidence": 0.98
+    }
+  ]
+}
