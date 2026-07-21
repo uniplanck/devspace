@@ -105,6 +105,29 @@ node mac-bridge.mjs --self-test
 
 検証用の空プロジェクトは `fixtures/empty-lab.palmier`、解析E2E用は`fixtures/analysis-lab.palmier`です。
 
+## 文字起こしadapter
+
+同名sidecarは自動検出します。優先順位は`.transcript.json`、`.srt`、`.vtt`、`.json`です。
+
+```bash
+node transcribe-media.mjs \
+  --media /absolute/path/to/source.mp4 \
+  --output /absolute/path/to/source.transcript.json
+```
+
+外部engineを使う場合は、実行ファイルを絶対パスで指定し、引数をJSON配列で渡します。shellは使用せず、`{media}`だけを入力動画の絶対パスへ置換します。engineのstdoutはJSON、SRT、VTTに対応します。
+
+```bash
+node transcribe-media.mjs \
+  --media /absolute/path/to/source.mp4 \
+  --command /absolute/path/to/transcription-engine \
+  --command-args-json '["--input","{media}","--output-format","json"]' \
+  --format json \
+  --output /absolute/path/to/source.transcript.json
+```
+
+文字起こしengineやモデル自体は同梱・自動導入しません。Whisper系、クラウド音声認識、社内engineなどを同じ契約へ接続できます。
+
 ## メディア解析からEditorial IRを生成
 
 ```bash
@@ -116,7 +139,7 @@ node analyze-media.mjs \
   --dashboard-url http://127.0.0.1:4317
 ```
 
-FFmpegでメディア情報、無音、シーン変化を取得し、sidecar文字起こしからフィラー・言い直し・反復テイク候補を検出します。自動削除は高信頼候補だけに限定し、根拠ID付きの`analysis.json`、`editorial-ir.json`、`qc-report.json`を生成します。表情・反応の意味判定は未実装で、シーン変化を補助信号としてのみ保持します。
+`--transcript`を省略すると同名sidecarを自動探索します。外部engineは`--transcript-command`、`--transcript-command-args-json`、`--transcript-format`で直接接続できます。FFmpegでメディア情報、無音、シーン変化を取得し、文字起こしからフィラー・言い直し・反復テイク候補を検出します。自動削除は高信頼候補だけに限定し、根拠ID付きの`analysis.json`、`editorial-ir.json`、`qc-report.json`を生成します。表情・反応の意味判定は未実装で、シーン変化を補助信号としてのみ保持します。
 
 ## 編集後プレビューを生成
 
@@ -145,6 +168,7 @@ node upload-artifact.mjs \
 ## テスト
 
 ```bash
+node transcription-adapters.test.mjs
 node analysis-core.test.mjs
 node render-preview.mjs --self-test
 node test.mjs
