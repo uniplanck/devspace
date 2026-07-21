@@ -9,7 +9,7 @@ const DATA_DIR = process.env.AIVIDEO_DATA_DIR || path.join(ROOT, 'data');
 const PUBLIC_DIR = path.join(ROOT, 'public');
 const HOST = process.env.AIVIDEO_HOST || '127.0.0.1';
 const PORT = Number(process.env.AIVIDEO_PORT || 4317);
-const MAX_BODY = 1024 * 1024;
+const MAX_BODY = 16 * 1024 * 1024;
 
 const jsonHeaders = { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' };
 
@@ -74,13 +74,46 @@ async function getProject(id) {
   const dir = path.join(DATA_DIR, 'projects', id);
   const project = await readJson(path.join(dir, 'project.json'));
   if (!project) return null;
-  const [editorialIr, qc, transcript, artifacts] = await Promise.all([
+  const [editorialIr, qc, transcript, analysis, artifacts] = await Promise.all([
     readJson(path.join(dir, 'editorial-ir.json')),
     readJson(path.join(dir, 'qc-report.json')),
     readJson(path.join(dir, 'transcript.json')),
+    readJson(path.join(dir, 'analysis.json')),
     readJson(path.join(dir, 'artifacts.json'), { version: 1, artifacts: [] }),
   ]);
-  return { ...project, editorialIr, qc, transcript, artifacts: artifacts?.artifacts || [] };
+  return { ...project, editorialIr, qc, transcript, analysis, artifacts: artifacts?.artifacts || [] };
+}
+
+async function syncProject(id, body) {
+  if (!safeId(id)) throw Object.assign(new Error('invalid project id'), { status: 400 });
+  if (!body || typeof body !== 'object' || Array.isArray(body)) throw Object.assign(new Error('invalid project bundle'), { status: 400 });
+  const project = body.project;
+  if (!project || typeof project !== 'object' || project.id !== id) throw Object.assign(new Error('project.id must match URL id'), { status: 400 });
+  const required = [
+    ['editorial-ir.json', body.editorialIr],
+    ['qc-report.json', body.qc],
+    ['transcript.json', body.transcript],
+    ['analysis.json', body.analysis],
+  ];
+  for (const [name, value] of required) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) throw Object.assign(new Error(`${name} is required`), { status: 400 });
+  }
+  const dir = path.join(DATA_DIR, 'projects', id);
+  await fs.mkdir(dir, { recursive: true });
+  const artifacts = Array.isArray(body.artifacts)
+    ? { version: 1, artifacts: body.artifacts }
+    : body.artifacts && typeof body.artifacts === 'object'
+      ? body.artifacts
+      : { version: 1, artifacts: [] };
+  await Promise.all([
+    writeJsonAtomic(path.join(dir, 'project.json'), project),
+    writeJsonAtomic(path.join(dir, 'editorial-ir.json'), body.editorialIr),
+    writeJsonAtomic(path.join(dir, 'qc-report.json'), body.qc),
+    writeJsonAtomic(path.join(dir, 'transcript.json'), body.transcript),
+    writeJsonAtomic(path.join(dir, 'analysis.json'), body.analysis),
+    writeJsonAtomic(path.join(dir, 'artifacts.json'), artifacts),
+  ]);
+  return getProject(id);
 }
 
 async function listQueue() {
@@ -161,7 +194,7 @@ async function handler(req, res) {
     }
     if (pathname === '/api/capabilities' && req.method === 'GET') {
       return sendJson(res, 200, {
-        dashboard: ['project_list', 'project_detail', 'editorial_ir', 'transcript', 'qc_report', 'command_queue'],
+        dashboard: ['project_list', 'project_detail', 'project_sync', 'media_analysis', 'editorial_ir', 'transcript', 'qc_report', 'command_queue'],
         queueActions: ['apply_ir', 'export_xml', 'render_preview', 'sync_timeline'],
         adapters: { headless: 'available', palmier: 'contract_ready_mac_required', premiere: 'planned_via_xml_or_uxp' },
       });
@@ -171,6 +204,9 @@ async function handler(req, res) {
     if (projectMatch && req.method === 'GET') {
       const project = await getProject(projectMatch[1]);
       return project ? sendJson(res, 200, project) : sendError(res, 404, 'PROJECT_NOT_FOUND', 'Project not found');
+    }
+    if (projectMatch && req.method === 'PUT') {
+      return sendJson(res, 200, await syncProject(projectMatch[1], await parseBody(req)));
     }
     if (pathname === '/api/queue' && req.method === 'GET') return sendJson(res, 200, { commands: await listQueue() });
     if (pathname === '/api/queue' && req.method === 'POST') return sendJson(res, 201, await enqueue(await parseBody(req)));

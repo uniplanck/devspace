@@ -2,11 +2,12 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 
+const ROOT = path.dirname(new URL(import.meta.url).pathname);
 const DASHBOARD = process.env.AIVIDEO_DASHBOARD_URL || 'http://100.66.201.64:4317';
 const PALMIER = process.env.PALMIER_MCP_URL || 'http://127.0.0.1:19789/mcp';
 const POLL_MS = Number(process.env.AIVIDEO_POLL_MS || 5000);
 const TARGET = process.env.AIVIDEO_BRIDGE_TARGET || 'palmier-mac';
-const STATE_DIR = process.env.AIVIDEO_BRIDGE_STATE_DIR || path.resolve('apps/ai-video-dashboard/data/mac-bridge');
+const STATE_DIR = process.env.AIVIDEO_BRIDGE_STATE_DIR || path.join(ROOT, 'data', 'mac-bridge');
 let mcpSessionId = null;
 
 async function requestJson(url, options = {}) {
@@ -133,6 +134,20 @@ async function main() {
   if (process.argv.includes('--inventory')) {
     const snapshot = await inventoryCapabilities();
     console.log(JSON.stringify({ ok: true, tools: snapshot.tools.length, file: path.join(STATE_DIR, 'palmier-capabilities.json') }, null, 2));
+    return;
+  }
+  if (process.argv.includes('--media')) {
+    const snapshot = await inventoryCapabilities();
+    const tool = chooseTool(snapshot.tools, [/^get_media$/i]);
+    if (!tool) throw new Error('Palmier get_media tool is unavailable');
+    console.log(JSON.stringify(await callTool(tool.name, {}), null, 2));
+    return;
+  }
+  if (process.argv.includes('--timeline')) {
+    const snapshot = await inventoryCapabilities();
+    const tool = chooseTool(snapshot.tools, [/^get_timeline$/i]);
+    if (!tool) throw new Error('Palmier get_timeline tool is unavailable');
+    console.log(JSON.stringify(await callTool(tool.name, {}), null, 2));
     return;
   }
   do {
