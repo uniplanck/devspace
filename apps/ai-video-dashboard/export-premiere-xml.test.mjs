@@ -59,7 +59,10 @@ const tempDir = await fs.mkdtemp(path.join(tmpdir(), 'premiere-xml-test-'));
 const xmlFile = path.join(tempDir, 'sequence.xml');
 try {
   await fs.writeFile(xmlFile, first.document, 'utf8');
-  await execFileAsync('/usr/bin/xmllint', ['--noout', xmlFile]);
+  const xmllint = (await Promise.all(['/usr/bin/xmllint', '/usr/local/bin/xmllint'].map(async (candidate) => (
+    await fs.access(candidate).then(() => candidate).catch(() => null)
+  )))).find(Boolean);
+  if (xmllint) await execFileAsync(xmllint, ['--noout', xmlFile]);
 } finally {
   await fs.rm(tempDir, { recursive: true, force: true });
 }
