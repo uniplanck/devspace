@@ -1,6 +1,7 @@
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { access, realpath } from "node:fs/promises";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js";
@@ -18,7 +19,14 @@ import express from "express";
 import type { Request, Response } from "express";
 import * as z from "zod/v4";
 import { applyPatch } from "./apply-patch.js";
-import { formatChatProgressResult, updateChatProgress } from "./chat-progress.js";
+import {
+  ensureChatProgressStarted,
+  formatChatProgressResult,
+  listChatProgress,
+  updateChatProgress,
+} from "./chat-progress.js";
+import { OutputLearningStore } from "./output-learning.js";
+import { scoreTaskFinalization } from "./output-core-quality.js";
 import {
   formatEc2ControlSummary,
   invokeEc2Control,
@@ -139,7 +147,8 @@ type ToolWidgetKind =
   | "search"
   | "directory"
   | "shell"
-  | "show_changes";
+  | "show_changes"
+  | "progress";
 
 interface ToolDefinitionMeta extends Record<string, unknown> {
   ui: {
@@ -161,7 +170,7 @@ function shouldAttachWidget(mode: WidgetMode, kind: ToolWidgetKind): boolean {
     case "off":
       return false;
     case "changes":
-      return kind === "show_changes";
+      return kind === "show_changes" || kind === "progress";
     case "full":
       return true;
   }
@@ -184,7 +193,10 @@ function toolWidgetDescriptorMeta(
 }
 
 const toolNames = {
+  beginTask: "begin_task",
   reportProgress: "report_progress",
+  finalizeTask: "finalize_task",
+  outputCoreStatus: "output_core_status",
   openWorkspace: "open_workspace",
   read: "read",
   write: "write",
@@ -211,7 +223,7 @@ interface ToolLogFields {
 }
 
 function serverInstructions(config: ServerConfig): string {
-  const progressInstruction = ` MCP cards and raw tool results are implementation details and must never be the only place where user-facing status appears. For every multi-step or file-changing GAG/GAE task, call ${toolNames.reportProgress} before the first substantive workspace action with status running and progress 0%, then send its returned Markdown verbatim in a normal visible commentary message. Add an intermediate progress call only when there is a meaningful user-relevant milestone, a blocker, a forecast revision, or roughly sixty seconds of continued work; do not create progress calls merely because two or three quick tool calls occurred. Pass taskCategory consistently, use estimateMinutes only on the first call, use remainingEstimateMinutes only when revising the remaining forecast, and pass programProgress when a broader all-phase percentage exists. For every task that used a GAG/GAE workspace tool, the last tool-state action must be ${toolNames.reportProgress} with status completed or failed. On that final call, pass finalResult, changes, verification, and remaining. The completed tool result is the canonical final response and already contains exactly these headings in this order: \"## 完了結果\", \"## 変更\", \"## 検証\", \"## 残り\", and \"## 実行情報\". Paste that returned Markdown verbatim as the entire final answer with no preamble, renamed headings, omitted sections, duplicate usage table, or postscript. Use \"なし\" for empty sections. Treat Markdown fences as active UI syntax: use triple-backtick code fences only for actual code or terminal text, never emit literal triple backticks merely to explain Markdown, keep every fence balanced, and describe the delimiter in words or use a safe outer fence when demonstrating fence syntax. If the connector exposes no ${toolNames.reportProgress} tool, manually reproduce the same five-heading contract and the latest GAG/GAE execution table; explicitly state that GAG/GAE use is free under the current route and the displayed price is only a GPT-5.6 API-equivalent estimate, not ChatGPT billing.`;
+  const progressInstruction = ` The GAG/GAE canonical output protocol is mandatory in every conversation where these tools are used. Before the first substantive workspace or execution action, call ${toolNames.beginTask} exactly once with the current user request, a stable task category, a concise task label, and an initial estimate when applicable. Copy only the returned visible progress Markdown into a normal commentary message; use the structured learned rules and predicted next intents internally when planning the answer. This begin call automatically pairs the current request with the previous completed output in the same conversation, so never invent or manually duplicate a learning record. Reuse the continuityKey returned by the previous finalize_task when it is present in the same Chat; it protects continuity when host conversation metadata or the MCP transport session changes. MCP cards and raw tool results are evidence surfaces and must never be the only user-facing status. Call ${toolNames.reportProgress} only for a meaningful milestone, blocker, forecast revision, or roughly sixty seconds of continued work. Do not use ${toolNames.reportProgress} to complete a task. The last tool-state action for every task must be ${toolNames.finalizeTask}; pass an evidence-grounded output summary, verification, remaining work, quality evidence, and a quality target of 95 for file-changing or multi-step implementation work. Its returned Markdown is the canonical entire final response. Paste it verbatim with no preamble, renamed headings, omitted sections, duplicate usage table, or postscript. The exact final heading order is \"## 完了結果\", \"## 変更\", \"## 検証\", \"## 残り\", \"## 次に起こりそうなこと\", and \"## 実行情報\". Use \"なし\" for an empty section. Treat predictions as probabilistic, not promises. If a dedicated canonical tool is unavailable because the connector schema is stale, state that limitation and use the six-heading format manually rather than claiming learning was recorded.`;
   const cardEconomyInstruction = config.compoundTools
     ? ` Minimize MCP cards without hiding necessary reasoning. A new card is justified when its result can change the next action, when user approval is required, when the action is high risk, or when failure isolation matters. Otherwise batch independent work. Prefer ${toolNames.workspaceDigest} for the initial project/Git/search/file-excerpt inspection instead of separate status, grep, and repeated read calls. Once exact changes are known and independent across files, prefer ${toolNames.batchEdit} over one edit call per file. Combine independent typecheck, tests, build, and final Git inspection into one ${toolNames.shell} call when no intermediate result changes the plan. Use ${toolNames.reviewChanges} once after the complete edit set rather than reviewing after each file. Never force a one-card workflow across a genuine decision boundary; the objective is the fewest evidence-preserving calls, typically open workspace, one digest, one change call, and one verification call.`
     : ` Minimize MCP cards by combining independent read-only shell inspections and independent verification commands into single calls. Keep separate calls whenever an earlier result can change the next action.`;
@@ -800,12 +812,13 @@ function createMcpServer(
   localAgentProviders: LocalAgentProviderAvailability[],
   todayStore: NaoBrainTodayStore,
   quizStore: NaoBrainQuizStore,
+  outputLearningStore: OutputLearningStore,
 ): McpServer {
   const server = new McpServer(
     {
       name: "devspace",
       title: "GPT-Agent",
-      version: "1.1.0",
+      version: "2.0.0",
       description:
         "Secure local coding workspace for MCP clients. Provides workspace-scoped file, search, edit, write, and shell tools.",
     },
@@ -1123,11 +1136,320 @@ function createMcpServer(
   );
 
   server.registerTool(
+    toolNames.beginTask,
+    {
+      title: "Begin canonical task",
+      description:
+        "Begin every GAG/GAE task. Captures the current user request, pairs it with the previous completed output in the same Chat, refreshes learned guidance and next-intent predictions, and returns canonical visible progress Markdown.",
+      inputSchema: {
+        chatLabel: z.string().min(1).max(160).describe("Short human-readable task label."),
+        userRequest: z.string().min(1).max(8_000).describe("The current user's request. Sensitive values are redacted before persistence."),
+        continuityKey: z.string().min(1).max(240).optional().describe("Reuse the continuityKey returned by the previous finalize_task in the same Chat when available."),
+        workspaceId: z.string().optional().describe("Workspace identifier when one is already open."),
+        taskCategory: z.string().min(1).max(80).optional().describe("Stable category reused for progress calibration and output learning."),
+        currentTask: z.string().min(1).max(240).optional().describe("Current user-relevant action."),
+        estimateMinutes: z.number().min(1).max(1440).optional().describe("Initial evidence-grounded completion estimate."),
+        programProgress: z.number().min(0).max(100).optional().describe("Broader all-phase completion percentage."),
+      },
+      outputSchema: {
+        result: z.string(),
+        id: z.string(),
+        conversationKey: z.string(),
+        continuityKey: z.string(),
+        pairedReaction: z.string().optional(),
+        predictions: z.array(z.object({
+          intent: z.string(),
+          label: z.string(),
+          confidence: z.number(),
+        })),
+        learnedRules: z.array(z.string()),
+        analysis: z.unknown(),
+        syncStatus: z.string(),
+        syncError: z.string().optional(),
+      },
+      ...toolWidgetDescriptorMeta(config, "progress"),
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async (input, extra) => {
+      const workspace = input.workspaceId
+        ? workspaces.getWorkspace(input.workspaceId)
+        : undefined;
+      const conversation = chatConversationContext(
+        extra._meta as Record<string, unknown> | undefined,
+      );
+      const learning = outputLearningStore.begin({
+        conversationId: conversation.id,
+        conversationUrl: conversation.url,
+        sessionId: extra.sessionId,
+        continuityKey: input.continuityKey,
+        userRequest: input.userRequest,
+        taskCategory: input.taskCategory,
+      });
+      const record = updateChatProgress({
+        sessionId: extra.sessionId,
+        conversationId: conversation.id,
+        conversationUrl: conversation.url,
+        chatLabel: input.chatLabel,
+        workspaceId: input.workspaceId,
+        workspaceRoot: workspace?.root,
+        taskCategory: input.taskCategory,
+        overallProgress: 0,
+        programProgress: input.programProgress,
+        currentProgress: 0,
+        currentTask: input.currentTask || "依頼内容と既存状態を確認",
+        completed: learning.pairedLoop
+          ? `前回出力への次入力を${learning.pairedLoop.reaction}として学習記録`
+          : "依頼内容を受領",
+        next: "必要な調査・実装・検証へ進む",
+        risk: learning.syncError ? `学習同期: ${learning.syncError}` : undefined,
+        status: "running",
+        estimateMinutes: input.estimateMinutes,
+      });
+      const result = formatChatProgressResult(record);
+      return {
+        content: [textBlock(result)],
+        _meta: {
+          tool: toolNames.beginTask,
+          card: {
+            status: "running",
+            summary: {
+              label: input.chatLabel,
+              progress: 0,
+              pairedReaction: learning.pairedLoop?.reaction,
+              predictions: learning.predictions.length,
+            },
+          },
+        },
+        structuredContent: {
+          result,
+          id: record.id,
+          conversationKey: learning.conversationKey,
+          continuityKey: learning.conversationKey,
+          ...(learning.pairedLoop ? { pairedReaction: learning.pairedLoop.reaction } : {}),
+          predictions: learning.predictions,
+          learnedRules: learning.rules,
+          analysis: learning.analysis,
+          syncStatus: learning.syncStatus,
+          ...(learning.syncError ? { syncError: learning.syncError } : {}),
+        },
+      };
+    },
+  );
+
+  server.registerTool(
+    toolNames.finalizeTask,
+    {
+      title: "Finalize canonical task",
+      description:
+        "The only successful completion path for a GAG/GAE task. Computes an evidence-based quality score, stores a bounded summary for pairing with the user's next message, predicts likely next intents, and returns the canonical six-heading final response.",
+      inputSchema: {
+        chatLabel: z.string().min(1).max(160),
+        workspaceId: z.string().optional(),
+        continuityKey: z.string().min(1).max(240).optional().describe("Continuity key returned by begin_task when host conversation metadata is unavailable."),
+        taskCategory: z.string().min(1).max(80).optional(),
+        finalResult: z.string().min(1).max(4_000),
+        changes: z.string().max(4_000).optional(),
+        verification: z.string().max(4_000).optional(),
+        remaining: z.string().max(4_000).optional(),
+        outputSummary: z.string().min(1).max(2_000).describe("Bounded factual overview of the completed output. Do not include secrets."),
+        qualityEvidence: z.array(z.string().min(1).max(300)).max(10).optional(),
+        unresolvedErrors: z.number().int().min(0).max(100).optional().describe("Errors still unresolved at finalization. Historical errors that were fixed must not be counted."),
+        qualityTarget: z.number().min(0).max(100).optional().describe("Use 95 for file-changing or multi-step implementation work; 85 for simple read-only work."),
+        failed: z.boolean().optional(),
+      },
+      outputSchema: {
+        result: z.string(),
+        id: z.string(),
+        isFinal: z.literal(true),
+        qualityScore: z.number(),
+        qualityTarget: z.number(),
+        qualityPassed: z.boolean(),
+        continuityKey: z.string(),
+        predictions: z.array(z.object({
+          intent: z.string(),
+          label: z.string(),
+          confidence: z.number(),
+        })),
+        learning: z.unknown(),
+      },
+      ...toolWidgetDescriptorMeta(config, "progress"),
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async (input, extra) => {
+      const workspace = input.workspaceId
+        ? workspaces.getWorkspace(input.workspaceId)
+        : undefined;
+      const conversation = chatConversationContext(
+        extra._meta as Record<string, unknown> | undefined,
+      );
+      const active = listChatProgress()
+        .filter((record) => record.status === "running" || record.status === "paused")
+        .filter((record) => conversation.id
+          ? record.conversationId === conversation.id
+          : input.workspaceId
+            ? record.workspaceId === input.workspaceId
+            : record.sessionId === extra.sessionId)
+        .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0];
+      const quality = scoreTaskFinalization({
+        finalResult: input.finalResult,
+        changes: input.changes,
+        verification: input.verification,
+        remaining: input.remaining,
+        outputSummary: input.outputSummary,
+        predictionCount: 3,
+        taskErrors: input.unresolvedErrors ?? 0,
+        evidence: input.qualityEvidence,
+      });
+      const qualityTarget = Math.round(input.qualityTarget ?? 85);
+      const qualityPassed = quality.score >= qualityTarget;
+      const failed = input.failed === true || !qualityPassed;
+      const learning = outputLearningStore.finalize({
+        conversationId: conversation.id,
+        conversationUrl: conversation.url,
+        sessionId: extra.sessionId,
+        continuityKey: input.continuityKey,
+        taskCategory: input.taskCategory,
+        outputSummary: input.outputSummary,
+        qualityScore: quality.score,
+      });
+      const predictionLines = learning.predictions.length
+        ? learning.predictions.map((prediction, index) => `${index + 1}. ${prediction.label}（確度 ${Math.round(prediction.confidence * 100)}%）`).join("\n")
+        : "なし";
+      const qualityRemaining = qualityPassed
+        ? input.remaining || "なし"
+        : [
+            input.remaining,
+            `品質ゲート ${quality.score}/${qualityTarget}。不足: ${quality.missing.join(", ") || "不明"}`,
+          ].filter(Boolean).join("\n");
+      const record = updateChatProgress({
+        sessionId: extra.sessionId,
+        conversationId: conversation.id,
+        conversationUrl: conversation.url,
+        chatLabel: input.chatLabel,
+        workspaceId: input.workspaceId,
+        workspaceRoot: workspace?.root,
+        taskCategory: input.taskCategory,
+        overallProgress: 100,
+        currentProgress: 100,
+        currentTask: failed ? "品質ゲート未達または失敗" : "完了",
+        status: failed ? "failed" : "completed",
+        finalResult: input.finalResult,
+        changes: input.changes || "なし",
+        verification: input.verification || (failed ? "完了条件を満たしていません。" : "なし"),
+        remaining: qualityRemaining,
+        nextLikely: predictionLines,
+        qualityScore: quality.score,
+        learningSummary: `保存済み / ${learning.analysis.sampleCount}サンプル / 同期 ${learning.syncStatus}`,
+        risk: learning.syncError,
+      });
+      const result = formatChatProgressResult(record);
+      return {
+        content: [textBlock(result)],
+        _meta: {
+          tool: toolNames.finalizeTask,
+          card: {
+            status: failed ? "failed" : "completed",
+            summary: {
+              label: input.chatLabel,
+              progress: 100,
+              qualityScore: quality.score,
+              qualityTarget,
+              qualityPassed,
+            },
+          },
+        },
+        structuredContent: {
+          result,
+          id: record.id,
+          isFinal: true as const,
+          qualityScore: quality.score,
+          qualityTarget,
+          qualityPassed,
+          continuityKey: learning.pending.conversationKey,
+          predictions: learning.predictions,
+          learning: {
+            pendingId: learning.pending.id,
+            sampleCount: learning.analysis.sampleCount,
+            syncStatus: learning.syncStatus,
+            syncError: learning.syncError,
+            observedTaskErrors: active?.taskErrors ?? 0,
+            unresolvedErrors: input.unresolvedErrors ?? 0,
+            checks: quality.checks,
+            missing: quality.missing,
+          },
+        },
+      };
+    },
+  );
+
+  server.registerTool(
+    toolNames.outputCoreStatus,
+    {
+      title: "Read output core status",
+      description: "Inspect the canonical output protocol, learning sample counts, prediction accuracy, and cross-runtime sync state.",
+      inputSchema: {},
+      outputSchema: {
+        result: z.string(),
+        status: z.unknown(),
+      },
+      ...toolWidgetDescriptorMeta(config, "progress"),
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async () => {
+      const status = outputLearningStore.status();
+      const result = [
+        "# GAG / GAE Output Core",
+        "",
+        `- Protocol: ${status.protocolVersion}`,
+        `- Runtime: ${status.runtimeLabel} / ${status.runtimeId}`,
+        `- Learning loops: ${status.loops}`,
+        `- Pending outputs: ${status.pending}`,
+        `- Prediction top-1: ${Math.round(status.analysis.predictionTop1Accuracy * 100)}%`,
+        `- Prediction top-3: ${Math.round(status.analysis.predictionTop3Accuracy * 100)}%`,
+        `- Sync: ${status.sync.status}${status.sync.error ? ` / ${status.sync.error}` : ""}`,
+        "- Final headings: 完了結果 > 変更 > 検証 > 残り > 次に起こりそうなこと > 実行情報",
+      ].join("\n");
+      return {
+        content: [textBlock(result)],
+        _meta: {
+          tool: toolNames.outputCoreStatus,
+          card: {
+            status: status.sync.status,
+            summary: {
+              label: `Protocol ${status.protocolVersion}`,
+              loops: status.loops,
+              pending: status.pending,
+              top1: status.analysis.predictionTop1Accuracy,
+              top3: status.analysis.predictionTop3Accuracy,
+            },
+          },
+        },
+        structuredContent: { result, status },
+      };
+    },
+  );
+
+  server.registerTool(
     toolNames.reportProgress,
     {
       title: "Report progress",
       description:
-        "Persist canonical GAG/GAE task progress. Call at task start and milestones. The completed or failed call must include finalResult, changes, verification, and remaining; its returned Markdown is the complete fixed five-heading final response and must be pasted verbatim.",
+        "Update an already-started GAG/GAE task at meaningful milestones, blockers, or forecast revisions. Never use this tool for completion; finalize_task is the only completion path.",
       inputSchema: {
         chatLabel: z.string().min(1).max(160).describe("Short human-readable chat or task label."),
         workspaceId: z.string().optional().describe("Workspace identifier when one is already open."),
@@ -1139,13 +1461,9 @@ function createMcpServer(
         completed: z.string().max(500).optional().describe("Short summary of what is complete."),
         next: z.string().max(500).optional().describe("Short summary of the next action."),
         risk: z.string().max(500).optional().describe("Current blocker or risk, if any."),
-        status: z.enum(["running", "paused", "completed", "failed"]).optional(),
-        estimateMinutes: z.number().min(1).max(1440).optional().describe("Initial completion estimate in minutes. Pass only at task start."),
-        remainingEstimateMinutes: z.number().min(1).max(1440).optional().describe("Revised remaining estimate in minutes. Pass whenever revising the forecast."),
-        finalResult: z.string().max(4000).optional().describe("Final outcome text. Pass on completed or failed calls."),
-        changes: z.string().max(4000).optional().describe("Final changed-items summary, or 'なし'. Pass on completed or failed calls."),
-        verification: z.string().max(4000).optional().describe("Final verification summary, or 'なし'. Pass on completed or failed calls."),
-        remaining: z.string().max(4000).optional().describe("Final remaining-work summary, or 'なし'. Pass on completed or failed calls."),
+        status: z.enum(["running", "paused"]).optional(),
+        estimateMinutes: z.number().min(1).max(1440).optional().describe("Initial completion estimate in minutes. Prefer begin_task for the initial estimate."),
+        remainingEstimateMinutes: z.number().min(1).max(1440).optional().describe("Revised remaining estimate in minutes."),
       },
       outputSchema: {
         result: z.string(),
@@ -1201,14 +1519,22 @@ function createMcpServer(
         status: input.status,
         estimateMinutes: input.estimateMinutes,
         remainingEstimateMinutes: input.remainingEstimateMinutes,
-        finalResult: input.finalResult,
-        changes: input.changes,
-        verification: input.verification,
-        remaining: input.remaining,
       });
       const result = formatChatProgressResult(record);
       return {
         content: [textBlock(result)],
+        _meta: {
+          tool: toolNames.reportProgress,
+          card: {
+            status: record.status,
+            summary: {
+              label: input.chatLabel,
+              progress: record.overallProgress,
+              currentTask: record.currentTask,
+              remainingSeconds: record.remainingSeconds,
+            },
+          },
+        },
         structuredContent: {
           result,
           id: record.id,
@@ -1229,7 +1555,7 @@ function createMcpServer(
           sessionErrors: record.sessionErrors,
           estimatedJpy: record.sessionEstimatedJpy,
           estimatedJpyMax: record.sessionEstimatedJpyMax ?? record.sessionEstimatedJpy,
-          isFinal: record.status === "completed" || record.status === "failed",
+          isFinal: false,
         },
       };
     },
@@ -1421,6 +1747,21 @@ function createMcpServer(
       const startedAt = performance.now();
       const compact = config.openWorkspacePayload === "compact";
       const { workspace, agentsFiles, availableAgentsFiles } = await workspaces.openWorkspace({ path, mode, baseRef });
+      const conversation = chatConversationContext(
+        extra._meta as Record<string, unknown> | undefined,
+      );
+      const workspaceName = workspace.root.split("/").filter(Boolean).at(-1) || "workspace";
+      ensureChatProgressStarted({
+        sessionId: extra.sessionId,
+        conversationId: conversation.id,
+        conversationUrl: conversation.url,
+        chatLabel: `GPT-Agent · ${workspaceName}`,
+        workspaceId: workspace.id,
+        workspaceRoot: workspace.root,
+        overallProgress: 0,
+        currentProgress: 0,
+        currentTask: "ワークスペースを開いて作業開始",
+      });
 
       if (config.widgets === "changes") {
         void reviewCheckpoints.initializeWorkspace({
@@ -2616,6 +2957,28 @@ export function createServer(config = loadConfig()): RunningServer {
     driveRemote: config.naobrainDriveRemote || undefined,
     driveBasePath: config.naobrainDriveBasePath,
   });
+  const outputLearningStore = new OutputLearningStore(join(config.stateDir, "output-learning.json"));
+  const runOutputLearningAnalysis = async () => {
+    try {
+      await outputLearningStore.refreshSharedSnapshot();
+      const result = outputLearningStore.refreshAnalysis();
+      if (result.changed) {
+        logEvent(config.logging, "info", "output_learning_analysis_updated", {
+          sampleCount: result.analysis.sampleCount,
+          syncStatus: result.syncStatus,
+          syncError: result.syncError,
+        });
+      }
+    } catch (error) {
+      logEvent(config.logging, "warn", "output_learning_analysis_error", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  };
+  const outputLearningInitialTimer = setTimeout(() => void runOutputLearningAnalysis(), 0);
+  const outputLearningAnalysisTimer = setInterval(() => void runOutputLearningAnalysis(), 30 * 60 * 1_000);
+  outputLearningInitialTimer.unref?.();
+  outputLearningAnalysisTimer.unref?.();
   const quizStore = new NaoBrainQuizStore({
     dataDir: config.naobrainQuizDir,
     promptFile: config.naobrainQuizPromptFile,
@@ -2685,8 +3048,12 @@ export function createServer(config = loadConfig()): RunningServer {
         return;
       }
       try {
-        const result = await gexLearningStore.sync((req.body || {}) as GexLearningSyncPayload);
-        res.json({ ok: true, ...result });
+        const payload = (req.body || {}) as GexLearningSyncPayload;
+        const result = await gexLearningStore.sync(payload);
+        const core = outputLearningStore.ingestGexLoops(
+          Array.isArray(payload.loops) ? payload.loops : [],
+        );
+        res.json({ ok: true, ...result, outputCore: core });
       } catch (error) {
         logEvent(config.logging, "error", "gex_learning_sync_error", {
           error: error instanceof Error ? error.message : String(error),
@@ -3141,6 +3508,7 @@ export function createServer(config = loadConfig()): RunningServer {
           localAgentProviders,
           todayStore,
           quizStore,
+          outputLearningStore,
         );
         await server.connect(transport);
       } else {
@@ -3173,6 +3541,8 @@ export function createServer(config = loadConfig()): RunningServer {
       closed = true;
       clearTimeout(todayDailyAnalysisInitialTimer);
       clearInterval(todayDailyAnalysisTimer);
+      clearTimeout(outputLearningInitialTimer);
+      clearInterval(outputLearningAnalysisTimer);
       processSessions.shutdown();
       oauthProvider.close();
       workspaceStore.close?.();

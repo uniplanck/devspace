@@ -157,7 +157,16 @@ await client.connect(transport);
 
 const listedTools = await client.listTools();
 const toolNames = new Set(listedTools.tools.map((tool) => tool.name));
-for (const requiredTool of ["open_workspace", "read", "grep", "bash"]) {
+for (const requiredTool of [
+  "begin_task",
+  "report_progress",
+  "finalize_task",
+  "output_core_status",
+  "open_workspace",
+  "read",
+  "grep",
+  "bash",
+]) {
   if (!toolNames.has(requiredTool)) {
     throw new Error(`Required MCP tool is missing: ${requiredTool}`);
   }
@@ -173,6 +182,25 @@ if (!workspaceId) {
 }
 if (!workspaceId) {
   throw new Error("open_workspace did not return workspaceId.");
+}
+
+const begun = assertToolResult("begin_task", await client.callTool({
+  name: "begin_task",
+  arguments: {
+    workspaceId,
+    chatLabel: "Output Core E2E",
+    userRequest: "Canonical output coreのMCP公開と完了品質ゲートを検証する",
+    taskCategory: "implementation-verification",
+    currentTask: "MCP公開スキーマを検証",
+    estimateMinutes: 5,
+  },
+}));
+if (begun.structuredContent?.predictions?.length !== 3) {
+  throw new Error("begin_task did not return three next-intent predictions.");
+}
+const continuityKey = begun.structuredContent?.continuityKey;
+if (!continuityKey || typeof continuityKey !== "string") {
+  throw new Error("begin_task did not return continuityKey.");
 }
 
 const readResult = assertToolResult("read", await client.callTool({
@@ -201,11 +229,68 @@ assertToolResult("test", await client.callTool({
   },
 }));
 
+assertToolResult("progress", await client.callTool({
+  name: "report_progress",
+  arguments: {
+    workspaceId,
+    chatLabel: "Output Core E2E",
+    taskCategory: "implementation-verification",
+    overallProgress: 80,
+    currentProgress: 80,
+    currentTask: "最終品質ゲートを検証",
+    completed: "ツール列挙・read・grep・bashを確認",
+    next: "finalize_taskを確認",
+  },
+}));
+
+const finalized = assertToolResult("finalize_task", await client.callTool({
+  name: "finalize_task",
+  arguments: {
+    workspaceId,
+    continuityKey,
+    chatLabel: "Output Core E2E",
+    taskCategory: "implementation-verification",
+    finalResult: "Canonical output coreのMCP実通信検証が完了しました。",
+    changes: "一時E2E実行のみ。永続的な変更なし。",
+    verification: "tools/list、begin_task、report_progress、read、grep、bash、finalize_taskを実通信で確認。",
+    remaining: "なし",
+    outputSummary: "MCPクライアントから中核4ツールを列挙し、開始・進捗・完了の状態遷移と6見出し出力を確認した。",
+    qualityEvidence: [
+      "required tools listed",
+      "begin_task returned three predictions",
+      "read succeeded",
+      "grep succeeded",
+      "bash test succeeded",
+    ],
+    unresolvedErrors: 0,
+    qualityTarget: 95,
+  },
+}));
+const finalizedText = resultText(finalized);
+for (const heading of [
+  "## 完了結果",
+  "## 変更",
+  "## 検証",
+  "## 残り",
+  "## 次に起こりそうなこと",
+  "## 実行情報",
+]) {
+  if (!finalizedText.includes(heading)) throw new Error(`Canonical heading is missing: ${heading}`);
+}
+if (finalized.structuredContent?.qualityPassed !== true) {
+  throw new Error(`finalize_task quality gate failed: ${JSON.stringify(finalized.structuredContent)}`);
+}
+if (finalized.structuredContent?.continuityKey !== continuityKey) {
+  throw new Error("finalize_task did not preserve continuityKey.");
+}
+
 await client.close();
 console.log(JSON.stringify({
   oauth: "ok",
   mcp: "ok",
   toolCount: listedTools.tools.length,
+  canonicalOutputCore: "ok",
+  qualityScore: finalized.structuredContent?.qualityScore,
   workspaceId,
   read: "ok",
   grep: "ok",

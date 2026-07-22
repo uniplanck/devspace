@@ -1,6 +1,10 @@
 import type { App } from "@modelcontextprotocol/ext-apps";
 
 export type ToolName =
+  | "begin_task"
+  | "report_progress"
+  | "finalize_task"
+  | "output_core_status"
   | "open_workspace"
   | "show_changes"
   | "apply_patch"
@@ -65,6 +69,10 @@ export interface ToolPayload {
 
 export function isToolName(value: unknown): value is ToolName {
   return (
+    value === "begin_task" ||
+    value === "report_progress" ||
+    value === "finalize_task" ||
+    value === "output_core_status" ||
     value === "open_workspace" ||
     value === "show_changes" ||
     value === "apply_patch" ||
@@ -106,6 +114,13 @@ export function isShellTool(tool: ToolName): boolean {
 
 export function isReviewTool(tool: ToolName): boolean {
   return tool === "show_changes";
+}
+
+export function isProgressTool(tool: ToolName): boolean {
+  return tool === "begin_task"
+    || tool === "report_progress"
+    || tool === "finalize_task"
+    || tool === "output_core_status";
 }
 
 export function isToolResultCard(value: unknown): value is Omit<ToolResultCard, "tool"> {

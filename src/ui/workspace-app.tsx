@@ -580,6 +580,14 @@ function getToolDisplay(card: ToolResultCard): ToolDisplay {
   const label = getToolLabel(card);
 
   switch (card.tool) {
+    case "begin_task":
+      return { icon: reviewIcon(), title: "Task Started", label, tone: "workspace" };
+    case "report_progress":
+      return { icon: reviewIcon(), title: "Progress", label, tone: "workspace" };
+    case "finalize_task":
+      return { icon: reviewIcon(), title: "Task Finalized", label, tone: "review" };
+    case "output_core_status":
+      return { icon: reviewIcon(), title: "Output Core", label, tone: "workspace" };
     case "open_workspace":
       return { icon: folderIcon(), title: "Workspace", label, tone: "workspace" };
     case "read":
@@ -608,6 +616,21 @@ function getToolDisplay(card: ToolResultCard): ToolDisplay {
 }
 
 function getToolLabel(card: ToolResultCard): string {
+  if (
+    card.tool === "begin_task"
+    || card.tool === "report_progress"
+    || card.tool === "finalize_task"
+    || card.tool === "output_core_status"
+  ) {
+    const label = String(card.summary?.label ?? "").trim();
+    const progress = card.summary?.progress;
+    const quality = card.summary?.qualityScore;
+    if (card.tool === "finalize_task" && typeof quality === "number") {
+      return `${label || "Completed"} · quality ${quality}/100`;
+    }
+    if (typeof progress === "number") return `${label || card.tool} · ${progress}%`;
+    return label || card.tool;
+  }
   if (isShellTool(card.tool)) {
     return String(card.summary?.command ?? card.summary?.sessionId ?? card.path ?? card.tool);
   }
