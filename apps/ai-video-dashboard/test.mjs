@@ -28,12 +28,15 @@ const retentionPlan = buildRenderPlan({
       { type: 'title_card', timelineIn: 0, timelineOut: 3, text: 'Hook' },
       { type: 'chapter', timelineIn: 3, timelineOut: 5, text: 'Chapter' },
       { type: 'cta', timelineIn: 8, timelineOut: 10, text: 'CTA' },
+      { type: 'evidence_card', timelineIn: 1, timelineOut: 4, eyebrow: 'EVIDENCE', text: '根拠', footer: '補足', variant: 'comparison', position: 'full' },
       { type: 'visual_effect', timelineIn: 0, timelineOut: 5, scale: 1.1 },
     ],
   },
 });
 assert.equal(retentionPlan.audioProcessing, 'voice_youtube');
-assert.equal(retentionPlan.overlays.length, 3);
+assert.equal(retentionPlan.overlays.length, 4);
+assert.equal(retentionPlan.overlays.find((row) => row.type === 'evidence_card').variant, 'comparison');
+assert.equal(retentionPlan.overlays.find((row) => row.type === 'evidence_card').eyebrow, 'EVIDENCE');
 assert.equal(retentionPlan.visualEffects.length, 1);
 
 const fractionalDuration = 0.103;
@@ -90,7 +93,14 @@ try {
   assert.equal(qualityLab.categoryCount, 12);
   assert.equal(qualityLab.criterionCount, 82);
   assert.equal(qualityLab.categories.reduce((sum, category) => sum + category.weight, 0), 100);
-  assert.equal(qualityLab.releases.filter((row) => row.kind === 'editing-test').at(-1).humanScore, 20);
+  const editingReleases = qualityLab.releases.filter((row) => row.kind === 'editing-test');
+  const rejectedV4 = editingReleases.find((row) => row.id === 'edit-v0.4');
+  const latestEditing = editingReleases.at(-1);
+  assert.equal(rejectedV4.humanScore, 20);
+  assert.equal(rejectedV4.deprecatedMachineScore, 47.51);
+  assert.equal(latestEditing.id, 'edit-v0.5');
+  assert.equal(latestEditing.humanScore, null);
+  assert.equal(latestEditing.craftScore, null);
   const projects = await (await fetch(`${base}/api/projects`)).json();
   assert.ok(projects.projects.some((project) => project.id === 'demo-talk'));
   const project = await (await fetch(`${base}/api/projects/demo-talk`)).json();

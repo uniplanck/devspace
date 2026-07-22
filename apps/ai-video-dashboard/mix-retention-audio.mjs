@@ -64,12 +64,12 @@ async function probe(file, ffprobePath) {
   };
 }
 
-export function buildAudioMixPlan({ durationSeconds, events, bindings, bgmGainDb = -28 }) {
+export function buildAudioMixPlan({ durationSeconds, events, bindings, bgmGainDb = -22, bgmAutomation = [], bgmStartSeconds = 0 }) {
   if (!Array.isArray(events)) throw new Error('SFX plan must be an array');
   const normalized = events.map((event, index) => {
     const assetKey = String(event.assetKey || '').trim();
     const timelineIn = finite(event.timelineIn, `event ${index} timelineIn`);
-    const gainDb = finite(event.gainDb ?? -18, `event ${index} gainDb`);
+    const gainDb = finite(event.gainDb ?? -11, `event ${index} gainDb`);
     if (!assetKey || !bindings[assetKey]) throw new Error(`Missing SFX binding for ${assetKey || index}`);
     if (timelineIn < 0 || timelineIn >= durationSeconds) throw new Error(`SFX event ${index} is outside the timeline`);
     if (gainDb > 0 || gainDb < -40) throw new Error(`SFX event ${index} gain is outside -40..0 dB`);
@@ -82,26 +82,43 @@ export function buildAudioMixPlan({ durationSeconds, events, bindings, bgmGainDb
     };
   });
   if (bgmGainDb > -12 || bgmGainDb < -45) throw new Error('BGM gain must be between -45 and -12 dB');
-  return { durationSeconds, bgmGainDb, events: normalized };
+  const startSeconds = finite(bgmStartSeconds, 'BGM start seconds');
+  if (startSeconds < 0) throw new Error('BGM start seconds must be non-negative');
+  const automation = (Array.isArray(bgmAutomation) ? bgmAutomation : []).map((row, index) => {
+    const timelineIn = finite(row.timelineIn, `BGM automation ${index} timelineIn`);
+    const timelineOut = finite(row.timelineOut, `BGM automation ${index} timelineOut`);
+    const gainDb = finite(row.gainDb, `BGM automation ${index} gainDb`);
+    if (timelineIn < 0 || timelineOut <= timelineIn || timelineOut > durationSeconds + 0.05) {
+      throw new Error(`BGM automation ${index} is outside the timeline`);
+    }
+    if (gainDb > -12 || gainDb < -45) throw new Error(`BGM automation ${index} gain is outside -45..-12 dB`);
+    return { timelineIn, timelineOut, gainDb };
+  }).sort((left, right) => left.timelineIn - right.timelineIn);
+  return { durationSeconds, bgmGainDb, bgmStartSeconds: startSeconds, bgmAutomation: automation, events: normalized };
 }
 
 export async function mixRetentionAudio(options) {
   const videoPath = path.resolve(options.video);
   const bgmPath = path.resolve(options.bgm);
   const outputPath = path.resolve(options.output);
-  const [video, bgm, events, bindings] = await Promise.all([
+  const [video, bgm, sfxPayload, bindings] = await Promise.all([
     probe(videoPath, options.ffprobe || DEFAULT_FFPROBE),
     probe(bgmPath, options.ffprobe || DEFAULT_FFPROBE),
     fs.readFile(path.resolve(options.sfxPlan), 'utf8').then(JSON.parse),
     fs.readFile(path.resolve(options.sfxBindings), 'utf8').then(JSON.parse),
   ]);
+  const events = Array.isArray(sfxPayload) ? sfxPayload : sfxPayload?.events;
+  const bgmAutomation = Array.isArray(sfxPayload) ? [] : sfxPayload?.bgmAutomation;
+  const bgmStartSeconds = Array.isArray(sfxPayload) ? 0 : sfxPayload?.bgmStartSeconds;
   if (!video.hasVideo || !video.hasAudio) throw new Error('Input video must contain video and audio');
   if (!bgm.hasAudio) throw new Error('BGM file has no audio stream');
   const plan = buildAudioMixPlan({
     durationSeconds: video.durationSeconds,
     events,
     bindings,
-    bgmGainDb: options.bgmGainDb === undefined ? -28 : Number(options.bgmGainDb),
+    bgmGainDb: options.bgmGainDb === undefined ? -22 : Number(options.bgmGainDb),
+    bgmAutomation,
+    bgmStartSeconds,
   });
   for (const event of plan.events) await fs.access(event.path);
 
@@ -110,13 +127,17 @@ export async function mixRetentionAudio(options) {
   const lines = [];
   lines.push('[0:a]aresample=48000,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,asplit=2[voice][voicekey]');
   const fadeOutStart = Math.max(0, plan.durationSeconds - 1.2);
-  lines.push(
-    `[1:a]atrim=duration=${round(plan.durationSeconds, 6)},asetpts=PTS-STARTPTS,`
+  let bgmChain = `[1:a]atrim=start=${round(plan.bgmStartSeconds, 6)}:duration=${round(plan.durationSeconds, 6)},asetpts=PTS-STARTPTS,`
     + `aresample=48000,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,`
-    + `highpass=f=120,lowpass=f=9000,volume=${plan.bgmGainDb}dB,`
-    + `afade=t=in:st=0:d=0.8,afade=t=out:st=${round(fadeOutStart, 3)}:d=1.2[bgmraw]`,
-  );
-  lines.push('[bgmraw][voicekey]sidechaincompress=threshold=0.025:ratio=8:attack=15:release=350:makeup=1[bgmducked]');
+    + `highpass=f=100,lowpass=f=14000,volume=${plan.bgmGainDb}dB`;
+  for (const row of plan.bgmAutomation) {
+    const deltaDb = round(row.gainDb - plan.bgmGainDb, 3);
+    if (Math.abs(deltaDb) < 0.001) continue;
+    bgmChain += `,volume=${deltaDb}dB:enable='between(t,${round(row.timelineIn, 6)},${round(row.timelineOut, 6)})'`;
+  }
+  bgmChain += `,afade=t=in:st=0:d=0.8,afade=t=out:st=${round(fadeOutStart, 3)}:d=1.2[bgmraw]`;
+  lines.push(bgmChain);
+  lines.push('[bgmraw][voicekey]sidechaincompress=threshold=0.06:ratio=3:attack=10:release=260:makeup=1.15[bgmducked]');
 
   const mixLabels = ['[voice]', '[bgmducked]'];
   for (const [index, event] of plan.events.entries()) {
@@ -130,7 +151,7 @@ export async function mixRetentionAudio(options) {
   }
   lines.push(
     `${mixLabels.join('')}amix=inputs=${mixLabels.length}:duration=first:dropout_transition=0:normalize=0,`
-    + 'alimiter=limit=0.95,loudnorm=I=-14.5:LRA=8:TP=-1.8,volume=-0.7dB[aout]',
+    + 'loudnorm=I=-15:LRA=7:TP=-2.5,alimiter=limit=0.88[aout]',
   );
 
   await fs.mkdir(path.dirname(outputPath), { recursive: true });
@@ -139,7 +160,7 @@ export async function mixRetentionAudio(options) {
   args.push(
     '-filter_complex', lines.join(';'),
     '-map', '0:v:0', '-map', '[aout]',
-    '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k',
+    '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', '-ar', '48000',
     '-movflags', '+faststart', outputPath,
   );
   await execFileAsync(options.ffmpeg || DEFAULT_FFMPEG, args, { timeout: 5 * 60_000, maxBuffer: 8 * 1024 * 1024 });
@@ -156,11 +177,13 @@ export async function mixRetentionAudio(options) {
     bgm: {
       path: bgmPath,
       gainDb: plan.bgmGainDb,
-      sidechain: { threshold: 0.025, ratio: 8, attackMs: 15, releaseMs: 350 },
+      startSeconds: plan.bgmStartSeconds,
+      automation: plan.bgmAutomation,
+      sidechain: { threshold: 0.06, ratio: 3, attackMs: 10, releaseMs: 260 },
     },
     soundEffectCount: plan.events.length,
     soundEffectAssets: uniqueSfx.map(([assetKey, file]) => ({ assetKey, path: file })),
-    finalTarget: { integratedLufs: -15.2, truePeakDbtp: -1.5, loudnessRange: 8 },
+    finalTarget: { integratedLufs: -15, truePeakDbtp: -2.5, loudnessRange: 7 },
   };
 }
 
@@ -172,8 +195,11 @@ async function main() {
       bgmGainDb: -28,
       bindings: { sweep: '/tmp/sweep.wav' },
       events: [{ id: 'chapter', assetKey: 'sweep', timelineIn: 5, gainDb: -18 }],
+      bgmStartSeconds: 12,
+      bgmAutomation: [{ timelineIn: 0, timelineOut: 4, gainDb: -25 }],
     });
-    if (plan.events.length !== 1 || plan.bgmGainDb !== -28 || plan.events[0].timelineIn !== 5) {
+    if (plan.events.length !== 1 || plan.bgmGainDb !== -28 || plan.events[0].timelineIn !== 5
+      || plan.bgmStartSeconds !== 12 || plan.bgmAutomation[0].gainDb !== -25) {
       throw new Error('retention audio mixer self-test failed');
     }
     process.stdout.write(`${JSON.stringify({ ok: true, test: 'retention-audio-mix-plan' })}\n`);

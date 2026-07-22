@@ -105,6 +105,9 @@ export function buildRetentionEditorialIr({ projectId, plan, generatedAt = new D
     audio: {
       processing: String(plan.audioProcessing || 'voice_youtube'),
     },
+    video: {
+      processing: String(plan.videoProcessing || 'none'),
+    },
     retentionPlan: {
       targetScore: finite(plan.targetScore || 60, 'targetScore'),
       captionMode: String(plan.captionMode || 'key_points_manual'),

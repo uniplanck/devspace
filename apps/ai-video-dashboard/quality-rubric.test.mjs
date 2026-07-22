@@ -5,8 +5,16 @@ const data = getQualityLabData('explainer');
 assert.equal(data.categoryCount, 12);
 assert.equal(data.criterionCount, 82);
 assert.equal(data.categories.reduce((sum, category) => sum + category.weight, 0), 100);
-assert.equal(data.releases.filter((row) => row.kind === 'editing-test').map((row) => row.humanScore).join(','), '10,15,20');
-assert.equal(data.releases.filter((row) => row.deprecatedMachineScore).length, 2);
+assert.equal(data.releases.filter((row) => row.kind === 'editing-test' && Number.isFinite(row.humanScore)).map((row) => row.humanScore).join(','), '10,15,20,20');
+const editingReleases = data.releases.filter((row) => row.kind === 'editing-test');
+const rejectedV4 = editingReleases.find((row) => row.id === 'edit-v0.4');
+const latestEditing = editingReleases.at(-1);
+assert.equal(rejectedV4.humanScore, 20);
+assert.equal(rejectedV4.deprecatedMachineScore, 47.51);
+assert.equal(latestEditing.id, 'edit-v0.5');
+assert.equal(latestEditing.humanScore, null);
+assert.equal(latestEditing.craftScore, null);
+assert.equal(data.releases.filter((row) => row.deprecatedMachineScore).length, 3);
 assert.ok(data.sources.length >= 12);
 
 for (const profile of Object.values(profiles)) {
