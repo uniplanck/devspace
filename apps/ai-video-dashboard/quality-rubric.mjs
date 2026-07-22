@@ -52,6 +52,8 @@ export const releases=[
   {id:'edit-v0.2',kind:'editing-test',date:'2026-07-21T23:45:00+09:00',title:'視聴維持再構成版',headlineScore:15,humanScore:15,deprecatedMachineScore:86,durationSeconds:133.5,metrics:{selects:8,captions:22,captionMode:'要点字幕',bgm:false,sfx:0,loudness:'-16.6 LUFS'},changes:['結論を冒頭へ移動','8区間・3章へ再構成','パンチイン12件','音声を補正'],tests:['尺誤差0秒','True Peak -1.54 dBTP','マイクロカット0件'],issues:['フルテロップではない','BGM・SEなし','外部資料なし','音声接続に不自然な箇所','旧機械採点が人間評価を過大推定']},
   {id:'edit-v0.3',kind:'editing-test',date:'2026-07-22T01:00:00+09:00',title:'フルテロップ・音響版',headlineScore:20,humanScore:20,deprecatedMachineScore:100,durationSeconds:140.8,metrics:{selects:8,captions:47,captionMode:'人手補正フルテロップ',captionCoverage:'100%',captionOnset:'最大0.01F',bgm:'Feedback Dreams',sfx:8,loudness:'-15.74 LUFS'},changes:['発話カバー率100%のフルテロップ','字幕開始最大0.01フレーム','BGMダッキング','SE 8箇所','切り出し位置を再調整'],tests:['尺誤差0秒','全編デコード合格','True Peak -2.46 dBTP','字幕最大2行・1行18文字'],issues:['画面の情報価値が低い','資料・比較・図解が不足','BGM・SEが構成上の意味を十分持たない','音声接続に人間品質の弱点','旧機械点100は廃止']},
   {id:'tool-v0.4',kind:'tool-release',date:'2026-07-22T02:25:00+09:00',title:'Quality Lab基準・履歴画面',headlineScore:null,humanScore:null,deprecatedMachineScore:null,changes:['12カテゴリ・82項目','0〜4段階の項目別基準','重大欠陥による点数上限','制作品質・人間視聴・公開実績を分離','版比較・折れ線・テスト履歴・根拠資料をSP最適化'],tests:[],issues:['動画自体の品質はこの版では未変更']},
+  {id:'edit-v0.4',kind:'editing-test',date:'2026-07-22T16:44:00+09:00',title:'論理図解・2根拠再構成版（却下）',headlineScore:20,humanScore:20,craftScore:null,deprecatedMachineScore:47.51,durationSeconds:58.633,metrics:{selects:5,captions:19,captionMode:'フルテロップ',captionCoverage:'100%',evidenceCards:8,bgm:'実装上あり・視聴上不十分',sfx:'実装上あり・視聴上不十分',loudness:'-16.31 LUFS',truePeak:'-1.51 dBTP',sampleRate:'48kHz'},changes:['4人目のモンキー・Dなど主題外区間を削除','仮説→昔話モチーフ→魚人島→老化→限界の5区間へ再構成','図解カード8件を追加','BGM・SEミキサーを実装'],tests:['全編デコードエラー0','字幕カバー率100%','Integrated -16.31 LUFS / True Peak -1.51 dBTP','黒画面0'],issues:['ユーザー評価20点で却下','カットが無音境界中心になっていない','BGMと効果音を視聴上認識できない','句読点と不自然な字幕分割が残る','クロマノイズと雑音処理が不足','字幕・図解デザインの品質が低い']},
+  {id:'edit-v0.5',kind:'editing-test',date:'2026-07-22T17:36:00+09:00',title:'無音境界・可読字幕・音響再設計版',headlineScore:null,humanScore:null,craftScore:null,deprecatedMachineScore:null,durationSeconds:88.433,metrics:{selects:2,cuts:1,captions:27,captionMode:'句読点なし可読フルテロップ',captionCoverage:'100%',captionMaxLines:2,captionMaxLineChars:15,bgm:'Feedback Dreams・実測 -31.01 LUFS stem',sfx:6,sfxStem:'-27.05 LUFS',loudness:'-14.91 LUFS',truePeak:'-1.32 dBTP',sampleRate:'48kHz'},changes:['発話途中の細切れを廃止し2つの連続発言と1カットへ変更','字幕を27枚へ再分節し句読点0・最大2行・1行15文字へ統一','大型図解を廃止し小型章ラベル・補足ラベル・濃紺字幕帯へ再設計','BGMを旧版より8.0dB強くし3:1ダッキングへ変更','効果音6件を-10〜-8.5dBで章・強調時刻へ配置','音声FFTノイズ除去・ディエッサー・映像クロマノイズ除去を追加'],tests:['全編デコードエラー0・黒画面0・長い無音0','字幕開始0秒・終端88.35秒・字幕間空白0','句読点0・最大2行・1行最大15文字','BGM stem -31.01 LUFS・旧版比 +8.0dB','SE stem -27.05 LUFS・6イベントすべて検出','最終 -14.91 LUFS / True Peak -1.32 dBTP / AAC 48kHz','音声静音部ノイズ約1.5〜3.1dB低減','色差時間変動 U約70%・V約64%低減'],issues:['人間評価は未確定で基準点20のまま','デザイン品質は実動画の全編確認が必要','40点達成とはまだ扱わない']},
 ];
 
 const makeLevels=(criterion,maxPoints)=>[
@@ -93,7 +95,7 @@ export function getQualityLabData(profileId='explainer'){
   const categories=categoriesForProfile(profile.id);
   return {
     version:RUBRIC_VERSION,
-    generatedAt:'2026-07-22T02:25:00+09:00',
+    generatedAt:'2026-07-22T17:36:00+09:00',
     profile,
     profiles:Object.values(profiles),
     categories,

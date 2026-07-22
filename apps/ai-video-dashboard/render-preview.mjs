@@ -110,7 +110,7 @@ function normalizeCaptions(operations, durationSeconds) {
 }
 
 function normalizeOverlays(operations, durationSeconds) {
-  const allowed = new Set(['title_card', 'chapter', 'callout', 'cta']);
+  const allowed = new Set(['title_card', 'chapter', 'callout', 'cta', 'evidence_card']);
   return operations
     .filter((operation) => allowed.has(operation?.type) && operation.enabled !== false)
     .map((operation, index) => {
@@ -125,6 +125,9 @@ function normalizeOverlays(operations, durationSeconds) {
         end: Math.min(durationSeconds, end),
         text,
         position: String(operation.position || (operation.type === 'chapter' ? 'top_left' : 'center')),
+        eyebrow: String(operation.eyebrow || '').trim(),
+        footer: String(operation.footer || '').trim(),
+        variant: String(operation.variant || 'evidence'),
       };
     })
     .filter((operation) => operation.end > operation.start)
@@ -196,6 +199,7 @@ export function buildRenderPlan(editorialIr) {
     visualEffects,
     captionMode: String(editorialIr?.retentionPlan?.captionMode || 'standard'),
     audioProcessing: String(editorialIr?.audio?.processing || 'none'),
+    videoProcessing: String(editorialIr?.video?.processing || 'none'),
     audioStrategy: String(editorialIr?.multicam?.audioStrategy || 'selected_asset'),
     masterAudioAssetId: editorialIr?.multicam?.masterAudioAssetId
       ? String(editorialIr.multicam.masterAudioAssetId)
@@ -280,14 +284,21 @@ async function buildFilterScript({ plan, mediaByAsset, inputIndexByAsset, output
   const lines = [];
   const concatInputs = [];
   const hasAudio = plan.selects.some((select) => mediaByAsset.get(select.audioAssetId)?.hasAudio);
+  const cleanVoice = plan.audioProcessing === 'voice_youtube_clean';
+  const voiceProcessing = cleanVoice || plan.audioProcessing === 'voice_youtube';
+  const cleanVideo = plan.videoProcessing === 'youtube_clean';
   for (const [index, select] of plan.selects.entries()) {
     const inputIndex = inputIndexByAsset.get(select.assetId);
     const audioInputIndex = inputIndexByAsset.get(select.audioAssetId);
     const media = mediaByAsset.get(select.audioAssetId);
     const duration = select.durationFrames / plan.frameRate;
+    const videoCleanup = cleanVideo
+      ? 'hqdn3d=luma_spatial=1.15:chroma_spatial=2.8:luma_tmp=1.8:chroma_tmp=5.4,'
+      : '';
     lines.push(
       `[${inputIndex}:v]trim=start=${select.sourceIn},setpts=PTS-STARTPTS,`
       + `fps=${plan.frameRate},trim=end_frame=${select.durationFrames},setpts=PTS-STARTPTS,`
+      + videoCleanup
       + `scale=${outputMedia.width}:${outputMedia.height}:force_original_aspect_ratio=decrease,`
       + `pad=${outputMedia.width}:${outputMedia.height}:(ow-iw)/2:(oh-ih)/2,setsar=1,`
       + `format=yuv420p[v${index}]`,
@@ -295,8 +306,8 @@ async function buildFilterScript({ plan, mediaByAsset, inputIndexByAsset, output
     concatInputs.push(`[v${index}]`);
     if (hasAudio) {
       if (media?.hasAudio) {
-        const boundaryFade = plan.audioProcessing === 'voice_youtube' && duration > 0.08
-          ? `,afade=t=in:st=0:d=0.02,afade=t=out:st=${Math.max(0, duration - 0.02)}:d=0.02`
+        const boundaryFade = voiceProcessing && duration > 0.12
+          ? `,afade=t=in:st=0:d=0.035,afade=t=out:st=${Math.max(0, duration - 0.035)}:d=0.035`
           : '';
         lines.push(
           `[${audioInputIndex}:a]atrim=start=${select.audioSourceIn}:duration=${duration},asetpts=PTS-STARTPTS,`
@@ -312,7 +323,10 @@ async function buildFilterScript({ plan, mediaByAsset, inputIndexByAsset, output
   let audioOutput = null;
   if (hasAudio) {
     lines.push(`${concatInputs.join('')}concat=n=${plan.selects.length}:v=1:a=1[vcat][acat]`);
-    if (plan.audioProcessing === 'voice_youtube') {
+    if (cleanVoice) {
+      lines.push('[acat]highpass=f=75,lowpass=f=15500,afftdn=nr=11:nf=-36:tn=1:gs=8,deesser=i=0.16:m=0.35:f=0.58,acompressor=threshold=-25dB:ratio=2.6:attack=18:release=220:makeup=1.35,loudnorm=I=-16:LRA=7:TP=-1.5[aout]');
+      audioOutput = 'aout';
+    } else if (voiceProcessing) {
       lines.push('[acat]highpass=f=70,acompressor=threshold=-24dB:ratio=3:attack=15:release=180,loudnorm=I=-16:LRA=9:TP=-1.5[aout]');
       audioOutput = 'aout';
     } else {
@@ -338,28 +352,128 @@ async function buildFilterScript({ plan, mediaByAsset, inputIndexByAsset, output
 
   const fontSize = Math.max(32, Math.min(72, Math.round(outputMedia.height / 16)));
   const boxBorder = Math.max(12, Math.round(fontSize * 0.3));
+  const cardAccents = {
+    hook: '0xF59E0B',
+    evidence: '0x38BDF8',
+    comparison: '0xA78BFA',
+    caution: '0xF87171',
+    summary: '0x34D399',
+  };
   for (const [index, overlay] of plan.overlays.entries()) {
     const textFile = path.join(tempDir, `overlay-${String(index + 1).padStart(3, '0')}.txt`);
     await fs.writeFile(textFile, `${overlay.text}\n`, 'utf8');
+    if (overlay.type === 'evidence_card') {
+      const eyebrowFile = path.join(tempDir, `overlay-${String(index + 1).padStart(3, '0')}-eyebrow.txt`);
+      const footerFile = path.join(tempDir, `overlay-${String(index + 1).padStart(3, '0')}-footer.txt`);
+      await Promise.all([
+        fs.writeFile(eyebrowFile, `${overlay.eyebrow || ''}\n`, 'utf8'),
+        fs.writeFile(footerFile, `${overlay.footer || ''}\n`, 'utf8'),
+      ]);
+      const position = overlay.position || 'full';
+      const geometry = position === 'left'
+        ? { x: 0.04, y: 0.15, width: 0.64, height: 0.52 }
+        : position === 'right'
+          ? { x: 0.32, y: 0.15, width: 0.64, height: 0.52 }
+          : position === 'bottom'
+            ? { x: 0.05, y: 0.42, width: 0.9, height: 0.32 }
+            : { x: 0.06, y: 0.12, width: 0.88, height: 0.56 };
+      const x = Math.round(outputMedia.width * geometry.x);
+      const y = Math.round(outputMedia.height * geometry.y);
+      const width = Math.round(outputMedia.width * geometry.width);
+      const height = Math.round(outputMedia.height * geometry.height);
+      const padding = Math.round(outputMedia.width * 0.035);
+      const accentWidth = Math.max(8, Math.round(outputMedia.width * 0.006));
+      const bodySize = Math.round(fontSize * (position === 'bottom' ? 0.82 : 1.05));
+      const eyebrowSize = Math.round(fontSize * 0.52);
+      const footerSize = Math.round(fontSize * 0.44);
+      const accent = cardAccents[overlay.variant] || cardAccents.evidence;
+      const enable = `between(t,${overlay.start},${overlay.end})`;
+      const dimmed = `vcard${index}dim`;
+      const panel = `vcard${index}panel`;
+      const stripe = `vcard${index}stripe`;
+      lines.push(`[${previous}]drawbox=x=0:y=0:w=iw:h=ih:color=black@0.22:t=fill:enable='${enable}'[${dimmed}]`);
+      lines.push(`[${dimmed}]drawbox=x=${x}:y=${y}:w=${width}:h=${height}:color=0x07111F@0.88:t=fill:enable='${enable}'[${panel}]`);
+      lines.push(`[${panel}]drawbox=x=${x}:y=${y}:w=${accentWidth}:h=${height}:color=${accent}@1:t=fill:enable='${enable}'[${stripe}]`);
+      let cardPrevious = stripe;
+      if (overlay.eyebrow) {
+        const eyebrowLabel = `vcard${index}eyebrow`;
+        lines.push(
+          `[${cardPrevious}]drawtext=`
+          + `fontfile='${escapeFilterPath(fontFile)}':textfile='${escapeFilterPath(eyebrowFile)}':`
+          + `expansion=none:reload=0:fontcolor=${accent}:fontsize=${eyebrowSize}:`
+          + `x=${x + padding}:y=${y + Math.round(padding * 0.7)}:fix_bounds=1:enable='${enable}'[${eyebrowLabel}]`,
+        );
+        cardPrevious = eyebrowLabel;
+      }
+      const bodyLabel = `vcard${index}body`;
+      const bodyY = y + padding + (overlay.eyebrow ? Math.round(eyebrowSize * 1.45) : 0);
+      lines.push(
+        `[${cardPrevious}]drawtext=`
+        + `fontfile='${escapeFilterPath(fontFile)}':textfile='${escapeFilterPath(textFile)}':`
+        + `expansion=none:reload=0:fontcolor=white:fontsize=${bodySize}:`
+        + `line_spacing=${Math.round(bodySize * 0.22)}:borderw=${Math.max(2, Math.round(bodySize * 0.035))}:bordercolor=black@0.6:`
+        + `x=${x + padding}:y=${bodyY}:fix_bounds=1:enable='${enable}'[${bodyLabel}]`,
+      );
+      cardPrevious = bodyLabel;
+      if (overlay.footer) {
+        const footerLabel = `vcard${index}footer`;
+        lines.push(
+          `[${cardPrevious}]drawtext=`
+          + `fontfile='${escapeFilterPath(fontFile)}':textfile='${escapeFilterPath(footerFile)}':`
+          + `expansion=none:reload=0:fontcolor=0xCBD5E1:fontsize=${footerSize}:`
+          + `x=${x + padding}:y=${y + height - padding - footerSize}:fix_bounds=1:enable='${enable}'[${footerLabel}]`,
+        );
+        cardPrevious = footerLabel;
+      }
+      previous = cardPrevious;
+      continue;
+    }
     const next = `voverlay${index}`;
+    const enable = `between(t,${overlay.start},${overlay.end})`;
+    if (overlay.type === 'chapter') {
+      const x = Math.round(outputMedia.width * 0.045);
+      const y = Math.round(outputMedia.height * 0.055);
+      const width = Math.round(outputMedia.width * 0.34);
+      const height = Math.round(outputMedia.height * 0.068);
+      const panel = `vchapter${index}panel`;
+      const accent = `vchapter${index}accent`;
+      lines.push(`[${previous}]drawbox=x=${x}:y=${y}:w=${width}:h=${height}:color=0x07111F@0.82:t=fill:enable='${enable}'[${panel}]`);
+      lines.push(`[${panel}]drawbox=x=${x}:y=${y}:w=${Math.max(8, Math.round(outputMedia.width * 0.006))}:h=${height}:color=0xF5B942@1:t=fill:enable='${enable}'[${accent}]`);
+      lines.push(
+        `[${accent}]drawtext=fontfile='${escapeFilterPath(fontFile)}':textfile='${escapeFilterPath(textFile)}':`
+        + `expansion=none:reload=0:fontcolor=white:fontsize=${Math.round(fontSize * 0.62)}:`
+        + `x=${x + Math.round(outputMedia.width * 0.022)}:y=${y + Math.round(height * 0.19)}:`
+        + `fix_bounds=1:enable='${enable}'[${next}]`,
+      );
+      previous = next;
+      continue;
+    }
+    if (overlay.type === 'callout') {
+      lines.push(
+        `[${previous}]drawtext=fontfile='${escapeFilterPath(fontFile)}':textfile='${escapeFilterPath(textFile)}':`
+        + `expansion=none:reload=0:fontcolor=0x07111F:fontsize=${Math.round(fontSize * 0.66)}:`
+        + `box=1:boxcolor=0xF5B942@0.96:boxborderw=${Math.round(fontSize * 0.28)}:`
+        + `x=w-text_w-${Math.round(outputMedia.width * 0.055)}:y=${Math.round(outputMedia.height * 0.065)}:`
+        + `fix_bounds=1:enable='${enable}'[${next}]`,
+      );
+      previous = next;
+      continue;
+    }
     const size = overlay.type === 'title_card' || overlay.type === 'cta'
-      ? Math.round(fontSize * 1.35)
-      : overlay.type === 'chapter'
-        ? Math.round(fontSize * 0.86)
-        : Math.round(fontSize * 1.05);
-    const position = overlay.position === 'top_left'
-      ? `x=${Math.round(outputMedia.width * 0.04)}:y=${Math.round(outputMedia.height * 0.06)}`
+      ? Math.round(fontSize * 1.2)
+      : Math.round(fontSize * 0.95);
+    const position = overlay.type === 'title_card'
+      ? `x=${Math.round(outputMedia.width * 0.06)}:y=${Math.round(outputMedia.height * 0.18)}`
       : overlay.position === 'top'
         ? `x=(w-text_w)/2:y=${Math.round(outputMedia.height * 0.08)}`
         : 'x=(w-text_w)/2:y=(h-text_h)/2';
-    const opacity = overlay.type === 'chapter' ? 0.72 : 0.82;
     lines.push(
       `[${previous}]drawtext=`
       + `fontfile='${escapeFilterPath(fontFile)}':`
       + `textfile='${escapeFilterPath(textFile)}':`
-      + `expansion=none:reload=0:fontcolor=white:fontsize=${size}:line_spacing=${Math.round(size * 0.18)}:`
-      + `box=1:boxcolor=black@${opacity}:boxborderw=${Math.round(size * 0.35)}:`
-      + `${position}:enable='between(t,${overlay.start},${overlay.end})'[${next}]`,
+      + `expansion=none:reload=0:fontcolor=white:fontsize=${size}:line_spacing=${Math.round(size * 0.16)}:`
+      + `box=1:boxcolor=0x07111F@0.84:boxborderw=${Math.round(size * 0.34)}:`
+      + `${position}:enable='${enable}'[${next}]`,
     );
     previous = next;
   }
@@ -368,19 +482,23 @@ async function buildFilterScript({ plan, mediaByAsset, inputIndexByAsset, output
     const textFile = path.join(tempDir, `caption-${String(index + 1).padStart(3, '0')}.txt`);
     await fs.writeFile(textFile, `${caption.text}\n`, 'utf8');
     const next = `vcap${index}`;
-    const roleScale = caption.role === 'emphasis' ? 1.15 : 1;
+    const roleScale = caption.role === 'emphasis' ? 1.06 : 1;
     const fullCaption = plan.captionMode === 'full_aligned';
-    const size = Math.round(fontSize * roleScale * (fullCaption ? 1.06 : 1));
-    const captionStyle = fullCaption
-      ? `borderw=${Math.max(4, Math.round(size * 0.075))}:bordercolor=black@0.96:shadowx=2:shadowy=2:shadowcolor=black@0.7:line_spacing=${Math.round(size * 0.14)}:`
-      : `box=1:boxcolor=black@0.62:boxborderw=${boxBorder}:`;
+    const readableCaption = plan.captionMode === 'full_readable';
+    const size = Math.round(fontSize * roleScale * (fullCaption ? 1.06 : readableCaption ? 0.98 : 1));
+    const fontColor = caption.role === 'emphasis' ? '0xFFD166' : 'white';
+    const captionStyle = readableCaption
+      ? `box=1:boxcolor=0x061018@0.84:boxborderw=${Math.round(size * 0.34)}:borderw=${Math.max(2, Math.round(size * 0.035))}:bordercolor=black@0.8:line_spacing=${Math.round(size * 0.18)}:`
+      : fullCaption
+        ? `borderw=${Math.max(4, Math.round(size * 0.075))}:bordercolor=black@0.96:shadowx=2:shadowy=2:shadowcolor=black@0.7:line_spacing=${Math.round(size * 0.14)}:`
+        : `box=1:boxcolor=black@0.62:boxborderw=${boxBorder}:`;
     lines.push(
       `[${previous}]drawtext=`
       + `fontfile='${escapeFilterPath(fontFile)}':`
       + `textfile='${escapeFilterPath(textFile)}':`
-      + `expansion=none:reload=0:fontcolor=white:fontsize=${size}:`
+      + `expansion=none:reload=0:fontcolor=${fontColor}:fontsize=${size}:`
       + captionStyle
-      + `x=(w-text_w)/2:y=h-text_h-${Math.max(54, Math.round(outputMedia.height * 0.075))}:`
+      + `x=(w-text_w)/2:y=h-text_h-${Math.max(70, Math.round(outputMedia.height * (readableCaption ? 0.105 : 0.075)))}:`
       + `enable='between(t,${caption.start},${caption.end})'[${next}]`,
     );
     previous = next;

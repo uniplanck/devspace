@@ -272,7 +272,7 @@ node apply-caption-plan.mjs \
   --output /absolute/path/to/full-caption-ir.json
 ```
 
-字幕レンダー後は映像を再圧縮せず、BGMのsidechain duckingと時刻指定SEを音声トラックへ追加できます。
+字幕レンダー後は映像を再圧縮せず、BGMのsidechain duckingと時刻指定SEを音声トラックへ追加できます。`full_readable`字幕は句読点なし・最大2行を前提とした濃紺字幕帯を使い、`voice_youtube_clean`と`youtube_clean`では音声の定常ノイズと映像のクロマノイズを軽度に除去します。
 
 ```bash
 node mix-retention-audio.mjs \
@@ -306,6 +306,7 @@ node multicam-core.test.mjs
 node real-footage-quality.test.mjs
 node export-premiere-xml.test.mjs
 node quality-rubric.test.mjs
+node score-quality-assessment.mjs --self-test
 node build-retention-edit.mjs --self-test
 node score-retention-edit.mjs --self-test
 node render-preview.mjs --self-test
