@@ -205,8 +205,8 @@ function parseOpenWorkspacePayloadMode(value: string | undefined): OpenWorkspace
 }
 
 function parseUsageContentMode(value: string | undefined): UsageContentMode {
-  if (!value || value === "compact") return "compact";
-  if (value === "off" || value === "full") return value;
+  if (!value || value === "off") return "off";
+  if (value === "compact" || value === "full") return value;
 
   throw new Error(`Invalid DEVSPACE_USAGE_CONTENT: ${value}`);
 }
@@ -350,7 +350,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     allowedHosts: parseAllowedHosts(env.DEVSPACE_ALLOWED_HOSTS, derivedAllowedHosts),
     publicBaseUrl,
     toolMode: parseToolMode(env),
-    widgets: parseWidgetMode(env.DEVSPACE_WIDGETS, "off"),
+    widgets: parseWidgetMode(env.DEVSPACE_WIDGETS, "changes"),
     openWorkspacePayload,
     openWorkspaceInstructionChars: parseIntegerAtLeast(
       env.DEVSPACE_OPEN_WORKSPACE_INSTRUCTION_CHARS,

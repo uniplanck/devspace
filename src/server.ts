@@ -1,0 +1,3586 @@
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { access, realpath } from "node:fs/promises";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js";
+import { mcpAuthRouter, getOAuthProtectedResourceMetadataUrl } from "@modelcontextprotocol/sdk/server/auth/router.js";
+import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
+import { checkResourceAllowed, resourceUrlFromServerUrl } from "@modelcontextprotocol/sdk/shared/auth-utils.js";
+import {
+  registerAppResource,
+  registerAppTool,
+  RESOURCE_MIME_TYPE,
+} from "@modelcontextprotocol/ext-apps/server";
+import express from "express";
+import type { Request, Response } from "express";
+import * as z from "zod/v4";
+import { applyPatch } from "./apply-patch.js";
+import {
+  ensureChatProgressStarted,
+  formatChatProgressResult,
+  listChatProgress,
+  updateChatProgress,
+} from "./chat-progress.js";
+import { OutputLearningStore } from "./output-learning.js";
+import { scoreTaskFinalization } from "./output-core-quality.js";
+import {
+  formatEc2ControlSummary,
+  invokeEc2Control,
+} from "./ec2-control.js";
+import { loadConfig, type ServerConfig, type WidgetMode } from "./config.js";
+import {
+  logEvent,
+  requestIp,
+  requestPath,
+  commandPreview,
+  sessionIdPrefix,
+} from "./logger.js";
+import {
+  editFileTool,
+  findFilesTool,
+  grepFilesTool,
+  listDirectoryTool,
+  readFileTool,
+  runShellTool,
+  writeFileTool,
+} from "./pi-tools.js";
+import {
+  appendUsageToContent,
+  editInputChars,
+  estimateFileChars,
+  recordObservedToolUsage,
+  runWithUsageSession,
+  textContentChars,
+} from "./usage-meter.js";
+import { SingleUserOAuthProvider } from "./oauth-provider.js";
+import { ProcessSessionManager, type ProcessSnapshot } from "./process-sessions.js";
+import { createReviewCheckpointManager } from "./review-checkpoints.js";
+import { formatPathForPrompt } from "./skills.js";
+import { createWorkspaceStore } from "./workspace-store.js";
+import { formatAgentsPath, WorkspaceRegistry } from "./workspaces.js";
+import { summarizeLocalAgentProfile } from "./local-agent-profiles.js";
+import {
+  formatLocalAgentProviderAvailabilitySummary,
+  getLocalAgentProviderAvailabilitySnapshot,
+  type LocalAgentProviderAvailability,
+} from "./local-agent-availability.js";
+import { registerV11Tools } from "./register-v11-tools.js";
+// PRIVATE_GEX_START
+import { GexLearningStore, type GexLearningSyncPayload } from "./gex-learning-store.js";
+import {
+  GexChatRuntimeStore,
+  type GexChatActivationPayload,
+  type GexChatRuntimePayload,
+} from "./gex-chat-runtime-store.js";
+// PRIVATE_GEX_END
+import {
+  NaoBrainTodayStore,
+  type TodayAnalysisInput,
+  type TodayEntryInput,
+  type TodayEntryUpdateInput,
+} from "./naobrain-today-store.js";
+import {
+  NaoBrainQuizStore,
+  type QuizAnswerInput,
+  type QuizSessionMode,
+} from "./naobrain-quiz-store.js";
+
+type Transport = StreamableHTTPServerTransport;
+// PRIVATE_GEX_START
+const GEX_LEARNING_BRIDGE_HEADER = "gex-learning-v1";
+const GEX_CHAT_RUNTIME_BRIDGE_HEADER = "gex-chat-runtime-v1";
+// PRIVATE_GEX_END
+const WORKSPACE_APP_URI = "ui://devspace/workspace-app.html";
+const WORKSPACE_APP_MANIFEST_ENTRY = "workspace-app.html";
+const WRITE_TOOL_ANNOTATIONS = {
+  readOnlyHint: false,
+  destructiveHint: true,
+  idempotentHint: false,
+  openWorldHint: false,
+};
+const EDIT_TOOL_ANNOTATIONS = {
+  readOnlyHint: false,
+  destructiveHint: true,
+  idempotentHint: false,
+  openWorldHint: false,
+};
+const SHELL_TOOL_ANNOTATIONS = {
+  readOnlyHint: false,
+  destructiveHint: true,
+  idempotentHint: false,
+  openWorldHint: true,
+};
+
+interface RunningServer {
+  app: ReturnType<typeof createMcpExpressApp>;
+  config: ServerConfig;
+  localAgentProviders: LocalAgentProviderAvailability[];
+  close(): void;
+}
+
+type ToolContent =
+  | { type: "text"; text: string }
+  | { type: "image"; data: string; mimeType: string };
+
+interface WorkspaceAppManifestEntry {
+  file: string;
+  css?: string[];
+  isEntry?: boolean;
+}
+
+type WorkspaceAppManifest = Record<string, WorkspaceAppManifestEntry>;
+
+interface DiffStats {
+  additions: number;
+  removals: number;
+}
+
+type ToolWidgetKind =
+  | "workspace"
+  | "read"
+  | "write"
+  | "edit"
+  | "search"
+  | "directory"
+  | "shell"
+  | "show_changes"
+  | "progress";
+
+interface ToolDefinitionMeta extends Record<string, unknown> {
+  ui: {
+    resourceUri: string;
+    visibility: ["model"];
+  };
+}
+
+type EmptyToolDefinitionMeta = Record<string, unknown> & {
+  "ui/resourceUri"?: string;
+};
+
+interface ToolWidgetDescriptorMeta {
+  _meta: ToolDefinitionMeta | EmptyToolDefinitionMeta;
+}
+
+function shouldAttachWidget(mode: WidgetMode, kind: ToolWidgetKind): boolean {
+  switch (mode) {
+    case "off":
+      return false;
+    case "changes":
+      return kind === "show_changes" || kind === "progress";
+    case "full":
+      return true;
+  }
+}
+
+function toolWidgetDescriptorMeta(
+  config: ServerConfig,
+  kind: ToolWidgetKind,
+): ToolWidgetDescriptorMeta {
+  if (!shouldAttachWidget(config.widgets, kind)) return { _meta: {} };
+
+  return {
+    _meta: {
+      ui: {
+        resourceUri: WORKSPACE_APP_URI,
+        visibility: ["model"],
+      },
+    },
+  };
+}
+
+const toolNames = {
+  beginTask: "begin_task",
+  reportProgress: "report_progress",
+  finalizeTask: "finalize_task",
+  outputCoreStatus: "output_core_status",
+  openWorkspace: "open_workspace",
+  read: "read",
+  write: "write",
+  edit: "edit",
+  grep: "grep",
+  glob: "glob",
+  ls: "ls",
+  shell: "bash",
+  workspaceDigest: "workspace_digest",
+  batchEdit: "batch_edit",
+  reviewChanges: "review_changes",
+} as const;
+
+interface ToolLogFields {
+  tool: string;
+  workspaceId?: string;
+  path?: string;
+  workingDirectory?: string;
+  command?: string;
+  commandLength?: number;
+  success: boolean;
+  durationMs: number;
+  error?: string;
+}
+
+function serverInstructions(config: ServerConfig): string {
+  const progressInstruction = ` The GAG/GAE canonical output protocol is mandatory in every conversation where these tools are used. Before the first substantive workspace or execution action, call ${toolNames.beginTask} exactly once with the current user request, a stable task category, a concise task label, and an initial estimate when applicable. Copy only the returned visible progress Markdown into a normal commentary message; use the structured learned rules and predicted next intents internally when planning the answer. This begin call automatically pairs the current request with the previous completed output in the same conversation, so never invent or manually duplicate a learning record. Reuse the continuityKey returned by the previous finalize_task when it is present in the same Chat; it protects continuity when host conversation metadata or the MCP transport session changes. MCP cards and raw tool results are evidence surfaces and must never be the only user-facing status. Call ${toolNames.reportProgress} only for a meaningful milestone, blocker, forecast revision, or roughly sixty seconds of continued work. Do not use ${toolNames.reportProgress} to complete a task. The last tool-state action for every task must be ${toolNames.finalizeTask}; pass an evidence-grounded output summary, verification, remaining work, quality evidence, and a quality target of 95 for file-changing or multi-step implementation work. Its returned Markdown is the canonical entire final response. Paste it verbatim with no preamble, renamed headings, omitted sections, duplicate usage table, or postscript. The exact final heading order is \"## 完了結果\", \"## 変更\", \"## 検証\", \"## 残り\", \"## 次に起こりそうなこと\", and \"## 実行情報\". Use \"なし\" for an empty section. Treat predictions as probabilistic, not promises. If a dedicated canonical tool is unavailable because the connector schema is stale, state that limitation and use the six-heading format manually rather than claiming learning was recorded.`;
+  const cardEconomyInstruction = config.compoundTools
+    ? ` Minimize MCP cards without hiding necessary reasoning. A new card is justified when its result can change the next action, when user approval is required, when the action is high risk, or when failure isolation matters. Otherwise batch independent work. Prefer ${toolNames.workspaceDigest} for the initial project/Git/search/file-excerpt inspection instead of separate status, grep, and repeated read calls. Once exact changes are known and independent across files, prefer ${toolNames.batchEdit} over one edit call per file. Combine independent typecheck, tests, build, and final Git inspection into one ${toolNames.shell} call when no intermediate result changes the plan. Use ${toolNames.reviewChanges} once after the complete edit set rather than reviewing after each file. Never force a one-card workflow across a genuine decision boundary; the objective is the fewest evidence-preserving calls, typically open workspace, one digest, one change call, and one verification call.`
+    : ` Minimize MCP cards by combining independent read-only shell inspections and independent verification commands into single calls. Keep separate calls whenever an earlier result can change the next action.`;
+  const showChangesInstruction =
+    config.widgets === "changes"
+      ? " If the turn successfully modifies files by creating, editing, overwriting, deleting, moving, or applying patches, call show_changes exactly once for that workspace after the final related file change and before your final response so the user can inspect the aggregate diff for that turn. Do not call it after every individual file change; do not skip it because individual file-change tools already returned diffs."
+      : "";
+
+  if (config.toolMode === "codex") {
+    return `Use DevSpace as a local coding workspace. Call ${toolNames.openWorkspace} once per project folder or worktree and reuse its workspaceId. Use ${toolNames.read} for direct file reads, apply_patch for all file modifications, exec_command for inspection, tests, builds, and other commands, and write_stdin to poll or interact with running processes. Follow instructions returned by ${toolNames.openWorkspace}; read applicable instruction and skill files before working in their scope.${cardEconomyInstruction}${progressInstruction}${showChangesInstruction}`;
+  }
+
+  const inspection = config.toolMode !== "full"
+    ? `In minimal tool mode, ${toolNames.grep}, ${toolNames.glob}, and ${toolNames.ls} are disabled; use ${toolNames.shell} with command-line tools such as grep, rg, find, ls, and tree for search and directory inspection. `
+    : `Prefer ${toolNames.read}, ${toolNames.grep}, ${toolNames.glob}, and ${toolNames.ls} for file inspection. `;
+
+  const skills = config.skillsEnabled
+    ? `When ${toolNames.openWorkspace} returns available skills and a task matches a skill, use ${toolNames.read} to read that skill's path before proceeding. Skill paths may be outside the workspace, but ${toolNames.read} only permits advertised SKILL.md files and files under already-loaded skill directories. `
+    : "";
+
+  const agentsMd = config.openWorkspacePayload === "compact"
+    ? `Follow instructions returned by ${toolNames.openWorkspace}. It returns bounded instruction excerpts to keep the initial result small; use ${toolNames.read} to read every path listed in agentsFiles before other project work, and read applicable paths in availableAgentsFiles before working in their scope. `
+    : `Follow instructions returned by ${toolNames.openWorkspace}. Before working under a path listed in availableAgentsFiles, use ${toolNames.read} to inspect that instruction file and follow it. `;
+
+  return `Use DevSpace as a local coding workspace. Call ${toolNames.openWorkspace} once per project folder or worktree to obtain a workspaceId. Reuse that same workspaceId for all later file, search, edit, write, show-changes, and shell tools in that folder; do not call ${toolNames.openWorkspace} again unless switching folders/worktrees, changing checkout/worktree mode, the workspaceId is rejected as unknown, or the user explicitly asks to reopen. ${agentsMd}${skills}${inspection}Prefer ${toolNames.edit} for targeted modifications, ${toolNames.write} only for new files or complete rewrites, and ${toolNames.shell} for tests, builds, git inspection, package scripts, and commands that are better executed by the shell. Do not create or modify files with ${toolNames.shell}; avoid shell redirection, heredocs, tee, sed -i, perl -i, node/python/ruby scripts, or any command whose purpose is to write project files.${cardEconomyInstruction}${progressInstruction}${showChangesInstruction}`;
+}
+
+function formatVisibleAgent(agent: {
+  name: string;
+  provider: string;
+  model?: string;
+  thinking?: string;
+  providerAvailable?: boolean;
+  providerUnavailableReason?: string;
+}): string {
+  const model = agent.model ? `, model ${agent.model}` : "";
+  const thinking = agent.thinking ? `, thinking ${agent.thinking}` : "";
+  const availability = agent.providerAvailable === false
+    ? `, unavailable: ${agent.providerUnavailableReason ?? "provider unavailable"}`
+    : "";
+  return `${agent.name} (${agent.provider}${model}${thinking}${availability})`;
+}
+
+function formatUnavailableAgentProvider(provider: LocalAgentProviderAvailability): string {
+  return `${provider.name} (${provider.reason ?? "unavailable"})`;
+}
+
+function resultOutputSchema(extra: z.ZodRawShape = {}): z.ZodRawShape {
+  return {
+    result: z
+      .string()
+      .describe(
+        "Model-readable result text for follow-up reasoning and plain MCP hosts.",
+      ),
+    ...extra,
+  };
+}
+
+const workspaceSkillOutputSchema = z.object({
+  name: z.string(),
+  description: z.string().optional(),
+  path: z.string(),
+});
+
+const workspaceAgentsFileOutputSchema = z.object({
+  path: z.string(),
+  content: z.string().optional(),
+  characters: z.number().int().nonnegative().optional(),
+  truncated: z.boolean().optional(),
+});
+
+const workspaceLocalAgentOutputSchema = z.object({
+  name: z.string(),
+  description: z.string(),
+  provider: z.string(),
+  model: z.string().optional(),
+  thinking: z.string().optional(),
+  writeMode: z.enum(["read_only", "allowed"]).optional(),
+  providerAvailable: z.boolean().optional(),
+  providerUnavailableReason: z.string().optional(),
+});
+
+const workspaceLocalAgentProviderOutputSchema = z.object({
+  name: z.string(),
+  available: z.boolean(),
+  reason: z.string().optional(),
+});
+
+const workspaceAvailableAgentsFileOutputSchema = z.object({
+  path: z.string(),
+});
+
+const reviewFileOutputSchema = z.object({
+  path: z.string(),
+  previousPath: z.string().optional(),
+  type: z.enum(["change", "rename-pure", "rename-changed", "new", "deleted"]),
+  additions: z.number(),
+  removals: z.number(),
+});
+
+const reviewSummaryOutputSchema = z.object({
+  files: z.number(),
+  additions: z.number(),
+  removals: z.number(),
+});
+
+function sendJsonRpcError(
+  res: Response,
+  status: number,
+  code: number,
+  message: string,
+): void {
+  res.status(status).json({
+    jsonrpc: "2.0",
+    error: { code, message },
+    id: null,
+  });
+}
+
+function requestLogFields(req: Request, config: ServerConfig): Record<string, unknown> {
+  return {
+    ip: requestIp(req, config.logging.trustProxy),
+    host: req.header("host"),
+    userAgent: req.header("user-agent"),
+    origin: req.header("origin"),
+    referer: req.header("referer"),
+    contentLength: req.header("content-length"),
+  };
+}
+
+function logToolCall(config: ServerConfig, fields: ToolLogFields): void {
+  if (!config.logging.toolCalls) return;
+
+  const { command, ...safeFields } = fields;
+  logEvent(config.logging, fields.success ? "info" : "warn", "tool_call", {
+    ...safeFields,
+    commandPreview: config.logging.shellCommands && command ? commandPreview(command) : undefined,
+  });
+}
+
+function contentText(content: ToolContent[]): string {
+  return content
+    .filter(
+      (item): item is { type: "text"; text: string } => item.type === "text",
+    )
+    .map((item) => item.text)
+    .join("\n");
+}
+
+function toolErrorPreview(content: ToolContent[]): string | undefined {
+  const text = contentText(content).replace(/\s+/g, " ").trim();
+  if (!text) return undefined;
+  return text.length > 240 ? `${text.slice(0, 237)}...` : text;
+}
+
+function logFailedToolResponse(
+  config: ServerConfig,
+  fields: Omit<ToolLogFields, "success" | "durationMs" | "error">,
+  content: ToolContent[],
+  startedAt: number,
+  usageContext: { usageSessionId?: string; workspaceRoot?: string } = {},
+): ToolContent[] {
+  const durationMs = Math.round(performance.now() - startedAt);
+  const outputChars = textContentChars(content);
+  const usage = recordObservedToolUsage({
+    tool: fields.tool,
+    usageSessionId: usageContext.usageSessionId,
+    workspaceId: fields.workspaceId,
+    workspaceRoot: usageContext.workspaceRoot,
+    path: fields.path,
+    observedChars: outputChars,
+    savedChars: 0,
+    outputChars,
+    durationMs,
+    error: true,
+  });
+  logToolCall(config, {
+    ...fields,
+    success: false,
+    durationMs,
+    error: toolErrorPreview(content),
+  });
+  return appendUsageToContent(content, usage, config.usageContent);
+}
+
+function textBlock(text: string): ToolContent {
+  return { type: "text", text };
+}
+
+function compactInstructionContent(content: string, limit: number): {
+  content: string;
+  truncated: boolean;
+} {
+  if (content.length <= limit) return { content, truncated: false };
+
+  const marker = "\n\n[... instruction file truncated by GPT-5.6 compact mode; use read with this path for the full file ...]\n\n";
+  const available = Math.max(0, limit - marker.length);
+  const headLength = Math.ceil(available * 0.7);
+  const tailLength = available - headLength;
+
+  return {
+    content: `${content.slice(0, headLength)}${marker}${content.slice(content.length - tailLength)}`,
+    truncated: true,
+  };
+}
+
+function redactSensitiveShellCommand(command: string): string {
+  const typePrefix = "devspace-runtime computer browser type ";
+  if (command.startsWith(typePrefix)) {
+    return `${typePrefix}[REDACTED ${Math.max(0, command.length - typePrefix.length)} chars]`;
+  }
+  const openPrefix = "devspace-runtime computer browser open ";
+  if (command.startsWith(openPrefix)) {
+    const raw = command.slice(openPrefix.length).trim().replace(/^(["'])|(["'])$/gu, "");
+    try {
+      const url = new URL(raw);
+      url.search = "";
+      url.hash = "";
+      return `${openPrefix}${url.toString()}`;
+    } catch {
+      return `${openPrefix}[REDACTED URL]`;
+    }
+  }
+  return command;
+}
+
+function textSummary(content: ToolContent[]): {
+  lines: number;
+  characters: number;
+} {
+  const text = contentText(content);
+  return {
+    lines: text.length === 0 ? 0 : text.split("\n").length,
+    characters: text.length,
+  };
+}
+
+function contentLineCount(content: string): number {
+  if (content.length === 0) return 0;
+  return content.endsWith("\n")
+    ? content.slice(0, -1).split("\n").length
+    : content.split("\n").length;
+}
+
+function countDiffStats(diff: string | undefined): DiffStats {
+  if (!diff) return { additions: 0, removals: 0 };
+
+  let additions = 0;
+  let removals = 0;
+
+  for (const line of diff.split("\n")) {
+    if (line.startsWith("+") && !line.startsWith("+++")) additions++;
+    if (line.startsWith("-") && !line.startsWith("---")) removals++;
+  }
+
+  return { additions, removals };
+}
+
+function newFilePatch(path: string, content: string): string {
+  const lines =
+    content.length === 0
+      ? []
+      : content.endsWith("\n")
+        ? content.slice(0, -1).split("\n")
+        : content.split("\n");
+  const hunkLength = lines.length;
+  const hunkRange = hunkLength === 0 ? "+0,0" : `+1,${hunkLength}`;
+  const body = lines.map((line) => `+${line}`).join("\n");
+
+  return [
+    `diff --git a/${path} b/${path}`,
+    "new file mode 100644",
+    "index 0000000..0000000",
+    "--- /dev/null",
+    `+++ b/${path}`,
+    `@@ -0,0 ${hunkRange} @@`,
+    body,
+  ]
+    .filter((line) => line.length > 0)
+    .join("\n");
+}
+
+function assetBaseUrl(config: ServerConfig): string {
+  return `${config.publicBaseUrl.replace(/\/+$/, "")}/mcp-app-assets`;
+}
+
+function uiManifestUrl(): URL {
+  return new URL("../dist/ui/.vite/manifest.json", import.meta.url);
+}
+
+function readWorkspaceAppManifest(): WorkspaceAppManifest {
+  return JSON.parse(readFileSync(uiManifestUrl(), "utf8")) as WorkspaceAppManifest;
+}
+
+function getWorkspaceAppManifestEntry(): WorkspaceAppManifestEntry {
+  const manifest = readWorkspaceAppManifest();
+  const entry = manifest[WORKSPACE_APP_MANIFEST_ENTRY];
+
+  if (!entry?.file) {
+    throw new Error(`Missing ${WORKSPACE_APP_MANIFEST_ENTRY} in UI manifest.`);
+  }
+
+  return entry;
+}
+
+function assetUrl(baseUrl: string, assetPath: string): string {
+  return `${baseUrl}/${assetPath.replace(/^\/+/, "")}`;
+}
+
+function workspaceAppFallbackHtml(): string {
+  return `<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>GPT-Agent</title>
+    <style>
+      html,body{margin:0;padding:0;background:transparent;color:inherit;font:13px/1.45 system-ui,sans-serif}
+      .fallback{padding:10px 12px;border:1px solid rgba(127,127,127,.25);border-radius:10px;opacity:.75}
+    </style>
+  </head>
+  <body><div class="fallback">UI更新中です。ツール処理自体は完了しています。</div></body>
+</html>`;
+}
+
+function workspaceAppHtml(config: ServerConfig): string {
+  const baseUrl = assetBaseUrl(config);
+  const entry = getWorkspaceAppManifestEntry();
+  const stylesheets = (entry.css ?? [])
+    .map(
+      (stylesheet) =>
+        `    <link rel="stylesheet" crossorigin href="${assetUrl(baseUrl, stylesheet)}" />`,
+    )
+    .join("\n");
+
+  return `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>DevSpace Workspace</title>
+    <script type="module" crossorigin src="${assetUrl(baseUrl, entry.file)}"></script>
+${stylesheets}
+  </head>
+  <body>
+    <main id="app" class="shell">
+      <section class="empty">Waiting for a tool result.</section>
+    </main>
+  </body>
+</html>`;
+}
+
+function appCsp(config: ServerConfig): {
+  resourceDomains: string[];
+  connectDomains: string[];
+} {
+  const publicBaseUrl = config.publicBaseUrl.replace(/\/+$/, "");
+  return {
+    resourceDomains: [publicBaseUrl],
+    connectDomains: [publicBaseUrl],
+  };
+}
+
+function uiBuildDirectory(): string {
+  return fileURLToPath(new URL("../dist/ui", import.meta.url));
+}
+
+function setAssetHeaders(res: Response): void {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Range");
+  res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
+}
+
+async function assertWorkspaceAppAssets(): Promise<void> {
+  const entry = getWorkspaceAppManifestEntry();
+  const candidates = [entry.file, ...(entry.css ?? [])].map(
+    (assetPath) => new URL(`../dist/ui/${assetPath}`, import.meta.url),
+  );
+
+  for (const candidate of candidates) {
+    await access(candidate);
+  }
+}
+
+function processResult(snapshot: ProcessSnapshot): string {
+  const status = snapshot.running
+    ? `Process running with session ID ${snapshot.sessionId}.`
+    : snapshot.signal
+      ? `Process exited after signal ${snapshot.signal}.`
+      : `Process exited with code ${snapshot.exitCode ?? "unknown"}.`;
+  return snapshot.output ? `${snapshot.output.replace(/\n$/, "")}\n${status}` : status;
+}
+
+function processOutputSchema(): z.ZodRawShape {
+  return resultOutputSchema({
+    sessionId: z.number().optional(),
+    running: z.boolean(),
+    exitCode: z.number().int().optional(),
+    signal: z.string().optional(),
+    wallTimeMs: z.number().nonnegative(),
+    outputTruncated: z.boolean(),
+  });
+}
+
+function processToolResponse(
+  tool: "exec_command" | "write_stdin",
+  workspaceId: string,
+  snapshot: ProcessSnapshot,
+  summary: Record<string, unknown>,
+) {
+  const result = processResult(snapshot);
+  const content = [textBlock(result)];
+  const outputSummary = textSummary(snapshot.output ? [textBlock(snapshot.output)] : []);
+  return {
+    content,
+    _meta: {
+      tool,
+      card: {
+        workspaceId,
+        summary: { ...summary, ...outputSummary },
+        payload: { content },
+      },
+    },
+    structuredContent: {
+      result,
+      sessionId: snapshot.sessionId,
+      running: snapshot.running,
+      exitCode: snapshot.exitCode,
+      signal: snapshot.signal,
+      wallTimeMs: snapshot.wallTimeMs,
+      outputTruncated: snapshot.outputTruncated,
+    },
+  };
+}
+
+function registerCodexProcessTools(
+  server: McpServer,
+  config: ServerConfig,
+  workspaces: WorkspaceRegistry,
+  processSessions: ProcessSessionManager,
+): void {
+  registerAppTool(
+    server,
+    "exec_command",
+    {
+      title: "Execute command",
+      description:
+        "Run a command inside an open workspace. Returns its result when it exits during the yield window, otherwise returns a sessionId for write_stdin. Use this for file inspection, tests, builds, package scripts, and long-running processes. Call open_workspace first and pass workspaceId.",
+      inputSchema: {
+        workspaceId: z.string().describe("Workspace identifier returned by open_workspace."),
+        cmd: z.string().min(1).describe("Shell command to execute."),
+        tty: z
+          .boolean()
+          .optional()
+          .describe("Allocate a pseudo-terminal for interactive commands. Defaults to false."),
+        columns: z.number().int().min(1).max(1_000).optional().describe("Initial PTY width. Defaults to 80."),
+        rows: z.number().int().min(1).max(1_000).optional().describe("Initial PTY height. Defaults to 24."),
+        workingDirectory: z
+          .string()
+          .optional()
+          .describe("Working directory relative to the workspace root. Defaults to the workspace root."),
+        yieldTimeMs: z
+          .number()
+          .int()
+          .min(0)
+          .max(30_000)
+          .optional()
+          .describe("Milliseconds to wait before returning a running session. Defaults to 10000."),
+        maxOutputTokens: z
+          .number()
+          .int()
+          .positive()
+          .max(100_000)
+          .optional()
+          .describe("Approximate output token budget. Defaults to 10000."),
+      },
+      outputSchema: processOutputSchema(),
+      ...toolWidgetDescriptorMeta(config, "shell"),
+      annotations: SHELL_TOOL_ANNOTATIONS,
+    },
+    async ({ workspaceId, cmd, tty, columns, rows, workingDirectory, yieldTimeMs, maxOutputTokens }) => {
+      const startedAt = performance.now();
+      const workspace = workspaces.getWorkspace(workspaceId);
+      const cwd = workspaces.resolveWorkingDirectory(workspace, workingDirectory);
+      const snapshot = await processSessions.start({
+        workspaceId,
+        command: cmd,
+        cwd,
+        workspaceRoot: workspace.root,
+        tty,
+        columns,
+        rows,
+        yieldTimeMs,
+        maxOutputTokens,
+      });
+
+      logToolCall(config, {
+        tool: "exec_command",
+        workspaceId,
+        workingDirectory: workingDirectory ?? ".",
+        command: cmd,
+        commandLength: cmd.length,
+        success: true,
+        durationMs: Math.round(performance.now() - startedAt),
+      });
+
+      return processToolResponse("exec_command", workspaceId, snapshot, {
+        command: cmd,
+        workingDirectory: workingDirectory ?? ".",
+        running: snapshot.running,
+        exitCode: snapshot.exitCode,
+        wallTimeMs: snapshot.wallTimeMs,
+      });
+    },
+  );
+
+  registerAppTool(
+    server,
+    "write_stdin",
+    {
+      title: "Write to process",
+      description:
+        "Poll or write characters to a process returned by exec_command. Omit chars or pass an empty string to poll. Pass \\u0003 to send Ctrl-C.",
+      inputSchema: {
+        workspaceId: z.string().describe("Workspace identifier used to start the process."),
+        sessionId: z.number().describe("Process session identifier returned by exec_command."),
+        chars: z.string().optional().describe("Characters to write. Omit or pass an empty string to poll."),
+        columns: z.number().int().min(1).max(1_000).optional().describe("Resize a PTY to this width."),
+        rows: z.number().int().min(1).max(1_000).optional().describe("Resize a PTY to this height."),
+        yieldTimeMs: z
+          .number()
+          .int()
+          .min(0)
+          .max(30_000)
+          .optional()
+          .describe("Milliseconds to wait for process output or completion. Defaults to 10000."),
+        maxOutputTokens: z
+          .number()
+          .int()
+          .positive()
+          .max(100_000)
+          .optional()
+          .describe("Approximate output token budget. Defaults to 10000."),
+      },
+      outputSchema: processOutputSchema(),
+      ...toolWidgetDescriptorMeta(config, "shell"),
+      annotations: SHELL_TOOL_ANNOTATIONS,
+    },
+    async ({ workspaceId, sessionId, chars, columns, rows, yieldTimeMs, maxOutputTokens }) => {
+      const startedAt = performance.now();
+      workspaces.getWorkspace(workspaceId);
+      const snapshot = await processSessions.write({
+        workspaceId,
+        sessionId,
+        chars,
+        columns,
+        rows,
+        yieldTimeMs,
+        maxOutputTokens,
+      });
+
+      logToolCall(config, {
+        tool: "write_stdin",
+        workspaceId,
+        success: true,
+        durationMs: Math.round(performance.now() - startedAt),
+      });
+
+      return processToolResponse("write_stdin", workspaceId, snapshot, {
+        sessionId,
+        charactersWritten: chars?.length ?? 0,
+        running: snapshot.running,
+        exitCode: snapshot.exitCode,
+        wallTimeMs: snapshot.wallTimeMs,
+      });
+    },
+  );
+}
+
+function createMcpServer(
+  config: ServerConfig,
+  workspaces: WorkspaceRegistry,
+  reviewCheckpoints: ReturnType<typeof createReviewCheckpointManager>,
+  processSessions: ProcessSessionManager,
+  localAgentProviders: LocalAgentProviderAvailability[],
+  todayStore: NaoBrainTodayStore,
+  quizStore: NaoBrainQuizStore,
+  outputLearningStore: OutputLearningStore,
+): McpServer {
+  const server = new McpServer(
+    {
+      name: "devspace",
+      title: "GPT-Agent",
+      version: "2.0.0",
+      description:
+        "Secure local coding workspace for MCP clients. Provides workspace-scoped file, search, edit, write, and shell tools.",
+    },
+    {
+      instructions: serverInstructions(config),
+    },
+  );
+
+  server.registerTool(
+    "naobrain_today_append",
+    {
+      title: "Append NaoBrain Today entry",
+      description: "Record a journal, today movement, progress, result, blockage, or plan in NaoBrain Today. Use when the user reports what they did today or asks to save the current movement.",
+      inputSchema: {
+        title: z.string().min(1).max(140),
+        body: z.string().min(1).max(8_000),
+        status: z.enum(["done", "doing", "blocked", "planned", "note"]).optional(),
+        kind: z.enum(["progress", "result", "plan", "journal", "note"]).optional(),
+        project: z.string().max(120).optional(),
+        projectId: z.string().max(80).optional(),
+        tags: z.array(z.string().max(40)).max(20).optional(),
+        occurredAt: z.string().optional(),
+        startAt: z.string().optional(),
+        endAt: z.string().optional(),
+        startApproximate: z.boolean().optional(),
+        endApproximate: z.boolean().optional(),
+        runAi: z.boolean().optional(),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
+    },
+    async (input) => {
+      const result = await todayStore.append({ ...input, source: "gae" } as TodayEntryInput);
+      return {
+        content: [textBlock(`NaoBrain Todayへ記録しました: ${result.entry.title}`)],
+        structuredContent: { ...result },
+      };
+    },
+  );
+
+  server.registerTool(
+    "naobrain_today_update",
+    {
+      title: "Update NaoBrain Today entry",
+      description: "Create a new revision of an existing Today entry while preserving every previous version. Use when the user corrects a journal, project, status, date, time range, tags, or result.",
+      inputSchema: {
+        id: z.string().min(1).max(80),
+        title: z.string().min(1).max(140).optional(),
+        body: z.string().min(1).max(8_000).optional(),
+        status: z.enum(["done", "doing", "blocked", "planned", "note"]).optional(),
+        kind: z.enum(["progress", "result", "plan", "journal", "note"]).optional(),
+        project: z.string().max(120).optional(),
+        projectId: z.string().max(80).optional(),
+        tags: z.array(z.string().max(40)).max(20).optional(),
+        occurredAt: z.string().optional(),
+        startAt: z.string().optional(),
+        endAt: z.string().optional(),
+        startApproximate: z.boolean().optional(),
+        endApproximate: z.boolean().optional(),
+        revisionNote: z.string().max(240).optional(),
+        runAi: z.boolean().optional(),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
+    },
+    async (input) => {
+      const result = await todayStore.update({ ...input, source: "gae" } as TodayEntryUpdateInput);
+      return {
+        content: [textBlock(`NaoBrain Todayをv${result.entry.version}へ修正し、旧版を履歴へ保存しました: ${result.entry.title}`)],
+        structuredContent: { ...result },
+      };
+    },
+  );
+
+  server.registerTool(
+    "naobrain_today_history",
+    {
+      title: "Read NaoBrain Today version history",
+      description: "Read every preserved version of a Today entry before correcting it or when the user asks what changed.",
+      inputSchema: { id: z.string().min(1).max(80) },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async ({ id }) => {
+      const history = await todayStore.history(id);
+      return {
+        content: [textBlock(history.length
+          ? history.map((entry) => `v${entry.version} · ${entry.updatedAt} · ${entry.title}${entry.revisionNote ? `\n修正メモ: ${entry.revisionNote}` : ""}`).join("\n\n")
+          : "指定されたToday記録の履歴はありません。")],
+        structuredContent: { id, history },
+      };
+    },
+  );
+
+  server.registerTool(
+    "naobrain_today_projects",
+    {
+      title: "Manage NaoBrain Today projects",
+      description: "List, create, rename, or remove Today Project dropdown items. Removing a Project never deletes historical journal entries.",
+      inputSchema: {
+        action: z.enum(["list", "create", "update", "delete"]).optional(),
+        id: z.string().max(80).optional(),
+        name: z.string().max(120).optional(),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
+    },
+    async ({ action = "list", id, name }) => {
+      if (action === "create") await todayStore.createProject(name || "");
+      if (action === "update") await todayStore.updateProject(id || "", name || "");
+      if (action === "delete") await todayStore.deleteProject(id || "");
+      const projects = await todayStore.listProjects();
+      return {
+        content: [textBlock(projects.length ? projects.map((project) => `- ${project.name} (${project.id})`).join("\n") : "Projectはまだありません。")],
+        structuredContent: { action, projects },
+      };
+    },
+  );
+
+  server.registerTool(
+    "naobrain_today_digest",
+    {
+      title: "Read NaoBrain Today digest",
+      description: "Read a NaoBrain Today daily digest. Use when the user asks to sync progress, review today, wall-bounce, or decide tomorrow's actions.",
+      inputSchema: { date: z.string().optional() },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async ({ date }) => {
+      const digest = await todayStore.digest(date);
+      return { content: [textBlock(digest)], structuredContent: { digest, date: date || null } };
+    },
+  );
+
+  server.registerTool(
+    "naobrain_today_analyze",
+    {
+      title: "Analyze NaoBrain Today records",
+      description: "Analyze accumulated Today records by day, project, tag, kind, status, or a date range using Gemini. Use for progress reviews, pattern analysis, wall-bouncing, and deciding next actions.",
+      inputSchema: {
+        scope: z.enum(["all", "day", "project", "tag", "kind", "status"]).optional(),
+        value: z.string().max(140).optional(),
+        dateFrom: z.string().optional(),
+        dateTo: z.string().optional(),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
+    },
+    async (input) => {
+      const analysis = await todayStore.analyzeScope(input as TodayAnalysisInput);
+      return {
+        content: [textBlock([
+          "# NaoBrain Today Analysis",
+          `- Scope: ${analysis.scope}${analysis.value ? ` / ${analysis.value}` : ""}`,
+          `- Period: ${analysis.dateFrom} — ${analysis.dateTo}`,
+          `- Entries: ${analysis.entryCount}`,
+          "",
+          analysis.summary,
+          "",
+          ...analysis.nextActions.map((action) => `- ${action}`),
+        ].join("\n"))],
+        structuredContent: { analysis },
+      };
+    },
+  );
+
+  server.registerTool(
+    "naobrain_today_sync",
+    {
+      title: "Sync NaoBrain Today",
+      description: "Rebuild and sync a NaoBrain Today day to Google Drive.",
+      inputSchema: { date: z.string().optional() },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    async ({ date }) => {
+      const result = await todayStore.sync(date);
+      return {
+        content: [textBlock(result.synced ? "NaoBrain Todayを同期しました。" : `同期結果: ${result.error || "未設定"}`)],
+        structuredContent: { ...result },
+      };
+    },
+  );
+
+  server.registerTool(
+    "naobrain_quiz_digest",
+    {
+      title: "Read NaoBrain Quiz digest",
+      description: "Read quiz progress, wrong answers, due reviews, and the recommended memory-retention action.",
+      inputSchema: {},
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async () => {
+      const digest = await quizStore.digest();
+      return { content: [textBlock(digest)], structuredContent: { digest } };
+    },
+  );
+
+  server.registerTool(
+    "naobrain_quiz_generate",
+    {
+      title: "Generate NaoBrain Quiz questions",
+      description: "Generate new questions from NaoBrain knowledge, journals, Today logs, and weak-answer history using Gemini.",
+      inputSchema: { reason: z.string().max(240).optional(), force: z.boolean().optional() },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
+    },
+    async ({ reason, force }) => {
+      const result = await quizStore.queueGeneration(reason || "GAE requested question refresh", force === true);
+      return {
+        content: [textBlock(result.queued
+          ? "NaoBrain Quizの問題生成をバックグラウンドで開始しました。"
+          : result.generated
+            ? `NaoBrain Quizへ${result.added || 0}問追加しました。`
+            : `問題生成は実行されませんでした: ${result.error || result.reason}`)],
+        structuredContent: { ...result },
+      };
+    },
+  );
+
+  server.registerTool(
+    "naobrain_quiz_sync",
+    {
+      title: "Sync NaoBrain Quiz to Drive",
+      description: "Synchronize the question bank, answer history, session state, and spaced-repetition statistics to Google Drive.",
+      inputSchema: {},
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    async () => {
+      const result = await quizStore.sync();
+      return {
+        content: [textBlock(result.synced ? `NaoBrain QuizをGoogle Driveへ同期しました。${result.destination || ""}` : result.configured ? `Google Drive同期に失敗しました: ${result.error || "unknown error"}` : "Google Drive同期先が未設定です。")],
+        structuredContent: { ...result },
+      };
+    },
+  );
+
+  registerAppResource(
+    server,
+    "DevSpace Diff Card",
+    WORKSPACE_APP_URI,
+    {
+      description: "Interactive card for viewing DevSpace file diffs.",
+      _meta: {
+        ui: {
+          csp: appCsp(config),
+        },
+      },
+    },
+    async () => {
+      let template: string;
+      try {
+        await assertWorkspaceAppAssets();
+        template = workspaceAppHtml(config);
+      } catch {
+        template = workspaceAppFallbackHtml();
+      }
+      return {
+        contents: [
+          {
+            uri: WORKSPACE_APP_URI,
+            mimeType: RESOURCE_MIME_TYPE,
+            text: template,
+            _meta: {
+              ui: {
+                csp: appCsp(config),
+              },
+            },
+          },
+        ],
+      };
+    },
+  );
+
+  server.registerTool(
+    toolNames.beginTask,
+    {
+      title: "Begin canonical task",
+      description:
+        "Begin every GAG/GAE task. Captures the current user request, pairs it with the previous completed output in the same Chat, refreshes learned guidance and next-intent predictions, and returns canonical visible progress Markdown.",
+      inputSchema: {
+        chatLabel: z.string().min(1).max(160).describe("Short human-readable task label."),
+        userRequest: z.string().min(1).max(8_000).describe("The current user's request. Sensitive values are redacted before persistence."),
+        continuityKey: z.string().min(1).max(240).optional().describe("Reuse the continuityKey returned by the previous finalize_task in the same Chat when available."),
+        workspaceId: z.string().optional().describe("Workspace identifier when one is already open."),
+        taskCategory: z.string().min(1).max(80).optional().describe("Stable category reused for progress calibration and output learning."),
+        currentTask: z.string().min(1).max(240).optional().describe("Current user-relevant action."),
+        estimateMinutes: z.number().min(1).max(1440).optional().describe("Initial evidence-grounded completion estimate."),
+        programProgress: z.number().min(0).max(100).optional().describe("Broader all-phase completion percentage."),
+      },
+      outputSchema: {
+        result: z.string(),
+        id: z.string(),
+        conversationKey: z.string(),
+        continuityKey: z.string(),
+        pairedReaction: z.string().optional(),
+        predictions: z.array(z.object({
+          intent: z.string(),
+          label: z.string(),
+          confidence: z.number(),
+        })),
+        learnedRules: z.array(z.string()),
+        analysis: z.unknown(),
+        syncStatus: z.string(),
+        syncError: z.string().optional(),
+      },
+      ...toolWidgetDescriptorMeta(config, "progress"),
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async (input, extra) => {
+      const workspace = input.workspaceId
+        ? workspaces.getWorkspace(input.workspaceId)
+        : undefined;
+      const conversation = chatConversationContext(
+        extra._meta as Record<string, unknown> | undefined,
+      );
+      const learning = outputLearningStore.begin({
+        conversationId: conversation.id,
+        conversationUrl: conversation.url,
+        sessionId: extra.sessionId,
+        continuityKey: input.continuityKey,
+        userRequest: input.userRequest,
+        taskCategory: input.taskCategory,
+      });
+      const record = updateChatProgress({
+        sessionId: extra.sessionId,
+        conversationId: conversation.id,
+        conversationUrl: conversation.url,
+        chatLabel: input.chatLabel,
+        workspaceId: input.workspaceId,
+        workspaceRoot: workspace?.root,
+        taskCategory: input.taskCategory,
+        overallProgress: 0,
+        programProgress: input.programProgress,
+        currentProgress: 0,
+        currentTask: input.currentTask || "依頼内容と既存状態を確認",
+        completed: learning.pairedLoop
+          ? `前回出力への次入力を${learning.pairedLoop.reaction}として学習記録`
+          : "依頼内容を受領",
+        next: "必要な調査・実装・検証へ進む",
+        risk: learning.syncError ? `学習同期: ${learning.syncError}` : undefined,
+        status: "running",
+        estimateMinutes: input.estimateMinutes,
+      });
+      const result = formatChatProgressResult(record);
+      return {
+        content: [textBlock(result)],
+        _meta: {
+          tool: toolNames.beginTask,
+          card: {
+            status: "running",
+            summary: {
+              label: input.chatLabel,
+              progress: 0,
+              pairedReaction: learning.pairedLoop?.reaction,
+              predictions: learning.predictions.length,
+            },
+          },
+        },
+        structuredContent: {
+          result,
+          id: record.id,
+          conversationKey: learning.conversationKey,
+          continuityKey: learning.conversationKey,
+          ...(learning.pairedLoop ? { pairedReaction: learning.pairedLoop.reaction } : {}),
+          predictions: learning.predictions,
+          learnedRules: learning.rules,
+          analysis: learning.analysis,
+          syncStatus: learning.syncStatus,
+          ...(learning.syncError ? { syncError: learning.syncError } : {}),
+        },
+      };
+    },
+  );
+
+  server.registerTool(
+    toolNames.finalizeTask,
+    {
+      title: "Finalize canonical task",
+      description:
+        "The only successful completion path for a GAG/GAE task. Computes an evidence-based quality score, stores a bounded summary for pairing with the user's next message, predicts likely next intents, and returns the canonical six-heading final response.",
+      inputSchema: {
+        chatLabel: z.string().min(1).max(160),
+        workspaceId: z.string().optional(),
+        continuityKey: z.string().min(1).max(240).optional().describe("Continuity key returned by begin_task when host conversation metadata is unavailable."),
+        taskCategory: z.string().min(1).max(80).optional(),
+        finalResult: z.string().min(1).max(4_000),
+        changes: z.string().max(4_000).optional(),
+        verification: z.string().max(4_000).optional(),
+        remaining: z.string().max(4_000).optional(),
+        outputSummary: z.string().min(1).max(2_000).describe("Bounded factual overview of the completed output. Do not include secrets."),
+        qualityEvidence: z.array(z.string().min(1).max(300)).max(10).optional(),
+        unresolvedErrors: z.number().int().min(0).max(100).optional().describe("Errors still unresolved at finalization. Historical errors that were fixed must not be counted."),
+        qualityTarget: z.number().min(0).max(100).optional().describe("Use 95 for file-changing or multi-step implementation work; 85 for simple read-only work."),
+        failed: z.boolean().optional(),
+      },
+      outputSchema: {
+        result: z.string(),
+        id: z.string(),
+        isFinal: z.literal(true),
+        qualityScore: z.number(),
+        qualityTarget: z.number(),
+        qualityPassed: z.boolean(),
+        continuityKey: z.string(),
+        predictions: z.array(z.object({
+          intent: z.string(),
+          label: z.string(),
+          confidence: z.number(),
+        })),
+        learning: z.unknown(),
+      },
+      ...toolWidgetDescriptorMeta(config, "progress"),
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async (input, extra) => {
+      const workspace = input.workspaceId
+        ? workspaces.getWorkspace(input.workspaceId)
+        : undefined;
+      const conversation = chatConversationContext(
+        extra._meta as Record<string, unknown> | undefined,
+      );
+      const active = listChatProgress()
+        .filter((record) => record.status === "running" || record.status === "paused")
+        .filter((record) => conversation.id
+          ? record.conversationId === conversation.id
+          : input.workspaceId
+            ? record.workspaceId === input.workspaceId
+            : record.sessionId === extra.sessionId)
+        .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0];
+      const quality = scoreTaskFinalization({
+        finalResult: input.finalResult,
+        changes: input.changes,
+        verification: input.verification,
+        remaining: input.remaining,
+        outputSummary: input.outputSummary,
+        predictionCount: 3,
+        taskErrors: input.unresolvedErrors ?? 0,
+        evidence: input.qualityEvidence,
+      });
+      const qualityTarget = Math.round(input.qualityTarget ?? 85);
+      const qualityPassed = quality.score >= qualityTarget;
+      const failed = input.failed === true || !qualityPassed;
+      const learning = outputLearningStore.finalize({
+        conversationId: conversation.id,
+        conversationUrl: conversation.url,
+        sessionId: extra.sessionId,
+        continuityKey: input.continuityKey,
+        taskCategory: input.taskCategory,
+        outputSummary: input.outputSummary,
+        qualityScore: quality.score,
+      });
+      const predictionLines = learning.predictions.length
+        ? learning.predictions.map((prediction, index) => `${index + 1}. ${prediction.label}（確度 ${Math.round(prediction.confidence * 100)}%）`).join("\n")
+        : "なし";
+      const qualityRemaining = qualityPassed
+        ? input.remaining || "なし"
+        : [
+            input.remaining,
+            `品質ゲート ${quality.score}/${qualityTarget}。不足: ${quality.missing.join(", ") || "不明"}`,
+          ].filter(Boolean).join("\n");
+      const record = updateChatProgress({
+        sessionId: extra.sessionId,
+        conversationId: conversation.id,
+        conversationUrl: conversation.url,
+        chatLabel: input.chatLabel,
+        workspaceId: input.workspaceId,
+        workspaceRoot: workspace?.root,
+        taskCategory: input.taskCategory,
+        overallProgress: 100,
+        currentProgress: 100,
+        currentTask: failed ? "品質ゲート未達または失敗" : "完了",
+        status: failed ? "failed" : "completed",
+        finalResult: input.finalResult,
+        changes: input.changes || "なし",
+        verification: input.verification || (failed ? "完了条件を満たしていません。" : "なし"),
+        remaining: qualityRemaining,
+        nextLikely: predictionLines,
+        qualityScore: quality.score,
+        learningSummary: `保存済み / ${learning.analysis.sampleCount}サンプル / 同期 ${learning.syncStatus}`,
+        risk: learning.syncError,
+      });
+      const result = formatChatProgressResult(record);
+      return {
+        content: [textBlock(result)],
+        _meta: {
+          tool: toolNames.finalizeTask,
+          card: {
+            status: failed ? "failed" : "completed",
+            summary: {
+              label: input.chatLabel,
+              progress: 100,
+              qualityScore: quality.score,
+              qualityTarget,
+              qualityPassed,
+            },
+          },
+        },
+        structuredContent: {
+          result,
+          id: record.id,
+          isFinal: true as const,
+          qualityScore: quality.score,
+          qualityTarget,
+          qualityPassed,
+          continuityKey: learning.pending.conversationKey,
+          predictions: learning.predictions,
+          learning: {
+            pendingId: learning.pending.id,
+            sampleCount: learning.analysis.sampleCount,
+            syncStatus: learning.syncStatus,
+            syncError: learning.syncError,
+            observedTaskErrors: active?.taskErrors ?? 0,
+            unresolvedErrors: input.unresolvedErrors ?? 0,
+            checks: quality.checks,
+            missing: quality.missing,
+          },
+        },
+      };
+    },
+  );
+
+  server.registerTool(
+    toolNames.outputCoreStatus,
+    {
+      title: "Read output core status",
+      description: "Inspect the canonical output protocol, learning sample counts, prediction accuracy, and cross-runtime sync state.",
+      inputSchema: {},
+      outputSchema: {
+        result: z.string(),
+        status: z.unknown(),
+      },
+      ...toolWidgetDescriptorMeta(config, "progress"),
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async () => {
+      const status = outputLearningStore.status();
+      const result = [
+        "# GAG / GAE Output Core",
+        "",
+        `- Protocol: ${status.protocolVersion}`,
+        `- Runtime: ${status.runtimeLabel} / ${status.runtimeId}`,
+        `- Learning loops: ${status.loops}`,
+        `- Pending outputs: ${status.pending}`,
+        `- Prediction top-1: ${Math.round(status.analysis.predictionTop1Accuracy * 100)}%`,
+        `- Prediction top-3: ${Math.round(status.analysis.predictionTop3Accuracy * 100)}%`,
+        `- Sync: ${status.sync.status}${status.sync.error ? ` / ${status.sync.error}` : ""}`,
+        "- Final headings: 完了結果 > 変更 > 検証 > 残り > 次に起こりそうなこと > 実行情報",
+      ].join("\n");
+      return {
+        content: [textBlock(result)],
+        _meta: {
+          tool: toolNames.outputCoreStatus,
+          card: {
+            status: status.sync.status,
+            summary: {
+              label: `Protocol ${status.protocolVersion}`,
+              loops: status.loops,
+              pending: status.pending,
+              top1: status.analysis.predictionTop1Accuracy,
+              top3: status.analysis.predictionTop3Accuracy,
+            },
+          },
+        },
+        structuredContent: { result, status },
+      };
+    },
+  );
+
+  server.registerTool(
+    toolNames.reportProgress,
+    {
+      title: "Report progress",
+      description:
+        "Update an already-started GAG/GAE task at meaningful milestones, blockers, or forecast revisions. Never use this tool for completion; finalize_task is the only completion path.",
+      inputSchema: {
+        chatLabel: z.string().min(1).max(160).describe("Short human-readable chat or task label."),
+        workspaceId: z.string().optional().describe("Workspace identifier when one is already open."),
+        taskCategory: z.string().min(1).max(80).optional().describe("Stable category reused across similar tasks for ETA calibration."),
+        overallProgress: z.number().min(0).max(100).describe("Current task progress percentage."),
+        programProgress: z.number().min(0).max(100).optional().describe("Broader all-phase or program completion percentage."),
+        currentProgress: z.number().min(0).max(100).optional().describe("Current subtask progress percentage."),
+        currentTask: z.string().min(1).max(240).describe("Current user-relevant task."),
+        completed: z.string().max(500).optional().describe("Short summary of what is complete."),
+        next: z.string().max(500).optional().describe("Short summary of the next action."),
+        risk: z.string().max(500).optional().describe("Current blocker or risk, if any."),
+        status: z.enum(["running", "paused"]).optional(),
+        estimateMinutes: z.number().min(1).max(1440).optional().describe("Initial completion estimate in minutes. Prefer begin_task for the initial estimate."),
+        remainingEstimateMinutes: z.number().min(1).max(1440).optional().describe("Revised remaining estimate in minutes."),
+      },
+      outputSchema: {
+        result: z.string(),
+        id: z.string(),
+        overallProgress: z.number(),
+        programProgress: z.number().optional(),
+        currentProgress: z.number(),
+        elapsedSeconds: z.number(),
+        remainingSeconds: z.number().optional(),
+        taskInputTokens: z.number(),
+        taskOutputTokens: z.number(),
+        sessionInputTokens: z.number(),
+        sessionOutputTokens: z.number(),
+        taskToolDurationMs: z.number(),
+        sessionToolDurationMs: z.number(),
+        taskCalls: z.number(),
+        sessionCalls: z.number(),
+        taskErrors: z.number(),
+        sessionErrors: z.number(),
+        estimatedJpy: z.number(),
+        estimatedJpyMax: z.number(),
+        isFinal: z.boolean(),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async (input, extra) => {
+      const workspace = input.workspaceId
+        ? workspaces.getWorkspace(input.workspaceId)
+        : undefined;
+      const conversation = chatConversationContext(
+        extra._meta as Record<string, unknown> | undefined,
+      );
+      const record = updateChatProgress({
+        sessionId: extra.sessionId,
+        conversationId: conversation.id,
+        conversationUrl: conversation.url,
+        chatLabel: input.chatLabel,
+        workspaceId: input.workspaceId,
+        workspaceRoot: workspace?.root,
+        taskCategory: input.taskCategory,
+        overallProgress: input.overallProgress,
+        programProgress: input.programProgress,
+        currentProgress: input.currentProgress,
+        currentTask: input.currentTask,
+        completed: input.completed,
+        next: input.next,
+        risk: input.risk,
+        status: input.status,
+        estimateMinutes: input.estimateMinutes,
+        remainingEstimateMinutes: input.remainingEstimateMinutes,
+      });
+      const result = formatChatProgressResult(record);
+      return {
+        content: [textBlock(result)],
+        _meta: {
+          tool: toolNames.reportProgress,
+          card: {
+            status: record.status,
+            summary: {
+              label: input.chatLabel,
+              progress: record.overallProgress,
+              currentTask: record.currentTask,
+              remainingSeconds: record.remainingSeconds,
+            },
+          },
+        },
+        structuredContent: {
+          result,
+          id: record.id,
+          overallProgress: record.overallProgress,
+          programProgress: record.programProgress,
+          currentProgress: record.currentProgress,
+          elapsedSeconds: record.elapsedSeconds,
+          remainingSeconds: record.remainingSeconds,
+          taskInputTokens: record.taskInputTokens,
+          taskOutputTokens: record.taskOutputTokens,
+          sessionInputTokens: record.sessionInputTokens,
+          sessionOutputTokens: record.sessionOutputTokens,
+          taskToolDurationMs: record.taskToolDurationMs,
+          sessionToolDurationMs: record.sessionToolDurationMs,
+          taskCalls: record.taskCalls,
+          sessionCalls: record.sessionCalls,
+          taskErrors: record.taskErrors,
+          sessionErrors: record.sessionErrors,
+          estimatedJpy: record.sessionEstimatedJpy,
+          estimatedJpyMax: record.sessionEstimatedJpyMax ?? record.sessionEstimatedJpy,
+          isFinal: false,
+        },
+      };
+    },
+  );
+
+  registerAppTool(
+    server,
+    "ec2_status",
+    {
+      title: "EC2 status and AWS credits",
+      description:
+        "Read the current Uniplanck EC2, GAE, Minecraft, EC2 schedule queue, AWS credit balance, and estimated remaining operating days. This is IAM-authenticated and does not require an open workspace. Use this before and after EC2 control operations.",
+      inputSchema: {},
+      outputSchema: {
+        result: z.string(),
+        data: z.unknown(),
+      },
+      _meta: {},
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    async () => {
+      const startedAt = performance.now();
+      try {
+        const data = await invokeEc2Control({ action: "status" });
+        const result = formatEc2ControlSummary(data);
+        logToolCall(config, {
+          tool: "ec2_status",
+          success: true,
+          durationMs: Math.round(performance.now() - startedAt),
+        });
+        return {
+          content: [textBlock(result)],
+          structuredContent: { result, data },
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        logToolCall(config, {
+          tool: "ec2_status",
+          success: false,
+          durationMs: Math.round(performance.now() - startedAt),
+          error: message,
+        });
+        throw error;
+      }
+    },
+  );
+
+  registerAppTool(
+    server,
+    "ec2_control",
+    {
+      title: "Control and schedule EC2",
+      description:
+        "Control the fixed Uniplanck EC2 through an IAM-authenticated Lambda. Supports immediate start/stop, one-time or daily start/stop schedules, schedule cancellation, and billing refresh. Start/stop and schedule mutations are real production operations: call only when the user explicitly requests them. Every successful response automatically includes EC2/GAE/Minecraft state, AWS credits, estimated operating days, and the current schedule queue.",
+      inputSchema: {
+        action: z.enum([
+          "ec2_start",
+          "ec2_stop",
+          "schedule_create",
+          "schedule_delete",
+          "billing_refresh",
+        ]),
+        scheduleAction: z.enum(["ec2_start", "ec2_stop"]).optional(),
+        scheduleType: z.enum(["once", "daily"]).optional(),
+        runAt: z
+          .string()
+          .optional()
+          .describe("One-time execution in Asia/Tokyo, formatted YYYY-MM-DDTHH:mm."),
+        dailyTime: z
+          .string()
+          .optional()
+          .describe("Daily execution time in Asia/Tokyo, formatted HH:mm."),
+        scheduleName: z
+          .string()
+          .optional()
+          .describe("Existing schedule name returned by ec2_status."),
+      },
+      outputSchema: {
+        result: z.string(),
+        data: z.unknown(),
+      },
+      _meta: {},
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
+    },
+    async ({ action, scheduleAction, scheduleType, runAt, dailyTime, scheduleName }) => {
+      const startedAt = performance.now();
+      try {
+        const data = await invokeEc2Control({
+          action,
+          scheduleAction,
+          scheduleType,
+          runAt,
+          dailyTime,
+          scheduleName,
+        });
+        const result = formatEc2ControlSummary(data);
+        logToolCall(config, {
+          tool: "ec2_control",
+          success: true,
+          durationMs: Math.round(performance.now() - startedAt),
+        });
+        return {
+          content: [textBlock(result)],
+          structuredContent: { result, data },
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        logToolCall(config, {
+          tool: "ec2_control",
+          success: false,
+          durationMs: Math.round(performance.now() - startedAt),
+          error: message,
+        });
+        throw error;
+      }
+    },
+  );
+
+  registerAppTool(
+    server,
+    "open_workspace",
+    {
+      title: "Open workspace",
+      description:
+        "Open a local project directory as a coding workspace. Call this once per project folder or worktree before reading, editing, searching, writing, showing changes, or running commands. Reuse the returned workspaceId for later calls in the same folder. In compact mode, instruction files are returned as bounded excerpts and can be read in full through the read tool.",
+      inputSchema: {
+        path: z
+          .string()
+          .describe(
+            "Absolute path, or a leading-tilde home path such as ~/project, to a local project directory inside an allowed root.",
+          ),
+        mode: z
+          .enum(["checkout", "worktree"])
+          .optional()
+          .describe(
+            "Defaults to checkout. Use checkout to work in the actual directory. Use worktree to create an isolated managed Git worktree for parallel work.",
+          ),
+        baseRef: z
+          .string()
+          .optional()
+          .describe("Git ref to base a worktree on. Only used with mode=\"worktree\". Defaults to HEAD."),
+      },
+      outputSchema: {
+        workspaceId: z.string(),
+        root: z.string(),
+        mode: z.enum(["checkout", "worktree"]),
+        sourceRoot: z.string().optional(),
+        worktree: z
+          .object({
+            path: z.string(),
+            baseRef: z.string(),
+            baseSha: z.string(),
+            dirtySource: z.boolean(),
+            detached: z.boolean(),
+            managed: z.boolean(),
+          })
+          .optional(),
+        agentsFiles: z.array(workspaceAgentsFileOutputSchema),
+        availableAgentsFiles: z.array(workspaceAvailableAgentsFileOutputSchema),
+        availableAgentsFilesTotal: z.number().int().nonnegative(),
+        availableAgentsFilesTruncated: z.boolean(),
+        skills: z.array(workspaceSkillOutputSchema),
+        agentProviders: z.array(workspaceLocalAgentProviderOutputSchema),
+        agents: z.array(workspaceLocalAgentOutputSchema),
+        skillDiagnostics: z.array(z.unknown()),
+        instruction: z.string(),
+        metrics: z.object({
+          compact: z.boolean(),
+          serverDurationMs: z.number().int().nonnegative(),
+          payloadCharacters: z.number().int().nonnegative(),
+          fullInstructionCharacters: z.number().int().nonnegative(),
+          returnedInstructionCharacters: z.number().int().nonnegative(),
+        }),
+      },
+      ...toolWidgetDescriptorMeta(config, "workspace"),
+      annotations: { readOnlyHint: true },
+    },
+    async ({ path, mode, baseRef }, extra) => {
+      const startedAt = performance.now();
+      const compact = config.openWorkspacePayload === "compact";
+      const { workspace, agentsFiles, availableAgentsFiles } = await workspaces.openWorkspace({ path, mode, baseRef });
+      const conversation = chatConversationContext(
+        extra._meta as Record<string, unknown> | undefined,
+      );
+      const workspaceName = workspace.root.split("/").filter(Boolean).at(-1) || "workspace";
+      ensureChatProgressStarted({
+        sessionId: extra.sessionId,
+        conversationId: conversation.id,
+        conversationUrl: conversation.url,
+        chatLabel: `GPT-Agent · ${workspaceName}`,
+        workspaceId: workspace.id,
+        workspaceRoot: workspace.root,
+        overallProgress: 0,
+        currentProgress: 0,
+        currentTask: "ワークスペースを開いて作業開始",
+      });
+
+      if (config.widgets === "changes") {
+        void reviewCheckpoints.initializeWorkspace({
+          workspaceId: workspace.id,
+          root: workspace.root,
+        });
+      }
+
+      const visibleSkills = workspace.skills
+        .filter((skill) => !skill.disableModelInvocation)
+        .map((skill) => compact
+          ? {
+              name: skill.name,
+              path: formatPathForPrompt(skill.filePath),
+            }
+          : {
+              name: skill.name,
+              description: skill.description,
+              path: formatPathForPrompt(skill.filePath),
+            });
+
+      const visibleAgentProviders = config.subagents ? localAgentProviders : [];
+      const visibleAgents = workspace.agentProfiles.map((profile) => {
+        const summary = summarizeLocalAgentProfile(profile);
+        const availability = visibleAgentProviders.find((provider) => provider.name === summary.provider);
+        return {
+          ...summary,
+          providerAvailable: availability?.available,
+          providerUnavailableReason: availability?.reason,
+        };
+      });
+
+      const loadedAgentsFiles = agentsFiles.map((file) => {
+        const formattedPath = formatAgentsPath(file.path, workspace.root);
+        if (!compact) {
+          return {
+            path: formattedPath,
+            content: file.content,
+          };
+        }
+
+        const excerpt = compactInstructionContent(
+          file.content,
+          config.openWorkspaceInstructionChars,
+        );
+        return {
+          path: formattedPath,
+          content: excerpt.content,
+          characters: file.content.length,
+          truncated: excerpt.truncated,
+        };
+      });
+
+      const availableAgentsFileOutputs = availableAgentsFiles.map((file) => ({
+        path: formatAgentsPath(file.path, workspace.root),
+      }));
+
+      const instruction = compact
+        ? "Use this workspaceId for later calls in this project. Treat agentsFiles content as excerpts and read every listed path in full before other project work. Read applicable availableAgentsFiles before working in their nested scope. Read a skill only when the task matches it."
+        : config.skillsEnabled
+          ? "Use this workspaceId in all subsequent tool calls for this project. Do not call open_workspace again for this same folder unless this workspaceId stops working, the user asks to reopen, or you switch to a different folder/worktree. Follow loaded agentsFiles instructions. Before working under a path listed in availableAgentsFiles, read that instruction file. When a task matches an available skill in skills, read its path before proceeding."
+          : "Use this workspaceId in all subsequent tool calls for this project. Do not call open_workspace again for this same folder unless this workspaceId stops working, the user asks to reopen, or you switch to a different folder/worktree. Follow loaded agentsFiles instructions. Before working under a path listed in availableAgentsFiles, read that instruction file.";
+
+      const resultContent: ToolContent[] = [
+        {
+          type: "text" as const,
+          text: [
+            `Opened workspace ${workspace.id}`,
+            `Root: ${workspace.root}`,
+            `Mode: ${workspace.mode}`,
+            compact ? "Payload: compact" : "Payload: full",
+            loadedAgentsFiles.length > 0
+              ? compact
+                ? `Instruction files: ${loadedAgentsFiles.map((file) => file.path).join(", ")}`
+                : `Loaded project instructions: ${loadedAgentsFiles.map((file) => file.path).join(", ")}`
+              : undefined,
+            availableAgentsFileOutputs.length > 0
+              ? compact
+                ? `Nested instruction files: ${availableAgentsFileOutputs.length}`
+                : `Available nested instructions: ${availableAgentsFileOutputs.map((file) => file.path).join(", ")}`
+              : undefined,
+            visibleSkills.length > 0
+              ? `${compact ? "Skills" : "Available skills"}: ${visibleSkills.map((skill) => skill.name).join(", ")}`
+              : undefined,
+            !compact && visibleAgentProviders.some((provider) => provider.available)
+              ? `Available subagent providers: ${visibleAgentProviders.filter((provider) => provider.available).map((provider) => provider.name).join(", ")}`
+              : undefined,
+            !compact && visibleAgentProviders.some((provider) => !provider.available)
+              ? `Unavailable subagent providers: ${visibleAgentProviders.filter((provider) => !provider.available).map(formatUnavailableAgentProvider).join(", ")}`
+              : undefined,
+            !compact && visibleAgents.length > 0
+              ? `Available subagent profiles: ${visibleAgents.map(formatVisibleAgent).join(", ")}`
+              : undefined,
+            instruction,
+          ].filter(Boolean).join("\n"),
+        },
+      ];
+
+      const fullInstructionCharacters = agentsFiles.reduce(
+        (total, file) => total + file.content.length,
+        0,
+      );
+      const returnedInstructionCharacters = loadedAgentsFiles.reduce(
+        (total, file) => total + (file.content?.length ?? 0),
+        0,
+      );
+      const serverDurationMs = Math.round(performance.now() - startedAt);
+      const structuredContent = {
+        workspaceId: workspace.id,
+        root: workspace.root,
+        mode: workspace.mode,
+        sourceRoot: workspace.sourceRoot,
+        worktree: workspace.worktree,
+        agentsFiles: loadedAgentsFiles,
+        availableAgentsFiles: availableAgentsFileOutputs,
+        availableAgentsFilesTotal: availableAgentsFiles.length,
+        availableAgentsFilesTruncated: availableAgentsFileOutputs.length < availableAgentsFiles.length,
+        skills: visibleSkills,
+        agentProviders: visibleAgentProviders,
+        agents: visibleAgents,
+        skillDiagnostics: compact ? [] : workspace.skillDiagnostics,
+        instruction,
+        metrics: {
+          compact,
+          serverDurationMs,
+          payloadCharacters: 0,
+          fullInstructionCharacters,
+          returnedInstructionCharacters,
+        },
+      };
+      structuredContent.metrics.payloadCharacters = JSON.stringify(structuredContent).length;
+      const usage = recordObservedToolUsage({
+        tool: "open_workspace",
+        usageSessionId: extra.sessionId,
+        workspaceId: workspace.id,
+        workspaceRoot: workspace.root,
+        path: workspace.root,
+        observedChars: structuredContent.metrics.payloadCharacters + textContentChars(resultContent),
+        savedChars: Math.max(0, fullInstructionCharacters - returnedInstructionCharacters),
+        inputChars: String(path).length + String(mode ?? "checkout").length + String(baseRef ?? "").length,
+        outputChars: structuredContent.metrics.payloadCharacters + textContentChars(resultContent),
+        payloadChars: structuredContent.metrics.payloadCharacters,
+        durationMs: serverDurationMs,
+      });
+      const content = appendUsageToContent(resultContent, usage, config.usageContent);
+
+      logToolCall(config, {
+        tool: "open_workspace",
+        workspaceId: workspace.id,
+        path: workspace.root,
+        success: true,
+        durationMs: serverDurationMs,
+      });
+
+      return {
+        content,
+        _meta: {
+          tool: "open_workspace",
+          card: {
+            workspaceId: workspace.id,
+            root: workspace.root,
+            path: workspace.root,
+            summary: {
+              compact,
+              payloadCharacters: structuredContent.metrics.payloadCharacters,
+              fullInstructionCharacters,
+              returnedInstructionCharacters,
+              agentsFiles: loadedAgentsFiles.length,
+              availableAgentsFiles: availableAgentsFileOutputs.length,
+              availableAgentsFilesTotal: availableAgentsFiles.length,
+              skills: visibleSkills.length,
+              agentProviders: visibleAgentProviders.length,
+              agents: visibleAgents.length,
+              skillDiagnostics: compact ? 0 : workspace.skillDiagnostics.length,
+            },
+          },
+        },
+        structuredContent,
+      };
+    },
+  );
+
+  registerAppTool(
+    server,
+    toolNames.read,
+    {
+      title: "Read file",
+      description:
+        [
+          "Read a file inside an open workspace. Use this for file inspection instead of shell commands like cat or sed. Call open_workspace first and pass workspaceId.",
+          "Use this tool to inspect relevant AGENTS.md or CLAUDE.md files listed by open_workspace before working in nested directories.",
+          config.skillsEnabled
+            ? "If available skills were returned and a task matches one, read that skill's path before proceeding. Skill paths may be outside the workspace; only advertised SKILL.md files and files under already-loaded skill directories are readable."
+            : "",
+        ]
+          .filter(Boolean)
+          .join(" "),
+      inputSchema: {
+        workspaceId: z
+          .string()
+          .describe("Workspace identifier returned by open_workspace."),
+        path: z
+          .string()
+          .describe(
+            config.skillsEnabled
+              ? "File path to read, relative to the workspace root. May also be an advertised skill path from open_workspace skills."
+              : "File path to read, relative to the workspace root.",
+          ),
+        offset: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe("1-indexed line number to start reading from."),
+        limit: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe("Maximum number of lines to read."),
+      },
+      outputSchema: resultOutputSchema(),
+      ...toolWidgetDescriptorMeta(config, "read"),
+      annotations: { readOnlyHint: true },
+    },
+    async ({ workspaceId, ...input }, extra) => {
+      const startedAt = performance.now();
+      const workspace = workspaces.getWorkspace(workspaceId);
+      const readPath = workspaces.resolveReadPath(workspace, input.path);
+      const response = await readFileTool(
+        { ...input, path: readPath.absolutePath },
+        {
+          cwd: workspace.root,
+          root: workspace.root,
+          readRoots: readPath.readRoots,
+        },
+      );
+
+      if (response.isError) {
+        const content = logFailedToolResponse(config, {
+          tool: toolNames.read,
+          workspaceId,
+          path: input.path,
+        }, response.content, startedAt, {
+          usageSessionId: extra.sessionId,
+          workspaceRoot: workspace.root,
+        });
+        return { ...response, content };
+      }
+      workspaces.markReadPathLoaded(workspace, readPath);
+
+      const summary = {
+        ...textSummary(response.content),
+        offset: input.offset ?? 1,
+        limited: input.limit !== undefined,
+      };
+      const observedChars = textContentChars(response.content);
+      const savedChars = input.offset !== undefined || input.limit !== undefined
+        ? Math.max(0, estimateFileChars(readPath.absolutePath) - observedChars)
+        : 0;
+      const usage = recordObservedToolUsage({
+        tool: toolNames.read,
+        usageSessionId: extra.sessionId,
+        workspaceId,
+        workspaceRoot: workspace.root,
+        path: input.path,
+        observedChars,
+        savedChars,
+        inputChars: String(input.path).length,
+        outputChars: observedChars,
+        durationMs: Math.round(performance.now() - startedAt),
+      });
+      const content = appendUsageToContent(response.content, usage, config.usageContent);
+      logToolCall(config, {
+        tool: toolNames.read,
+        workspaceId,
+        path: input.path,
+        success: true,
+        durationMs: Math.round(performance.now() - startedAt),
+      });
+
+      return {
+        ...response,
+        content,
+        _meta: {
+          tool: toolNames.read,
+          card: {
+            workspaceId,
+            path: input.path,
+            summary,
+            payload: { content },
+          },
+        },
+        structuredContent: {
+          result: contentText(content),
+        },
+      };
+    },
+  );
+
+  if (config.toolMode !== "codex") {
+  registerAppTool(
+    server,
+    toolNames.write,
+    {
+      title: "Write file",
+      description:
+        `Create or completely overwrite a file inside an open workspace. Prefer ${toolNames.edit} for targeted changes to existing files. Call open_workspace first and pass workspaceId.`,
+      inputSchema: {
+        workspaceId: z
+          .string()
+          .describe("Workspace identifier returned by open_workspace."),
+        path: z
+          .string()
+          .describe("File path to write, relative to the workspace root."),
+        content: z.string().describe("Complete new file content."),
+      },
+      outputSchema: resultOutputSchema(),
+      ...toolWidgetDescriptorMeta(config, "write"),
+      annotations: WRITE_TOOL_ANNOTATIONS,
+    },
+    async ({ workspaceId, ...input }, extra) => {
+      const startedAt = performance.now();
+      const workspace = workspaces.getWorkspace(workspaceId);
+      workspaces.resolvePath(workspace, input.path);
+      const response = await writeFileTool(input, {
+        cwd: workspace.root,
+        root: workspace.root,
+      });
+
+      if (response.isError) {
+        const content = logFailedToolResponse(config, {
+          tool: toolNames.write,
+          workspaceId,
+          path: input.path,
+        }, response.content, startedAt, {
+          usageSessionId: extra.sessionId,
+          workspaceRoot: workspace.root,
+        });
+        return { ...response, content };
+      }
+
+      const patch = newFilePatch(input.path, input.content);
+      const stats = countDiffStats(patch);
+      const summary = {
+        ...stats,
+        lines: contentLineCount(input.content),
+        characters: input.content.length,
+      };
+      const usage = recordObservedToolUsage({
+        tool: toolNames.write,
+        usageSessionId: extra.sessionId,
+        workspaceId,
+        workspaceRoot: workspace.root,
+        path: input.path,
+        observedChars: input.content.length + textContentChars(response.content),
+        savedChars: 0,
+        inputChars: input.content.length,
+        outputChars: textContentChars(response.content),
+        durationMs: Math.round(performance.now() - startedAt),
+      });
+      const content = appendUsageToContent(response.content, usage, config.usageContent);
+      logToolCall(config, {
+        tool: toolNames.write,
+        workspaceId,
+        path: input.path,
+        success: true,
+        durationMs: Math.round(performance.now() - startedAt),
+      });
+
+      return {
+        ...response,
+        content,
+        _meta: {
+          tool: toolNames.write,
+          card: {
+            workspaceId,
+            path: input.path,
+            summary,
+            payload: {
+              content,
+              patch,
+            },
+          },
+        },
+        structuredContent: {
+          result: contentText(content),
+        },
+      };
+    },
+  );
+
+  registerAppTool(
+    server,
+    toolNames.edit,
+    {
+      title: "Edit file",
+      description:
+        `Edit one file inside an open workspace by replacing exact text blocks. Prefer this over ${toolNames.write} for targeted changes. Each oldText must match a unique, non-overlapping region of the original file; merge nearby changes into one edit and keep oldText as small as possible while still unique. Call open_workspace first and pass workspaceId.`,
+      inputSchema: {
+        workspaceId: z
+          .string()
+          .describe("Workspace identifier returned by open_workspace."),
+        path: z
+          .string()
+          .describe("File path to edit, relative to the workspace root."),
+        edits: z
+          .array(
+            z.object({
+              oldText: z
+                .string()
+                .describe(
+                  "Exact text to replace. Must match uniquely in the original file.",
+                ),
+              newText: z.string().describe("Replacement text."),
+            }),
+          )
+          .min(1),
+      },
+      outputSchema: resultOutputSchema({
+        status: z.literal("applied"),
+      }),
+      ...toolWidgetDescriptorMeta(config, "edit"),
+      annotations: EDIT_TOOL_ANNOTATIONS,
+    },
+    async ({ workspaceId, ...input }, extra) => {
+      const startedAt = performance.now();
+      const workspace = workspaces.getWorkspace(workspaceId);
+      const targetPath = workspaces.resolvePath(workspace, input.path);
+      const response = await editFileTool(input, {
+        cwd: workspace.root,
+        root: workspace.root,
+      });
+
+      if (response.isError) {
+        const content = logFailedToolResponse(config, {
+          tool: toolNames.edit,
+          workspaceId,
+          path: input.path,
+        }, response.content, startedAt, {
+          usageSessionId: extra.sessionId,
+          workspaceRoot: workspace.root,
+        });
+        return { ...response, content };
+      }
+
+      const stats = countDiffStats(
+        response.details?.patch ?? response.details?.diff,
+      );
+      const summary = {
+        ...stats,
+        editCount: input.edits.length,
+      };
+      const editResultText = `Edited ${input.path} (+${stats.additions} -${stats.removals}).`;
+      const editContent = [textBlock(editResultText)];
+      const observedChars = editInputChars(input.edits) + textContentChars(editContent);
+      const savedChars = Math.max(0, estimateFileChars(targetPath) * 2 - observedChars);
+      const usage = recordObservedToolUsage({
+        tool: toolNames.edit,
+        usageSessionId: extra.sessionId,
+        workspaceId,
+        workspaceRoot: workspace.root,
+        path: input.path,
+        observedChars,
+        savedChars,
+        inputChars: editInputChars(input.edits),
+        outputChars: textContentChars(editContent),
+        durationMs: Math.round(performance.now() - startedAt),
+      });
+      const content = appendUsageToContent(editContent, usage, config.usageContent);
+      logToolCall(config, {
+        tool: toolNames.edit,
+        workspaceId,
+        path: input.path,
+        success: true,
+        durationMs: Math.round(performance.now() - startedAt),
+      });
+
+      return {
+        content,
+        _meta: {
+          tool: toolNames.edit,
+          card: {
+            workspaceId,
+            path: input.path,
+            summary,
+            payload: {
+              diff: response.details?.diff,
+              patch: response.details?.patch,
+            },
+          },
+        },
+        structuredContent: {
+          status: "applied",
+          result: contentText(content),
+        },
+      };
+    },
+  );
+  }
+
+  if (config.toolMode === "codex") {
+    registerAppTool(
+      server,
+      "apply_patch",
+      {
+        title: "Apply patch",
+        description:
+          "Apply one Codex-style patch inside an open workspace. Supports adding, overwriting, updating, deleting, and moving files. Use this for all file modifications. Paths must be relative to the workspace. Call open_workspace first and pass workspaceId.",
+        inputSchema: {
+          workspaceId: z
+            .string()
+            .describe("Workspace identifier returned by open_workspace."),
+          patch: z
+            .string()
+            .describe("Patch text enclosed by *** Begin Patch and *** End Patch markers."),
+        },
+        outputSchema: resultOutputSchema({
+          additions: z.number(),
+          removals: z.number(),
+          files: z.array(
+            z.object({
+              path: z.string(),
+              previousPath: z.string().optional(),
+              operation: z.enum(["add", "update", "delete", "move"]),
+            }),
+          ),
+        }),
+        ...toolWidgetDescriptorMeta(config, "edit"),
+        annotations: EDIT_TOOL_ANNOTATIONS,
+      },
+      async ({ workspaceId, patch }) => {
+        const startedAt = performance.now();
+        const workspace = workspaces.getWorkspace(workspaceId);
+        const applied = await applyPatch(workspace.root, patch);
+        const paths = applied.files.map((file) => file.path).join(", ");
+        const result = `Applied patch to ${applied.files.length} file(s): ${paths}`;
+        const content = [textBlock(result)];
+        const displayPath = applied.files.length === 1
+          ? applied.files[0]?.path
+          : `${applied.files.length} files`;
+
+        logToolCall(config, {
+          tool: "apply_patch",
+          workspaceId,
+          success: true,
+          durationMs: Math.round(performance.now() - startedAt),
+        });
+
+        return {
+          content,
+          _meta: {
+            tool: "apply_patch",
+            card: {
+              workspaceId,
+              path: displayPath,
+              summary: {
+                files: applied.files.length,
+                additions: applied.additions,
+                removals: applied.removals,
+              },
+              payload: { patch: applied.patch },
+            },
+          },
+          structuredContent: {
+            result,
+            additions: applied.additions,
+            removals: applied.removals,
+            files: applied.files,
+          },
+        };
+      },
+    );
+  }
+
+  if (config.widgets === "changes") {
+    registerAppTool(
+      server,
+      "show_changes",
+      {
+        title: "Show changes",
+        description:
+          "Show aggregate file changes for an open workspace. If the current turn successfully modified files, call this exactly once after the final related file change and before your final response so the user can inspect the combined diff for the turn. Do not call it after every individual file change, and do not skip it because prior file-change tools already displayed per-tool diffs.",
+        inputSchema: {
+          workspaceId: z
+            .string()
+            .describe("Workspace identifier returned by open_workspace."),
+        },
+        outputSchema: resultOutputSchema(),
+        ...toolWidgetDescriptorMeta(config, "show_changes"),
+        annotations: { readOnlyHint: true },
+      },
+      async ({ workspaceId }) => {
+        const startedAt = performance.now();
+        const workspace = workspaces.getWorkspace(workspaceId);
+        const review = await reviewCheckpoints.reviewChanges({
+          workspaceId,
+          root: workspace.root,
+          since: "last_shown",
+          markReviewed: true,
+        });
+
+        const content = [textBlock(review.result)];
+        logToolCall(config, {
+          tool: "show_changes",
+          workspaceId,
+          success: true,
+          durationMs: Math.round(performance.now() - startedAt),
+        });
+
+        return {
+          content,
+          _meta: {
+            tool: "show_changes",
+            card: {
+              workspaceId,
+              summary: review.summary,
+              files: review.files,
+              payload: {
+                patch: review.patch,
+              },
+            },
+          },
+          structuredContent: {
+            result: contentText(content),
+          },
+        };
+      },
+    );
+  }
+
+  if (config.toolMode === "full") {
+    registerAppTool(
+      server,
+      toolNames.grep,
+      {
+        title: "Grep",
+        description:
+          "Search file contents inside an open workspace. Use this before broad reads when looking for symbols, text, or usage sites. Respects project ignore rules. Call open_workspace first and pass workspaceId.",
+        inputSchema: {
+          workspaceId: z
+            .string()
+            .describe("Workspace identifier returned by open_workspace."),
+          pattern: z.string().describe("Search pattern."),
+          path: z
+            .string()
+            .optional()
+            .describe(
+              "Optional path or glob scope relative to the workspace root.",
+            ),
+          include: z.string().optional().describe("Optional include glob."),
+        },
+        outputSchema: resultOutputSchema(),
+        ...toolWidgetDescriptorMeta(config, "search"),
+        annotations: { readOnlyHint: true },
+      },
+      async ({ workspaceId, ...input }, extra) => {
+        const startedAt = performance.now();
+        const workspace = workspaces.getWorkspace(workspaceId);
+        if (input.path) workspaces.resolvePath(workspace, input.path);
+        const response = await grepFilesTool(input, {
+          cwd: workspace.root,
+          root: workspace.root,
+        });
+
+        if (response.isError) {
+          const content = logFailedToolResponse(config, {
+            tool: toolNames.grep,
+            workspaceId,
+            path: input.path,
+          }, response.content, startedAt, {
+            usageSessionId: extra.sessionId,
+            workspaceRoot: workspace.root,
+          });
+          return { ...response, content };
+        }
+
+        const summary = {
+          pattern: input.pattern,
+          scope: input.path ?? ".",
+          ...textSummary(response.content),
+        };
+        const usage = recordObservedToolUsage({
+          tool: toolNames.grep,
+          usageSessionId: extra.sessionId,
+          workspaceId,
+          workspaceRoot: workspace.root,
+          path: input.path,
+          observedChars:
+            String(input.pattern ?? "").length
+            + String(input.path ?? "").length
+            + String(input.include ?? "").length
+            + textContentChars(response.content),
+          savedChars: 0,
+          inputChars:
+            String(input.pattern ?? "").length
+            + String(input.path ?? "").length
+            + String(input.include ?? "").length,
+          outputChars: textContentChars(response.content),
+          durationMs: Math.round(performance.now() - startedAt),
+        });
+        const content = appendUsageToContent(response.content, usage, config.usageContent);
+        logToolCall(config, {
+          tool: toolNames.grep,
+          workspaceId,
+          path: input.path,
+          success: true,
+          durationMs: Math.round(performance.now() - startedAt),
+        });
+
+        return {
+          ...response,
+          content,
+          _meta: {
+            tool: toolNames.grep,
+            card: {
+              workspaceId,
+              path: input.path,
+              summary,
+              payload: { content },
+            },
+          },
+          structuredContent: {
+            result: contentText(content),
+          },
+        };
+      },
+    );
+
+    registerAppTool(
+      server,
+      toolNames.glob,
+      {
+        title: "Glob",
+        description:
+          "Find files by glob pattern inside an open workspace. Use this to discover filenames or narrow file sets before reading. Respects project ignore rules. Call open_workspace first and pass workspaceId.",
+        inputSchema: {
+          workspaceId: z
+            .string()
+            .describe("Workspace identifier returned by open_workspace."),
+          pattern: z.string().describe("File glob pattern."),
+          path: z
+            .string()
+            .optional()
+            .describe("Optional path scope relative to the workspace root."),
+        },
+        outputSchema: resultOutputSchema(),
+        ...toolWidgetDescriptorMeta(config, "search"),
+        annotations: { readOnlyHint: true },
+      },
+      async ({ workspaceId, ...input }, extra) => {
+        const startedAt = performance.now();
+        const workspace = workspaces.getWorkspace(workspaceId);
+        if (input.path) workspaces.resolvePath(workspace, input.path);
+        const response = await findFilesTool(input, {
+          cwd: workspace.root,
+          root: workspace.root,
+        });
+
+        if (response.isError) {
+          const content = logFailedToolResponse(config, {
+            tool: toolNames.glob,
+            workspaceId,
+            path: input.path,
+          }, response.content, startedAt, {
+            usageSessionId: extra.sessionId,
+            workspaceRoot: workspace.root,
+          });
+          return { ...response, content };
+        }
+
+        const summary = {
+          pattern: input.pattern,
+          scope: input.path ?? ".",
+          ...textSummary(response.content),
+        };
+        const usage = recordObservedToolUsage({
+          tool: toolNames.glob,
+          usageSessionId: extra.sessionId,
+          workspaceId,
+          workspaceRoot: workspace.root,
+          path: input.path,
+          observedChars:
+            String(input.pattern ?? "").length
+            + String(input.path ?? "").length
+            + textContentChars(response.content),
+          savedChars: 0,
+          inputChars: String(input.pattern ?? "").length + String(input.path ?? "").length,
+          outputChars: textContentChars(response.content),
+          durationMs: Math.round(performance.now() - startedAt),
+        });
+        const content = appendUsageToContent(response.content, usage, config.usageContent);
+        logToolCall(config, {
+          tool: toolNames.glob,
+          workspaceId,
+          path: input.path,
+          success: true,
+          durationMs: Math.round(performance.now() - startedAt),
+        });
+
+        return {
+          ...response,
+          content,
+          _meta: {
+            tool: toolNames.glob,
+            card: {
+              workspaceId,
+              path: input.path,
+              summary,
+              payload: { content },
+            },
+          },
+          structuredContent: {
+            result: contentText(content),
+          },
+        };
+      },
+    );
+
+    registerAppTool(
+      server,
+      toolNames.ls,
+      {
+        title: "Ls",
+        description:
+          "List a directory inside an open workspace. Use this for directory inspection before reading files. Call open_workspace first and pass workspaceId.",
+        inputSchema: {
+          workspaceId: z
+            .string()
+            .describe("Workspace identifier returned by open_workspace."),
+          path: z
+            .string()
+            .describe(
+              "Directory path to list, relative to the workspace root.",
+            ),
+        },
+        outputSchema: resultOutputSchema(),
+        ...toolWidgetDescriptorMeta(config, "directory"),
+        annotations: { readOnlyHint: true },
+      },
+      async ({ workspaceId, ...input }, extra) => {
+        const startedAt = performance.now();
+        const workspace = workspaces.getWorkspace(workspaceId);
+        workspaces.resolvePath(workspace, input.path);
+        const response = await listDirectoryTool(input, {
+          cwd: workspace.root,
+          root: workspace.root,
+        });
+
+        if (response.isError) {
+          const content = logFailedToolResponse(config, {
+            tool: toolNames.ls,
+            workspaceId,
+            path: input.path,
+          }, response.content, startedAt, {
+            usageSessionId: extra.sessionId,
+            workspaceRoot: workspace.root,
+          });
+          return { ...response, content };
+        }
+
+        const summary = textSummary(response.content);
+        const usage = recordObservedToolUsage({
+          tool: toolNames.ls,
+          usageSessionId: extra.sessionId,
+          workspaceId,
+          workspaceRoot: workspace.root,
+          path: input.path,
+          observedChars: String(input.path ?? "").length + textContentChars(response.content),
+          savedChars: 0,
+          inputChars: String(input.path ?? "").length,
+          outputChars: textContentChars(response.content),
+          durationMs: Math.round(performance.now() - startedAt),
+        });
+        const content = appendUsageToContent(response.content, usage, config.usageContent);
+        logToolCall(config, {
+          tool: toolNames.ls,
+          workspaceId,
+          path: input.path,
+          success: true,
+          durationMs: Math.round(performance.now() - startedAt),
+        });
+
+        return {
+          ...response,
+          content,
+          _meta: {
+            tool: toolNames.ls,
+            card: {
+              workspaceId,
+              path: input.path,
+              summary,
+              payload: { content },
+            },
+          },
+          structuredContent: {
+            result: contentText(content),
+          },
+        };
+      },
+    );
+  }
+
+  if (config.toolMode !== "codex") {
+  registerAppTool(
+    server,
+    toolNames.shell,
+    {
+      title: "Bash",
+      description: config.toolMode !== "full"
+        ? `Run a shell command inside an open workspace. Use only for tests, builds, git inspection, package scripts, search, file discovery, and directory inspection. In minimal tool mode, ${toolNames.grep}, ${toolNames.glob}, and ${toolNames.ls} are disabled; use command-line tools such as grep, rg, find, ls, and tree for those read-only inspection actions. Built-in commands are available without adding more MCP Tools: devspace-runtime diagnose [--github] [command ...], devspace-runtime smoke, devspace-runtime costs, devspace-runtime jobs start/list/show/cancel/resume, and devspace-runtime finder <path> for an explicit user request. Verification jobs use fixed presets: typecheck, test, build, git-status, and runtime-smoke. The browser-loop preset accepts a bounded goal and must stop for configured local approvals. Do not use ${toolNames.shell} to create or modify files. Do not use shell redirection, heredocs, tee, sed -i, perl -i, node/python/ruby scripts, or generated scripts to write project files; use ${toolNames.edit} for targeted changes and ${toolNames.write} for new files or full rewrites. Prefer ${toolNames.read} for direct file reads. Call open_workspace first and pass workspaceId. This is powerful local execution and should only be exposed behind strong authentication.`
+        : `Run a shell command inside an open workspace. Use only for tests, builds, git inspection, package scripts, and commands that are better executed by the shell. Built-in commands are available without adding more MCP Tools: devspace-runtime diagnose [--github] [command ...], devspace-runtime smoke, devspace-runtime costs, devspace-runtime jobs start/list/show/cancel/resume, and devspace-runtime finder <path> for an explicit user request. Verification jobs use fixed presets: typecheck, test, build, git-status, and runtime-smoke. The browser-loop preset accepts a bounded goal and must stop for configured local approvals. Do not use ${toolNames.shell} to create or modify files. Do not use shell redirection, heredocs, tee, sed -i, perl -i, node/python/ruby scripts, or generated scripts to write project files; use ${toolNames.edit} for targeted changes and ${toolNames.write} for new files or full rewrites. Prefer ${toolNames.read}, ${toolNames.grep}, ${toolNames.glob}, and ${toolNames.ls} for file inspection. Call open_workspace first and pass workspaceId. This is powerful local execution and should only be exposed behind strong authentication.`,
+      inputSchema: {
+        workspaceId: z
+          .string()
+          .describe("Workspace identifier returned by open_workspace."),
+        command: z
+          .string()
+          .describe(
+            `Shell command to run. Use devspace-runtime diagnose, smoke, costs, or jobs start/list/show/cancel/resume for built-in diagnostics and bounded jobs; use devspace-runtime finder <path> only on explicit request. Must not create or modify project files; use ${toolNames.edit} or ${toolNames.write} for file changes.`,
+          ),
+        workingDirectory: z
+          .string()
+          .optional()
+          .describe(
+            "Optional working directory relative to the workspace root. Defaults to the workspace root.",
+          ),
+        timeout: z
+          .number()
+          .positive()
+          .max(300)
+          .optional()
+          .describe("Timeout in seconds. Defaults to 30, max 300."),
+      },
+      outputSchema: resultOutputSchema(),
+      ...toolWidgetDescriptorMeta(config, "shell"),
+      annotations: SHELL_TOOL_ANNOTATIONS,
+    },
+    async ({ workspaceId, workingDirectory, ...input }, extra) => {
+      const startedAt = performance.now();
+      const workspace = workspaces.getWorkspace(workspaceId);
+      const cwd = workspaces.resolveWorkingDirectory(
+        workspace,
+        workingDirectory,
+      );
+      const response = await runShellTool(input, {
+        cwd,
+        root: workspace.root,
+        workspaceId,
+      });
+
+      const loggedCommand = redactSensitiveShellCommand(input.command);
+      if (response.isError) {
+        const content = logFailedToolResponse(config, {
+          tool: toolNames.shell,
+          workspaceId,
+          workingDirectory: workingDirectory ?? ".",
+          command: loggedCommand,
+          commandLength: input.command.length,
+        }, response.content, startedAt, {
+          usageSessionId: extra.sessionId,
+          workspaceRoot: workspace.root,
+        });
+        return { ...response, content };
+      }
+
+      const summary = {
+        command: loggedCommand,
+        workingDirectory: workingDirectory ?? ".",
+        ...textSummary(response.content),
+      };
+      const usage = recordObservedToolUsage({
+        tool: toolNames.shell,
+        usageSessionId: extra.sessionId,
+        workspaceId,
+        workspaceRoot: workspace.root,
+        path: workingDirectory ?? ".",
+        observedChars: input.command.length + textContentChars(response.content),
+        savedChars: 0,
+        inputChars: input.command.length,
+        outputChars: textContentChars(response.content),
+        durationMs: Math.round(performance.now() - startedAt),
+      });
+      const content = appendUsageToContent(response.content, usage, config.usageContent);
+      logToolCall(config, {
+        tool: toolNames.shell,
+        workspaceId,
+        workingDirectory: workingDirectory ?? ".",
+        command: loggedCommand,
+        commandLength: input.command.length,
+        success: true,
+        durationMs: Math.round(performance.now() - startedAt),
+      });
+
+      return {
+        ...response,
+        content,
+        _meta: {
+          tool: toolNames.shell,
+          card: {
+            workspaceId,
+            path: workingDirectory,
+            summary,
+            payload: { content },
+          },
+        },
+        structuredContent: {
+          result: contentText(content),
+        },
+      };
+    },
+  );
+  }
+
+  if (config.toolMode === "codex") {
+    registerCodexProcessTools(server, config, workspaces, processSessions);
+  }
+
+  registerV11Tools(server, { config, workspaces, localAgentProviders });
+
+  return server;
+}
+
+function firstMetaString(
+  meta: Record<string, unknown> | undefined,
+  keys: string[],
+): string | undefined {
+  for (const key of keys) {
+    const value = meta?.[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return undefined;
+}
+
+function safeChatGptUrl(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  try {
+    const url = new URL(value);
+    const hostname = url.hostname.toLowerCase();
+    if (url.protocol !== "https:" || (hostname !== "chatgpt.com" && hostname !== "www.chatgpt.com")) {
+      return undefined;
+    }
+    url.hostname = "chatgpt.com";
+    url.hash = "";
+    return url.toString();
+  } catch {
+    return undefined;
+  }
+}
+
+function chatConversationContext(
+  meta: Record<string, unknown> | undefined,
+): { id?: string; url?: string } {
+  const id = firstMetaString(meta, [
+    "openai/conversation_id",
+    "openai/conversationId",
+    "openai/chat_id",
+    "openai/chatId",
+    "conversation_id",
+    "conversationId",
+    "chat_id",
+    "chatId",
+  ]);
+  const directUrl = safeChatGptUrl(firstMetaString(meta, [
+    "openai/conversation_url",
+    "openai/conversationUrl",
+    "openai/chat_url",
+    "openai/chatUrl",
+    "conversation_url",
+    "conversationUrl",
+    "chat_url",
+    "chatUrl",
+  ]));
+  if (directUrl) return { id, url: directUrl };
+  if (!id) return {};
+
+  const projectId = firstMetaString(meta, [
+    "openai/project_id",
+    "openai/projectId",
+    "openai/gizmo_id",
+    "openai/gizmoId",
+    "project_id",
+    "projectId",
+    "gizmo_id",
+    "gizmoId",
+  ]);
+  const encodedConversation = encodeURIComponent(id);
+  const url = projectId
+    ? `https://chatgpt.com/g/${encodeURIComponent(projectId)}/c/${encodedConversation}`
+    : `https://chatgpt.com/c/${encodedConversation}`;
+  return { id, url };
+}
+
+function privateUsageSessionKey(req: Request, fallback?: string): string | undefined {
+  const meta = req.body?.params?._meta as Record<string, unknown> | undefined;
+  const conversationCandidates = [
+    meta?.["openai/conversation_id"],
+    meta?.["openai/conversationId"],
+    meta?.["openai/chat_id"],
+    meta?.["openai/chatId"],
+    meta?.conversation_id,
+    meta?.conversationId,
+    meta?.chat_id,
+    meta?.chatId,
+  ];
+  const conversationId = conversationCandidates.find(
+    (value): value is string => typeof value === "string" && value.trim().length > 0,
+  );
+  const privateValue = conversationId
+    ? `conversation:${conversationId.trim()}`
+    : req.auth?.token
+      ? `oauth:${req.auth.token}`
+      : fallback
+        ? `transport:${fallback}`
+        : undefined;
+  return privateValue
+    ? createHash("sha256").update(privateValue).digest("hex").slice(0, 32)
+    : undefined;
+}
+
+// PRIVATE_GEX_START
+function rawRequestHostname(req: Request): string {
+  const host = String(req.headers.host || "").trim();
+  if (!host) return "";
+  try {
+    return new URL(`http://${host}`).hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
+function isAuthorizedLocalGexRequest(req: Request, expectedHeader: string): boolean {
+  const hostname = rawRequestHostname(req);
+  const loopbackHost = hostname === "127.0.0.1" || hostname === "localhost" || hostname === "::1";
+  return loopbackHost && req.header("x-gex-bridge") === expectedHeader;
+}
+
+function isAuthorizedGexLearningRequest(req: Request): boolean {
+  return isAuthorizedLocalGexRequest(req, GEX_LEARNING_BRIDGE_HEADER);
+}
+
+function isAuthorizedGexChatRuntimeRequest(req: Request): boolean {
+  return isAuthorizedLocalGexRequest(req, GEX_CHAT_RUNTIME_BRIDGE_HEADER);
+}
+
+function denyLocalGexRequest(res: Response): void {
+  res.status(403).json({ ok: false, error: "GEX bridge is local-only." });
+}
+// PRIVATE_GEX_END
+
+function isAuthorizedNaoBrainRequest(req: Request, configuredSecret: string | null): boolean {
+  if (!configuredSecret) return false;
+  const suppliedSecret = req.header("x-naobrain-bridge-token") ?? "";
+  const expected = Buffer.from(configuredSecret);
+  const supplied = Buffer.from(suppliedSecret);
+  return expected.length === supplied.length && timingSafeEqual(expected, supplied);
+}
+
+export function createServer(config = loadConfig()): RunningServer {
+  const allowedHosts = config.allowedHosts.includes("*")
+    ? undefined
+    : Array.from(new Set([config.host, ...config.allowedHosts]));
+  const app = createMcpExpressApp({
+    host: config.host,
+    ...(allowedHosts ? { allowedHosts } : {}),
+  });
+  const transports = new Map<string, Transport>();
+  const mcpUrl = new URL("/mcp", config.publicBaseUrl);
+  const resourceServerUrl = resourceUrlFromServerUrl(mcpUrl);
+  const oauthProvider = new SingleUserOAuthProvider(config.oauth, mcpUrl, config.stateDir);
+  const bearerAuth = requireBearerAuth({
+    verifier: oauthProvider,
+    requiredScopes: [config.oauth.scopes[0] ?? "devspace"],
+    resourceMetadataUrl: getOAuthProtectedResourceMetadataUrl(resourceServerUrl),
+  });
+  const workspaceStore = createWorkspaceStore(config.stateDir);
+  const workspaces = new WorkspaceRegistry(config, workspaceStore);
+  const reviewCheckpoints = createReviewCheckpointManager();
+  const processSessions = new ProcessSessionManager();
+  const localAgentProviders = config.subagents
+    ? getLocalAgentProviderAvailabilitySnapshot()
+    : [];
+  // PRIVATE_GEX_START
+  const gexLearningStore = new GexLearningStore(config.gexLearningDir);
+  const gexChatRuntimeStore = new GexChatRuntimeStore();
+  // PRIVATE_GEX_END
+  const todayStore = new NaoBrainTodayStore({
+    dataDir: config.naobrainTodayDir,
+    promptFile: config.naobrainTodayPromptFile,
+    geminiApiKey: config.naobrainGeminiApiKey || undefined,
+    geminiModel: config.naobrainGeminiModel,
+    geminiFallbackKeysFile: config.naobrainGeminiFallbackKeysFile,
+    driveRemote: config.naobrainDriveRemote || undefined,
+    driveBasePath: config.naobrainDriveBasePath,
+  });
+  const outputLearningStore = new OutputLearningStore(join(config.stateDir, "output-learning.json"));
+  const runOutputLearningAnalysis = async () => {
+    try {
+      await outputLearningStore.refreshSharedSnapshot();
+      const result = outputLearningStore.refreshAnalysis();
+      if (result.changed) {
+        logEvent(config.logging, "info", "output_learning_analysis_updated", {
+          sampleCount: result.analysis.sampleCount,
+          syncStatus: result.syncStatus,
+          syncError: result.syncError,
+        });
+      }
+    } catch (error) {
+      logEvent(config.logging, "warn", "output_learning_analysis_error", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  };
+  const outputLearningInitialTimer = setTimeout(() => void runOutputLearningAnalysis(), 0);
+  const outputLearningAnalysisTimer = setInterval(() => void runOutputLearningAnalysis(), 30 * 60 * 1_000);
+  outputLearningInitialTimer.unref?.();
+  outputLearningAnalysisTimer.unref?.();
+  const quizStore = new NaoBrainQuizStore({
+    dataDir: config.naobrainQuizDir,
+    promptFile: config.naobrainQuizPromptFile,
+    geminiApiKey: config.naobrainGeminiApiKey || undefined,
+    geminiModel: config.naobrainGeminiModel,
+    geminiFallbackKeysFile: config.naobrainGeminiFallbackKeysFile,
+    driveRemote: config.naobrainDriveRemote || undefined,
+    driveBasePath: config.naobrainQuizDriveBasePath,
+    sourceRoots: config.naobrainQuizSourceRoots,
+  });
+  const runTodayDailyAnalysis = () => {
+    todayStore.runScheduledDailyAnalyses().catch((error) => {
+      logEvent(config.logging, "warn", "naobrain_today_daily_analysis_error", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
+  };
+  const todayDailyAnalysisInitialTimer = setTimeout(runTodayDailyAnalysis, 20_000);
+  const todayDailyAnalysisTimer = setInterval(runTodayDailyAnalysis, 30 * 60 * 1000);
+  todayDailyAnalysisInitialTimer.unref?.();
+  todayDailyAnalysisTimer.unref?.();
+
+  if (config.logging.trustProxy) {
+    app.set("trust proxy", true);
+  }
+
+  app.use((req, res, next) => {
+    const requestId = randomUUID();
+    const startedAt = performance.now();
+    res.locals.requestId = requestId;
+
+    res.on("finish", () => {
+      const path = requestPath(req);
+      if (!config.logging.requests) return;
+      if (!config.logging.assets && path.startsWith("/mcp-app-assets")) return;
+
+      logEvent(config.logging, "info", "http_request", {
+        requestId,
+        method: req.method,
+        path,
+        status: res.statusCode,
+        durationMs: Math.round(performance.now() - startedAt),
+        ...requestLogFields(req, config),
+      });
+    });
+
+    next();
+  });
+
+  // PRIVATE_GEX_START
+  app.get("/gex-learning/health", (req, res) => {
+    res.setHeader("cache-control", "no-store");
+    if (!isAuthorizedGexLearningRequest(req)) {
+      denyLocalGexRequest(res);
+      return;
+    }
+    res.json({ ok: true, name: "gex-learning-bridge" });
+  });
+
+  app.post(
+    "/gex-learning/sync",
+    express.json({ limit: "2mb" }),
+    async (req, res) => {
+      res.setHeader("cache-control", "no-store");
+      if (!isAuthorizedGexLearningRequest(req)) {
+        denyLocalGexRequest(res);
+        return;
+      }
+      try {
+        const payload = (req.body || {}) as GexLearningSyncPayload;
+        const result = await gexLearningStore.sync(payload);
+        const core = outputLearningStore.ingestGexLoops(
+          Array.isArray(payload.loops) ? payload.loops : [],
+        );
+        res.json({ ok: true, ...result, outputCore: core });
+      } catch (error) {
+        logEvent(config.logging, "error", "gex_learning_sync_error", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+        res.status(500).json({ ok: false, error: "GEX learning data could not be saved." });
+      }
+    },
+  );
+
+  app.post(
+    "/gex-chat-runtime/sync",
+    express.json({ limit: "64kb" }),
+    async (req, res) => {
+      res.setHeader("cache-control", "no-store");
+      if (!isAuthorizedGexChatRuntimeRequest(req)) {
+        denyLocalGexRequest(res);
+        return;
+      }
+      try {
+        const result = await gexChatRuntimeStore.sync((req.body || {}) as GexChatRuntimePayload);
+        res.json({ ok: true, ...result });
+      } catch (error) {
+        logEvent(config.logging, "warn", "gex_chat_runtime_sync_error", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+        res.status(400).json({ ok: false, error: "GEX Chat runtime state could not be saved." });
+      }
+    },
+  );
+
+  app.post(
+    "/gex-chat-runtime/activate",
+    express.json({ limit: "16kb" }),
+    (req, res) => {
+      res.setHeader("cache-control", "no-store");
+      if (!isAuthorizedGexChatRuntimeRequest(req)) {
+        denyLocalGexRequest(res);
+        return;
+      }
+      try {
+        const command = gexChatRuntimeStore.requestActivation((req.body || {}) as GexChatActivationPayload);
+        res.json({ ok: true, commandId: command.id });
+      } catch (error) {
+        res.status(400).json({
+          ok: false,
+          error: error instanceof Error ? error.message : "ChatGPT tab activation could not be queued.",
+        });
+      }
+    },
+  );
+
+  app.get("/gex-chat-runtime/command", (req, res) => {
+    res.setHeader("cache-control", "no-store");
+    if (!isAuthorizedGexChatRuntimeRequest(req)) {
+      denyLocalGexRequest(res);
+      return;
+    }
+    res.json({ ok: true, command: gexChatRuntimeStore.activationCommand() });
+  });
+
+  app.post(
+    "/gex-chat-runtime/command/ack",
+    express.json({ limit: "8kb" }),
+    (req, res) => {
+      res.setHeader("cache-control", "no-store");
+      if (!isAuthorizedGexChatRuntimeRequest(req)) {
+        denyLocalGexRequest(res);
+        return;
+      }
+      res.json({ ok: true, acknowledged: gexChatRuntimeStore.acknowledgeActivation(req.body?.commandId) });
+    },
+  );
+  // PRIVATE_GEX_END
+
+  const authorizeToday = (req: Request, res: Response): boolean => {
+    res.setHeader("cache-control", "no-store");
+    if (!isAuthorizedNaoBrainRequest(req, config.naobrainBridgeToken)) {
+      res.sendStatus(404);
+      return false;
+    }
+    return true;
+  };
+
+  app.get("/naobrain-today/health", async (req, res) => {
+    if (!authorizeToday(req, res)) return;
+    res.json(await todayStore.health());
+  });
+
+  app.get("/naobrain-today/entries", async (req, res) => {
+    if (!authorizeToday(req, res)) return;
+    try {
+      const date = typeof req.query.date === "string" ? req.query.date : undefined;
+      res.json({ ok: true, snapshot: await todayStore.list(date) });
+    } catch (error) {
+      res.status(400).json({ ok: false, error: error instanceof Error ? error.message : "request failed" });
+    }
+  });
+
+  app.get("/naobrain-today/entries/history", async (req, res) => {
+    if (!authorizeToday(req, res)) return;
+    try {
+      const id = typeof req.query.id === "string" ? req.query.id : "";
+      res.json({ ok: true, history: await todayStore.history(id) });
+    } catch (error) {
+      res.status(400).json({ ok: false, error: error instanceof Error ? error.message : "request failed" });
+    }
+  });
+
+  app.post(
+    "/naobrain-today/entries",
+    express.json({ limit: "256kb" }),
+    async (req, res) => {
+      if (!authorizeToday(req, res)) return;
+      try {
+        const result = await todayStore.append({
+          ...(req.body || {}) as TodayEntryInput,
+          source: (req.body?.source || "web") as TodayEntryInput["source"],
+        });
+        res.status(201).json({ ok: true, ...result });
+      } catch (error) {
+        logEvent(config.logging, "error", "naobrain_today_append_error", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+        res.status(400).json({ ok: false, error: error instanceof Error ? error.message : "request failed" });
+      }
+    },
+  );
+
+  app.post(
+    "/naobrain-today/entries/update",
+    express.json({ limit: "256kb" }),
+    async (req, res) => {
+      if (!authorizeToday(req, res)) return;
+      try {
+        const result = await todayStore.update({
+          ...(req.body || {}) as TodayEntryUpdateInput,
+          source: (req.body?.source || "web") as TodayEntryInput["source"],
+        });
+        res.json({ ok: true, ...result });
+      } catch (error) {
+        logEvent(config.logging, "error", "naobrain_today_update_error", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+        res.status(400).json({ ok: false, error: error instanceof Error ? error.message : "request failed" });
+      }
+    },
+  );
+
+  app.get("/naobrain-today/projects", async (req, res) => {
+    if (!authorizeToday(req, res)) return;
+    try {
+      res.json({ ok: true, projects: await todayStore.listProjects(req.query.includeDeleted === "1") });
+    } catch (error) {
+      res.status(400).json({ ok: false, error: error instanceof Error ? error.message : "request failed" });
+    }
+  });
+
+  app.post(
+    "/naobrain-today/projects",
+    express.json({ limit: "32kb" }),
+    async (req, res) => {
+      if (!authorizeToday(req, res)) return;
+      try {
+        const action = String(req.body?.action || "create");
+        const project = action === "update"
+          ? await todayStore.updateProject(String(req.body?.id || ""), String(req.body?.name || ""))
+          : action === "delete"
+            ? await todayStore.deleteProject(String(req.body?.id || ""))
+            : await todayStore.createProject(String(req.body?.name || ""));
+        res.json({ ok: true, project, projects: await todayStore.listProjects() });
+      } catch (error) {
+        res.status(400).json({ ok: false, error: error instanceof Error ? error.message : "request failed" });
+      }
+    },
+  );
+
+  app.get("/naobrain-today/analyses", async (req, res) => {
+    if (!authorizeToday(req, res)) return;
+    try {
+      const limit = Number(req.query.limit || 20);
+      res.json({ ok: true, analyses: await todayStore.listAnalyses(limit) });
+    } catch (error) {
+      res.status(400).json({ ok: false, error: error instanceof Error ? error.message : "request failed" });
+    }
+  });
+
+  app.post(
+    "/naobrain-today/analyses",
+    express.json({ limit: "256kb" }),
+    async (req, res) => {
+      if (!authorizeToday(req, res)) return;
+      try {
+        const analysis = await todayStore.analyzeScope((req.body || {}) as TodayAnalysisInput);
+        res.json({ ok: true, analysis });
+      } catch (error) {
+        res.status(400).json({ ok: false, error: error instanceof Error ? error.message : "request failed" });
+      }
+    },
+  );
+
+  app.get("/naobrain-today/ai-settings", async (req, res) => {
+    if (!authorizeToday(req, res)) return;
+    try {
+      res.json({ ok: true, settings: await todayStore.aiSettings() });
+    } catch (error) {
+      res.status(400).json({ ok: false, error: error instanceof Error ? error.message : "request failed" });
+    }
+  });
+
+  app.post(
+    "/naobrain-today/ai-settings",
+    express.json({ limit: "16kb" }),
+    async (req, res) => {
+      if (!authorizeToday(req, res)) return;
+      try {
+        const settings = await todayStore.updateAiSettings({
+          fallback2: typeof req.body?.fallback2 === "string" ? req.body.fallback2 : undefined,
+          fallback3: typeof req.body?.fallback3 === "string" ? req.body.fallback3 : undefined,
+          clearFallback2: req.body?.clearFallback2 === true,
+          clearFallback3: req.body?.clearFallback3 === true,
+        });
+        res.json({ ok: true, settings });
+      } catch (error) {
+        res.status(400).json({ ok: false, error: error instanceof Error ? error.message : "request failed" });
+      }
+    },
+  );
+
+  app.post(
+    "/naobrain-today/daily-analysis",
+    express.json({ limit: "16kb" }),
+    async (req, res) => {
+      if (!authorizeToday(req, res)) return;
+      try {
+        res.json({ ok: true, results: await todayStore.runScheduledDailyAnalyses() });
+      } catch (error) {
+        res.status(400).json({ ok: false, error: error instanceof Error ? error.message : "request failed" });
+      }
+    },
+  );
+
+  app.post(
+    "/naobrain-today/sync",
+    express.json({ limit: "32kb" }),
+    async (req, res) => {
+      if (!authorizeToday(req, res)) return;
+      try {
+        const result = await todayStore.sync(req.body?.date);
+        res.json({ ok: true, ...result });
+      } catch (error) {
+        res.status(400).json({ ok: false, error: error instanceof Error ? error.message : "request failed" });
+      }
+    },
+  );
+
+  app.get("/naobrain-today/quiz/health", async (req, res) => {
+    res.setHeader("cache-control", "no-store");
+    if (!isAuthorizedNaoBrainRequest(req, config.naobrainBridgeToken)) {
+      res.sendStatus(404);
+      return;
+    }
+    res.json(quizStore.health());
+  });
+
+  app.get("/naobrain-today/quiz/state", async (req, res) => {
+    res.setHeader("cache-control", "no-store");
+    if (!isAuthorizedNaoBrainRequest(req, config.naobrainBridgeToken)) {
+      res.sendStatus(404);
+      return;
+    }
+    try {
+      res.json(await quizStore.getState());
+    } catch (error) {
+      res.status(400).json({ ok: false, error: error instanceof Error ? error.message : "request failed" });
+    }
+  });
+
+  app.post(
+    "/naobrain-today/quiz/session/start",
+    express.json({ limit: "32kb" }),
+    async (req, res) => {
+      res.setHeader("cache-control", "no-store");
+      if (!isAuthorizedNaoBrainRequest(req, config.naobrainBridgeToken)) {
+        res.sendStatus(404);
+        return;
+      }
+      try {
+        const allowedModes = new Set<QuizSessionMode>(["resume", "restart", "wrong", "due", "recommended"]);
+        const mode = allowedModes.has(req.body?.mode) ? req.body.mode as QuizSessionMode : "recommended";
+        const limit = Number.isInteger(req.body?.limit) ? req.body.limit : undefined;
+        res.json(await quizStore.start(mode, limit));
+      } catch (error) {
+        res.status(400).json({ ok: false, error: error instanceof Error ? error.message : "request failed" });
+      }
+    },
+  );
+
+  app.post(
+    "/naobrain-today/quiz/answer",
+    express.json({ limit: "32kb" }),
+    async (req, res) => {
+      res.setHeader("cache-control", "no-store");
+      if (!isAuthorizedNaoBrainRequest(req, config.naobrainBridgeToken)) {
+        res.sendStatus(404);
+        return;
+      }
+      try {
+        res.json(await quizStore.answer(req.body as QuizAnswerInput));
+      } catch (error) {
+        logEvent(config.logging, "error", "naobrain_quiz_answer_error", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+        res.status(400).json({ ok: false, error: error instanceof Error ? error.message : "request failed" });
+      }
+    },
+  );
+
+  app.post(
+    "/naobrain-today/quiz/generate",
+    express.json({ limit: "32kb" }),
+    async (req, res) => {
+      res.setHeader("cache-control", "no-store");
+      if (!isAuthorizedNaoBrainRequest(req, config.naobrainBridgeToken)) {
+        res.sendStatus(404);
+        return;
+      }
+      try {
+        res.json({ ok: true, ...(await quizStore.queueGeneration(String(req.body?.reason || "web requested question refresh"), req.body?.force === true)) });
+      } catch (error) {
+        res.status(400).json({ ok: false, error: error instanceof Error ? error.message : "request failed" });
+      }
+    },
+  );
+
+  app.post(
+    "/naobrain-today/quiz/sync",
+    express.json({ limit: "16kb" }),
+    async (req, res) => {
+      res.setHeader("cache-control", "no-store");
+      if (!isAuthorizedNaoBrainRequest(req, config.naobrainBridgeToken)) {
+        res.sendStatus(404);
+        return;
+      }
+      try {
+        res.json({ ok: true, ...(await quizStore.sync()) });
+      } catch (error) {
+        res.status(400).json({ ok: false, error: error instanceof Error ? error.message : "request failed" });
+      }
+    },
+  );
+
+  app.use(
+    mcpAuthRouter({
+      provider: oauthProvider,
+      issuerUrl: new URL(config.publicBaseUrl),
+      baseUrl: new URL(config.publicBaseUrl),
+      resourceServerUrl,
+      scopesSupported: config.oauth.scopes,
+      resourceName: "DevSpace",
+    }),
+  );
+
+  app.options("/mcp-app-assets/{*asset}", (_req, res) => {
+    setAssetHeaders(res);
+    res.sendStatus(204);
+  });
+
+  app.use(
+    "/mcp-app-assets",
+    express.static(uiBuildDirectory(), {
+      immutable: true,
+      maxAge: "1y",
+      fallthrough: false,
+      setHeaders: setAssetHeaders,
+    }),
+  );
+
+  app.get("/healthz", (_req, res) => {
+    res.json({ ok: true, name: "devspace" });
+  });
+
+  app.all("/mcp", async (req, res) => {
+    const requestId = res.locals.requestId as string | undefined;
+    const sessionId = req.header("mcp-session-id");
+    const initializeRequest = req.method === "POST" && isInitializeRequest(req.body);
+
+    await new Promise<void>((resolve, reject) => {
+      bearerAuth(req, res, (error?: unknown) => {
+        if (error) reject(error);
+        else resolve();
+      });
+    });
+    if (res.headersSent) return;
+
+    if (!req.auth?.resource || !checkResourceAllowed({ requestedResource: req.auth.resource, configuredResource: resourceServerUrl })) {
+      logEvent(config.logging, "warn", "auth_denied", {
+        requestId,
+        method: req.method,
+        path: requestPath(req),
+        reason: "invalid_oauth_resource",
+        ...requestLogFields(req, config),
+      });
+      sendJsonRpcError(res, 401, -32001, "Unauthorized");
+      return;
+    }
+
+    logEvent(config.logging, "debug", "mcp_request", {
+      requestId,
+      method: req.method,
+      sessionIdPresent: Boolean(sessionId),
+      sessionIdPrefix: sessionIdPrefix(sessionId),
+      isInitialize: initializeRequest,
+    });
+
+    try {
+      let transport: Transport | undefined;
+
+      if (sessionId) {
+        transport = transports.get(sessionId);
+        if (!transport) {
+          sendJsonRpcError(res, 404, -32000, "Unknown MCP session");
+          return;
+        }
+      } else if (initializeRequest) {
+        transport = new StreamableHTTPServerTransport({
+          sessionIdGenerator: () => randomUUID(),
+          onsessioninitialized: (newSessionId) => {
+            if (transport) transports.set(newSessionId, transport);
+            logEvent(config.logging, "info", "mcp_session_created", {
+              requestId,
+              sessionIdPrefix: sessionIdPrefix(newSessionId),
+              ...requestLogFields(req, config),
+            });
+          },
+        });
+
+        transport.onclose = () => {
+          const closedSessionId = transport?.sessionId;
+          if (closedSessionId) {
+            transports.delete(closedSessionId);
+            logEvent(config.logging, "info", "mcp_session_closed", {
+              sessionIdPrefix: sessionIdPrefix(closedSessionId),
+            });
+          }
+        };
+
+        const server = createMcpServer(
+          config,
+          workspaces,
+          reviewCheckpoints,
+          processSessions,
+          localAgentProviders,
+          todayStore,
+          quizStore,
+          outputLearningStore,
+        );
+        await server.connect(transport);
+      } else {
+        sendJsonRpcError(res, 400, -32000, "No valid MCP session");
+        return;
+      }
+
+      await runWithUsageSession(
+        privateUsageSessionKey(req, sessionId ?? transport.sessionId),
+        () => transport.handleRequest(req, res, req.body),
+      );
+    } catch (error) {
+      logEvent(config.logging, "error", "mcp_request_error", {
+        requestId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      if (!res.headersSent) {
+        sendJsonRpcError(res, 500, -32603, "Internal server error");
+      }
+    }
+  });
+
+  let closed = false;
+  return {
+    app,
+    config,
+    localAgentProviders,
+    close: () => {
+      if (closed) return;
+      closed = true;
+      clearTimeout(todayDailyAnalysisInitialTimer);
+      clearInterval(todayDailyAnalysisTimer);
+      clearTimeout(outputLearningInitialTimer);
+      clearInterval(outputLearningAnalysisTimer);
+      processSessions.shutdown();
+      oauthProvider.close();
+      workspaceStore.close?.();
+    },
+  };
+}
+
+async function isMainModule(): Promise<boolean> {
+  if (!process.argv[1]) return false;
+
+  const modulePath = await realpath(fileURLToPath(import.meta.url));
+  const entrypointPath = await realpath(process.argv[1]);
+  return modulePath === entrypointPath;
+}
+
+if (await isMainModule()) {
+  const { app, config, close, localAgentProviders } = createServer();
+  const httpServer = app.listen(config.port, config.host, () => {
+    console.log(
+      `devspace listening on http://${config.host}:${config.port}/mcp`,
+    );
+    console.log(`allowed roots: ${config.allowedRoots.join(", ")}`);
+    console.log("auth: oauth owner-token flow required");
+    console.log(`logging: ${config.logging.level} ${config.logging.format}`);
+    console.log(`request logging: ${config.logging.requests ? "enabled" : "disabled"}`);
+    console.log(`asset logging: ${config.logging.assets ? "enabled" : "disabled"}`);
+    console.log(`trust proxy: ${config.logging.trustProxy ? "enabled" : "disabled"}`);
+    if (config.subagents) {
+      console.log(`subagent providers: ${formatLocalAgentProviderAvailabilitySummary(localAgentProviders)}`);
+    }
+  });
+
+  const shutdown = () => {
+    httpServer.close(() => {
+      close();
+      process.exit(0);
+    });
+  };
+  process.once("SIGINT", shutdown);
+  process.once("SIGTERM", shutdown);
+}

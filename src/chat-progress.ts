@@ -17,13 +17,13 @@ import {
 import {
   progressRuntimeId,
   progressRuntimeLabel,
-  publishSharedProgressHistory,
-  pullSharedProgressHistory,
+  publishSharedProgressHistoryAsync,
+  pullSharedProgressHistoryAsync,
 } from "./progress-history-sync.js";
 
 export type ChatProgressStatus = "running" | "paused" | "completed" | "failed";
 export type EstimateSource = "provided" | "revised" | "history" | "progress" | "blended" | "none";
-export type ProgressSyncStatus = "local" | "synced" | "sync-failed" | "disabled";
+export type ProgressSyncStatus = "local" | "syncing" | "synced" | "sync-failed" | "disabled";
 
 export interface ChatProgressInput {
   sessionId?: string;
@@ -47,6 +47,9 @@ export interface ChatProgressInput {
   changes?: string;
   verification?: string;
   remaining?: string;
+  nextLikely?: string;
+  qualityScore?: number;
+  learningSummary?: string;
 }
 
 export interface ChatProgressRecord {
@@ -73,6 +76,9 @@ export interface ChatProgressRecord {
   changes?: string;
   verification?: string;
   remaining?: string;
+  nextLikely?: string;
+  qualityScore?: number;
+  learningSummary?: string;
   startedAt: string;
   updatedAt: string;
   finishedAt?: string;
@@ -361,15 +367,9 @@ export function updateChatProgress(input: ChatProgressInput): ChatProgressRecord
   const now = new Date();
   let store = readStore();
   let resolved = resolveProgressRecord(input, store.records);
-  let syncStatus: ProgressSyncStatus = resolved.existing?.syncStatus ?? "local";
+  const startsNewRecord = !resolved.existing;
+  let syncStatus: ProgressSyncStatus = resolved.existing?.syncStatus ?? (startsNewRecord ? "syncing" : "local");
   let syncError = resolved.existing?.syncError;
-  if (!resolved.existing) {
-    const pulled = pullSharedProgressHistory();
-    syncStatus = !pulled.enabled ? "disabled" : pulled.ok ? "synced" : "sync-failed";
-    syncError = pulled.ok ? undefined : pulled.error;
-    store = { ...store, records: mergeProgressRecords([...store.records, ...(pulled.records as ChatProgressRecord[])]) };
-    resolved = resolveProgressRecord(input, store.records);
-  }
   const id = resolved.id;
   const existing = resolved.existing;
   const status = input.status ?? (normalizePercent(input.overallProgress) >= 100 ? "completed" : "running");
@@ -460,6 +460,11 @@ export function updateChatProgress(input: ChatProgressInput): ChatProgressRecord
     changes: sanitizeMarkdown(input.changes, 4_000) || existing?.changes,
     verification: sanitizeMarkdown(input.verification, 4_000) || existing?.verification,
     remaining: sanitizeMarkdown(input.remaining, 4_000) || existing?.remaining,
+    nextLikely: sanitizeMarkdown(input.nextLikely, 2_000) || existing?.nextLikely,
+    qualityScore: Number.isFinite(input.qualityScore)
+      ? normalizePercent(input.qualityScore)
+      : existing?.qualityScore,
+    learningSummary: sanitizeMarkdown(input.learningSummary, 1_000) || existing?.learningSummary,
     startedAt,
     updatedAt: now.toISOString(),
     finishedAt,
@@ -511,18 +516,74 @@ export function updateChatProgress(input: ChatProgressInput): ChatProgressRecord
 
   let records = mergeProgressRecords([record, ...store.records.filter((item) => item.id !== id)]);
   writeStore({ schemaVersion: 1, updatedAt: now.toISOString(), records });
+  if (startsNewRecord && !finishedAt) {
+    const scheduledPull = pullSharedProgressHistoryAsync((pulled) => {
+      const latestStore = readStore();
+      const latestCurrent = latestStore.records.find((item) => item.id === id);
+      let mergedRecords = mergeProgressRecords([
+        ...latestStore.records,
+        ...(pulled.records as ChatProgressRecord[]),
+      ]);
+      if (latestCurrent && latestCurrent.status !== "completed" && latestCurrent.status !== "failed") {
+        const refreshedCurrent: ChatProgressRecord = {
+          ...latestCurrent,
+          syncStatus: !pulled.enabled ? "disabled" : pulled.ok ? "synced" : "sync-failed",
+          syncError: pulled.ok ? undefined : pulled.error,
+        };
+        mergedRecords = mergeProgressRecords([
+          refreshedCurrent,
+          ...mergedRecords.filter((item) => item.id !== id),
+        ]);
+      }
+      writeStore({ schemaVersion: 1, updatedAt: new Date().toISOString(), records: mergedRecords });
+    });
+    record = {
+      ...record,
+      syncStatus: !scheduledPull.enabled ? "disabled" : scheduledPull.ok ? "syncing" : "sync-failed",
+      syncError: scheduledPull.ok ? undefined : scheduledPull.error,
+    };
+    records = mergeProgressRecords([
+      record,
+      ...records,
+      ...(scheduledPull.records as ChatProgressRecord[]),
+    ]);
+    writeStore({ schemaVersion: 1, updatedAt: now.toISOString(), records });
+  }
   if (finishedAt) {
     const completedForRuntime = records
       .filter((item) => item.runtimeId === runtimeId && item.status === "completed")
       .slice(0, 500);
-    const published = publishSharedProgressHistory(completedForRuntime);
     record = {
       ...record,
-      syncStatus: !published.enabled ? "disabled" : published.ok ? "synced" : "sync-failed",
-      syncError: published.ok ? undefined : published.error,
+      syncStatus: "syncing",
+      syncError: undefined,
     };
     records = mergeProgressRecords([record, ...records.filter((item) => item.id !== id)]);
     writeStore({ schemaVersion: 1, updatedAt: now.toISOString(), records });
+    const scheduled = publishSharedProgressHistoryAsync(completedForRuntime, (published) => {
+      const latestStore = readStore();
+      const latest = latestStore.records.find((item) => item.id === id);
+      if (!latest) return;
+      const syncedRecord: ChatProgressRecord = {
+        ...latest,
+        syncStatus: !published.enabled ? "disabled" : published.ok ? "synced" : "sync-failed",
+        syncError: published.ok ? undefined : published.error,
+      };
+      const updatedRecords = mergeProgressRecords([
+        syncedRecord,
+        ...latestStore.records.filter((item) => item.id !== id),
+      ]);
+      writeStore({ schemaVersion: 1, updatedAt: new Date().toISOString(), records: updatedRecords });
+    });
+    if (!scheduled.enabled) {
+      record = { ...record, syncStatus: "disabled" };
+      records = mergeProgressRecords([record, ...records.filter((item) => item.id !== id)]);
+      writeStore({ schemaVersion: 1, updatedAt: now.toISOString(), records });
+    } else if (!scheduled.ok) {
+      record = { ...record, syncStatus: "sync-failed", syncError: scheduled.error };
+      records = mergeProgressRecords([record, ...records.filter((item) => item.id !== id)]);
+      writeStore({ schemaVersion: 1, updatedAt: now.toISOString(), records });
+    }
   }
   return record;
 }
@@ -608,6 +669,8 @@ function formatFinalExecutionInformation(record: ChatProgressRecord, label: stri
     `| ツール呼出 | ${record.taskCalls} | ${record.sessionCalls} |`,
     `| エラー | ${record.taskErrors} | ${record.sessionErrors} |`,
     `| 最終予測誤差 | ${formatPercent(record.finalEstimateErrorPercent)} | — |`,
+    `| 品質スコア | ${record.qualityScore === undefined ? "—" : `${record.qualityScore}/100`} | — |`,
+    `| 学習記録 | ${progressTableCell(record.learningSummary, "なし")} | — |`,
     "",
     `※ ${label}のMCP入出力をGPT-5.6 API料金へ換算した参考値です。GAG/GAE利用自体は現在の接続経路では無料で、表示価格はAPI換算の参考値です。ChatGPT本体の請求額や全token数ではありません。${scopeNote}`,
   ];
@@ -624,6 +687,7 @@ export function formatFinalTaskResponse(record: ChatProgressRecord): string {
     || (failed ? "完了条件を満たしていません。" : "なし");
   const remaining = record.remaining?.trim()
     || (failed ? record.risk.trim() || "失敗原因の解消が必要です。" : "なし");
+  const nextLikely = record.nextLikely?.trim() || "なし";
 
   return [
     "## 完了結果",
@@ -641,6 +705,10 @@ export function formatFinalTaskResponse(record: ChatProgressRecord): string {
     "## 残り",
     "",
     remaining,
+    "",
+    "## 次に起こりそうなこと",
+    "",
+    nextLikely,
     "",
     "## 実行情報",
     "",

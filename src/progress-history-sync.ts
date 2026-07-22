@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import {
   existsSync,
   mkdtempSync,
@@ -71,17 +71,8 @@ function syncEnabled(): boolean {
 }
 
 function timeoutMs(): number {
-  const parsed = Number(process.env.DEVSPACE_PROGRESS_SYNC_TIMEOUT_MS || 45_000);
-  return Number.isFinite(parsed) ? Math.max(5_000, Math.min(60_000, Math.round(parsed))) : 45_000;
-}
-
-function runRclone(args: string[]): void {
-  execFileSync("rclone", args, {
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"],
-    timeout: timeoutMs(),
-    maxBuffer: 2 * 1024 * 1024,
-  });
+  const parsed = Number(process.env.DEVSPACE_PROGRESS_SYNC_TIMEOUT_MS || 8_000);
+  return Number.isFinite(parsed) ? Math.max(1_000, Math.min(30_000, Math.round(parsed))) : 8_000;
 }
 
 function safeError(error: unknown): string {
@@ -98,13 +89,20 @@ function readSnapshot(file: string): unknown[] {
   }
 }
 
-export function pullSharedProgressHistory(options: { force?: boolean } = {}): ProgressHistorySyncResult {
+export function pullSharedProgressHistoryAsync(
+  onComplete: (result: ProgressHistorySyncResult) => void,
+): ProgressHistorySyncResult {
   const runtimeId = progressRuntimeId();
   const remote = syncRemote();
-  if (!syncEnabled()) return { enabled: false, ok: true, records: [], runtimeId, remote };
+  if (!syncEnabled()) {
+    const result = { enabled: false, ok: true, records: [], runtimeId, remote };
+    queueMicrotask(() => onComplete(result));
+    return result;
+  }
+
   const now = Date.now();
-  if (!options.force && remoteCache && now - lastPullAt < 10 * 60_000) {
-    return {
+  if (remoteCache && now - lastPullAt < 10 * 60_000) {
+    const result = {
       enabled: true,
       ok: lastPullError === undefined,
       records: remoteCache,
@@ -112,34 +110,62 @@ export function pullSharedProgressHistory(options: { force?: boolean } = {}): Pr
       remote,
       error: lastPullError,
     };
+    queueMicrotask(() => onComplete(result));
+    return result;
   }
 
   const directory = mkdtempSync(join(tmpdir(), "devspace-progress-pull-"));
   try {
-    runRclone(["copy", remote, directory, "--include", "*.json", "--max-depth", "1", "--retries", "1", "--low-level-retries", "1"]);
-    const records = existsSync(directory)
-      ? readdirSync(directory)
-          .filter((name) => name.endsWith(".json"))
-          .flatMap((name) => readSnapshot(join(directory, name)))
-      : [];
-    remoteCache = records;
-    lastPullAt = now;
-    lastPullError = undefined;
-    return { enabled: true, ok: true, records, runtimeId, remote };
+    execFile(
+      "rclone",
+      ["copy", remote, directory, "--include", "*.json", "--max-depth", "1", "--retries", "1", "--low-level-retries", "1"],
+      {
+        encoding: "utf8",
+        timeout: timeoutMs(),
+        maxBuffer: 2 * 1024 * 1024,
+      },
+      (error) => {
+        let result: ProgressHistorySyncResult;
+        if (error) {
+          remoteCache ??= [];
+          lastPullAt = now;
+          lastPullError = safeError(error);
+          result = { enabled: true, ok: false, records: remoteCache, runtimeId, remote, error: lastPullError };
+        } else {
+          const records = existsSync(directory)
+            ? readdirSync(directory)
+                .filter((name) => name.endsWith(".json"))
+                .flatMap((name) => readSnapshot(join(directory, name)))
+            : [];
+          remoteCache = records;
+          lastPullAt = now;
+          lastPullError = undefined;
+          result = { enabled: true, ok: true, records, runtimeId, remote };
+        }
+        rmSync(directory, { recursive: true, force: true });
+        onComplete(result);
+      },
+    );
+    return { enabled: true, ok: true, records: remoteCache ?? [], runtimeId, remote };
   } catch (error) {
-    remoteCache ??= [];
-    lastPullAt = now;
-    lastPullError = safeError(error);
-    return { enabled: true, ok: false, records: remoteCache, runtimeId, remote, error: lastPullError };
-  } finally {
     rmSync(directory, { recursive: true, force: true });
+    const result = { enabled: true, ok: false, records: remoteCache ?? [], runtimeId, remote, error: safeError(error) };
+    queueMicrotask(() => onComplete(result));
+    return result;
   }
 }
 
-export function publishSharedProgressHistory(records: unknown[]): ProgressHistorySyncResult {
+export function publishSharedProgressHistoryAsync(
+  records: unknown[],
+  onComplete: (result: ProgressHistorySyncResult) => void,
+): ProgressHistorySyncResult {
   const runtimeId = progressRuntimeId();
   const remote = syncRemote();
-  if (!syncEnabled()) return { enabled: false, ok: true, records: [], runtimeId, remote };
+  if (!syncEnabled()) {
+    const result = { enabled: false, ok: true, records: [], runtimeId, remote };
+    queueMicrotask(() => onComplete(result));
+    return result;
+  }
 
   const directory = mkdtempSync(join(tmpdir(), "devspace-progress-push-"));
   const file = join(directory, `${runtimeId}.json`);
@@ -151,14 +177,32 @@ export function publishSharedProgressHistory(records: unknown[]): ProgressHistor
   };
   try {
     writeFileSync(file, `${JSON.stringify(snapshot, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
-    runRclone(["copyto", file, `${remote}/${runtimeId}.json`, "--retries", "2", "--low-level-retries", "2"]);
-    remoteCache = undefined;
-    lastPullAt = 0;
-    lastPullError = undefined;
+    execFile(
+      "rclone",
+      ["copyto", file, `${remote}/${runtimeId}.json`, "--retries", "1", "--low-level-retries", "1"],
+      {
+        encoding: "utf8",
+        timeout: timeoutMs(),
+        maxBuffer: 2 * 1024 * 1024,
+      },
+      (error) => {
+        const result: ProgressHistorySyncResult = error
+          ? { enabled: true, ok: false, records: [], runtimeId, remote, error: safeError(error) }
+          : { enabled: true, ok: true, records: [], runtimeId, remote };
+        if (!error) {
+          remoteCache = undefined;
+          lastPullAt = 0;
+          lastPullError = undefined;
+        }
+        rmSync(directory, { recursive: true, force: true });
+        onComplete(result);
+      },
+    );
     return { enabled: true, ok: true, records: [], runtimeId, remote };
   } catch (error) {
-    return { enabled: true, ok: false, records: [], runtimeId, remote, error: safeError(error) };
-  } finally {
     rmSync(directory, { recursive: true, force: true });
+    const result = { enabled: true, ok: false, records: [], runtimeId, remote, error: safeError(error) };
+    queueMicrotask(() => onComplete(result));
+    return result;
   }
 }
