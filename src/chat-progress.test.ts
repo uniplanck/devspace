@@ -7,6 +7,7 @@ import {
   listChatProgress,
   updateChatProgress,
 } from "./chat-progress.js";
+import { estimateAccuracyPercent, estimateCalibration } from "./progress-estimator.js";
 
 const previousPath = process.env.DEVSPACE_CHAT_PROGRESS_PATH;
 const previousUsageLabel = process.env.DEVSPACE_USAGE_LABEL;
@@ -16,6 +17,14 @@ const progressFile = join(stateDir, "chat-progress.json");
 process.env.DEVSPACE_CHAT_PROGRESS_PATH = progressFile;
 process.env.DEVSPACE_USAGE_LABEL = "GAG";
 process.env.DEVSPACE_PROGRESS_STALE_MINUTES = "15";
+
+assert.equal(estimateAccuracyPercent(90, 100), 90);
+assert.equal(estimateAccuracyPercent(200, 100), 0);
+const accuracyCalibration = estimateCalibration([
+  { taskCategory: "agent-runtime", runtimeLabel: "GAG", status: "completed", elapsedSeconds: 100, initialEstimateSeconds: 90 },
+  { taskCategory: "agent-runtime", runtimeLabel: "GAG", status: "completed", elapsedSeconds: 100, initialEstimateSeconds: 110 },
+], { taskCategory: "agent-runtime", runtimeLabel: "GAG" });
+assert.equal(accuracyCalibration.averageInitialAccuracyPercent, 90);
 
 const started = updateChatProgress({
   sessionId: "session_test",
@@ -96,11 +105,30 @@ assert.deepEqual(
   finalHeadings,
 );
 assert.doesNotMatch(completedProgress, /\*\*GAG · 実行状況\*\*/u);
+assert.match(completedProgress, /\| 日時 \| .* JST \|/u);
+assert.match(completedProgress, /\| 開始 → 終了 \| .* JST → .* JST \|/u);
 assert.match(completedProgress, /\| 作業経過時間 \|/u);
+assert.match(completedProgress, /\| 開始時予測 \|/u);
+assert.match(completedProgress, /\| 予測一致率 \|/u);
 assert.match(completedProgress, /\| MCP処理時間 \|/u);
 assert.match(completedProgress, /\| 入力推定 \|/u);
 assert.match(completedProgress, /\| 出力推定 \|/u);
 assert.match(completedProgress, /GAG\/GAE利用自体は現在の接続経路では無料/u);
+const timedCompletedProgress = formatChatProgressResult({
+  ...completed,
+  startedAt: "2026-07-22T01:00:00.000Z",
+  finishedAt: "2026-07-22T01:10:00.000Z",
+  updatedAt: "2026-07-22T01:10:00.000Z",
+  elapsedSeconds: 600,
+  initialEstimateSeconds: 720,
+  initialEstimateAccuracyPercent: 80,
+  historyInitialAccuracyAveragePercent: 85.4,
+});
+assert.match(timedCompletedProgress, /\| 日時 \| 2026\/07\/22 10:10:00 JST \| — \|/u);
+assert.match(timedCompletedProgress, /\| 開始 → 終了 \| 2026\/07\/22 10:00:00 JST → 2026\/07\/22 10:10:00 JST \| — \|/u);
+assert.match(timedCompletedProgress, /\| 作業経過時間 \| 10\.0m \| — \|/u);
+assert.match(timedCompletedProgress, /\| 開始時予測 \| 12\.0m \| — \|/u);
+assert.match(timedCompletedProgress, /\| 予測一致率 \| 80% \| 過去平均 85\.4% \|/u);
 assert.equal(listChatProgress().length, 1);
 
 const parallel = updateChatProgress({
