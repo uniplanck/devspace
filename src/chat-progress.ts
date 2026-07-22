@@ -9,6 +9,7 @@ import {
 } from "./usage-meter.js";
 import {
   applyEstimateCalibration,
+  estimateAccuracyPercent,
   estimateCalibration,
   estimateErrorPercent,
   inferTaskCategory,
@@ -82,7 +83,9 @@ export interface ChatProgressRecord {
   remainingSeconds?: number;
   estimateSource: EstimateSource;
   initialEstimateErrorPercent?: number;
+  initialEstimateAccuracyPercent?: number;
   finalEstimateErrorPercent?: number;
+  historyInitialAccuracyAveragePercent?: number;
   historySampleCount: number;
   historyCorrectionFactor: number;
   historyConfidence: "none" | "low" | "medium" | "high";
@@ -384,6 +387,9 @@ export function updateChatProgress(input: ChatProgressInput): ChatProgressRecord
   const initialEstimateErrorPercent = finishedAt
     ? estimateErrorPercent(initialEstimateSeconds, elapsed)
     : existing?.initialEstimateErrorPercent;
+  const initialEstimateAccuracyPercent = finishedAt
+    ? estimateAccuracyPercent(initialEstimateSeconds, elapsed)
+    : existing?.initialEstimateAccuracyPercent;
   const finalEstimateErrorPercent = finishedAt
     ? estimateErrorPercent(finalForecastTotalSeconds, elapsed)
     : existing?.finalEstimateErrorPercent;
@@ -423,7 +429,9 @@ export function updateChatProgress(input: ChatProgressInput): ChatProgressRecord
       : Math.max(0, estimate.total - elapsed),
     estimateSource: status === "completed" ? (existing?.estimateSource ?? estimate.source) : estimate.source,
     initialEstimateErrorPercent,
+    initialEstimateAccuracyPercent,
     finalEstimateErrorPercent,
+    historyInitialAccuracyAveragePercent: calibration.averageInitialAccuracyPercent,
     historySampleCount: calibration.sampleCount,
     historyCorrectionFactor: calibration.correctionFactor,
     historyConfidence: calibration.confidence,
@@ -502,7 +510,7 @@ function progressTableCell(value: string | undefined, fallback: string): string 
   return (normalized || fallback).replace(/\|/gu, "\\|");
 }
 
-function formatJst(iso: string): string {
+function formatJst(iso: string, includeSeconds = false): string {
   const value = new Intl.DateTimeFormat("ja-JP", {
     timeZone: "Asia/Tokyo",
     year: "numeric",
@@ -510,6 +518,7 @@ function formatJst(iso: string): string {
     day: "2-digit",
     hour: "2-digit",
     minute: "2-digit",
+    ...(includeSeconds ? { second: "2-digit" as const } : {}),
     hourCycle: "h23",
   }).format(new Date(iso));
   return `${value} JST`;
@@ -521,6 +530,13 @@ function formatPercent(value: number | undefined): string {
 
 function formatFinalExecutionInformation(record: ChatProgressRecord, label: string): string[] {
   const elapsed = compactDuration(record.elapsedSeconds * 1000);
+  const finishedAt = record.finishedAt ?? record.updatedAt;
+  const initialEstimate = record.initialEstimateSeconds === undefined
+    ? "—"
+    : compactDuration(record.initialEstimateSeconds * 1000);
+  const historicalAccuracy = record.historyInitialAccuracyAveragePercent === undefined
+    ? "—"
+    : `過去平均 ${formatPercent(record.historyInitialAccuracyAveragePercent)}`;
   const taskCost = compactYenRange(record.taskEstimatedJpy, record.taskEstimatedJpyMax);
   const sessionCost = compactYenRange(
     record.sessionEstimatedJpy,
@@ -537,14 +553,17 @@ function formatFinalExecutionInformation(record: ChatProgressRecord, label: stri
     "",
     `| 指標 | 今回 | ${cumulativeLabel} |`,
     "|---|---:|---:|",
+    `| 日時 | ${formatJst(finishedAt, true)} | — |`,
+    `| 開始 → 終了 | ${formatJst(record.startedAt, true)} → ${formatJst(finishedAt, true)} | — |`,
     `| 作業経過時間 | ${elapsed} | — |`,
+    `| 開始時予測 | ${initialEstimate} | — |`,
+    `| 予測一致率 | ${formatPercent(record.initialEstimateAccuracyPercent)} | ${historicalAccuracy} |`,
     `| MCP処理時間 | ${compactDuration(record.taskToolDurationMs)} | ${compactDuration(record.sessionToolDurationMs)} |`,
     `| 入力推定 | 約${record.taskInputTokens.toLocaleString("ja-JP")} tok | 約${record.sessionInputTokens.toLocaleString("ja-JP")} tok |`,
     `| 出力推定 | 約${record.taskOutputTokens.toLocaleString("ja-JP")} tok | 約${record.sessionOutputTokens.toLocaleString("ja-JP")} tok |`,
     `| 推定費用 | ${taskCost} | ${sessionCost} |`,
     `| ツール呼出 | ${record.taskCalls} | ${record.sessionCalls} |`,
     `| エラー | ${record.taskErrors} | ${record.sessionErrors} |`,
-    `| 初回予測誤差 | ${formatPercent(record.initialEstimateErrorPercent)} | — |`,
     `| 最終予測誤差 | ${formatPercent(record.finalEstimateErrorPercent)} | — |`,
     "",
     `※ ${label}のMCP入出力をGPT-5.6 API料金へ換算した参考値です。GAG/GAE利用自体は現在の接続経路では無料で、表示価格はAPI換算の参考値です。ChatGPT本体の請求額や全token数ではありません。${scopeNote}`,

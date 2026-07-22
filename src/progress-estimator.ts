@@ -16,6 +16,7 @@ export interface ProgressEstimateCalibration {
   medianActualSeconds?: number;
   initialMape?: number;
   finalMape?: number;
+  averageInitialAccuracyPercent?: number;
   confidence: "none" | "low" | "medium" | "high";
 }
 
@@ -31,6 +32,12 @@ function median(values: number[], includeZero = false): number | undefined {
   const middle = Math.floor(sorted.length / 2);
   if (sorted.length % 2 === 1) return sorted[middle];
   return (sorted[middle - 1]! + sorted[middle]!) / 2;
+}
+
+function mean(values: number[]): number | undefined {
+  const finite = values.filter((value) => Number.isFinite(value));
+  if (!finite.length) return undefined;
+  return finite.reduce((total, value) => total + value, 0) / finite.length;
 }
 
 function clamp(value: number, minimum: number, maximum: number): number {
@@ -116,6 +123,8 @@ export function estimateCalibration(
     const error = percentageError(sample.finalForecastTotalSeconds, Number(sample.elapsedSeconds));
     return error === undefined ? [] : [error];
   });
+  const initialAccuracies = initialErrors.map((error) => clamp(1 - error, 0, 1) * 100);
+  const averageInitialAccuracy = mean(initialAccuracies);
   const confidence = sampleCount >= 12 ? "high" : sampleCount >= 6 ? "medium" : sampleCount >= 2 ? "low" : "none";
 
   return {
@@ -125,6 +134,9 @@ export function estimateCalibration(
     medianActualSeconds: actualMedian,
     initialMape: median(initialErrors, true),
     finalMape: median(finalErrors, true),
+    averageInitialAccuracyPercent: averageInitialAccuracy === undefined
+      ? undefined
+      : Math.round(averageInitialAccuracy * 10) / 10,
     confidence,
   };
 }
@@ -137,4 +149,10 @@ export function applyEstimateCalibration(seconds: number | undefined, calibratio
 export function estimateErrorPercent(forecastSeconds: number | undefined, actualSeconds: number): number | undefined {
   const error = percentageError(forecastSeconds, actualSeconds);
   return error === undefined ? undefined : Math.round(error * 1000) / 10;
+}
+
+export function estimateAccuracyPercent(forecastSeconds: number | undefined, actualSeconds: number): number | undefined {
+  const error = percentageError(forecastSeconds, actualSeconds);
+  if (error === undefined) return undefined;
+  return Math.round(clamp(1 - error, 0, 1) * 1_000) / 10;
 }
