@@ -166,6 +166,7 @@ export function initializeComputerUsePolicy(
 export function enableChatGptBrowserPolicy(
   path: string = computerUsePolicyPath(),
   home: string = homedir(),
+  platform: NodeJS.Platform = process.platform,
 ): { path: string; policy: ComputerUsePolicy } {
   const absolutePath = resolve(path);
   const loaded = loadComputerUsePolicy(absolutePath, home);

@@ -807,6 +807,37 @@ function readImageToDriveJobInput(args: string[]): Record<string, unknown> {
     ...(timeoutSeconds === undefined ? {} : { timeoutMs: Math.round(timeoutSeconds * 1000) }),
     autoSubmit: !args.includes("--manual-submit"),
     closeWhenDone: !args.includes("--keep-tab"),
+    autoSubmit: args.includes("--auto-submit"),
+    writingKernel,
+  };
+}
+
+function readImageToDriveJobInput(args: string[]): Record<string, unknown> {
+  const prompt = readJobsOption(args, "--prompt");
+  if (!prompt) throw new Error("Image-to-Drive jobs require --prompt <prompt>.");
+  const countValue = readJobsOption(args, "--count");
+  const count = countValue === undefined ? 1 : Number(countValue);
+  if (!Number.isInteger(count) || count < 1 || count > 4) throw new Error("--count must be an integer from 1 to 4.");
+  const timeoutSecondsValue = readJobsOption(args, "--timeout-seconds");
+  const timeoutSeconds = timeoutSecondsValue === undefined ? undefined : Number(timeoutSecondsValue);
+  if (timeoutSeconds !== undefined && (!Number.isFinite(timeoutSeconds) || timeoutSeconds < 30 || timeoutSeconds > 600)) {
+    throw new Error("--timeout-seconds must be from 30 to 600 for image-to-drive.");
+  }
+  const driveRemote = readJobsOption(args, "--drive-remote");
+  const drivePath = readJobsOption(args, "--drive-path");
+  const filePrefix = readJobsOption(args, "--file-prefix");
+  const url = readJobsOption(args, "--url");
+  return {
+    prompt,
+    count,
+    transparent: args.includes("--transparent"),
+    ...(driveRemote ? { driveRemote } : {}),
+    ...(drivePath ? { drivePath } : {}),
+    ...(filePrefix ? { filePrefix } : {}),
+    ...(url ? { url } : {}),
+    ...(timeoutSeconds === undefined ? {} : { timeoutMs: Math.round(timeoutSeconds * 1000) }),
+    autoSubmit: !args.includes("--manual-submit"),
+    closeWhenDone: !args.includes("--keep-tab"),
   };
 }
 
