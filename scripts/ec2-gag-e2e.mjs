@@ -4,6 +4,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
 const mode = process.env.GAG_E2E_MODE ?? "full";
+const expectedToolMode = process.env.GAG_E2E_EXPECT_TOOL_MODE ?? "full";
 const baseUrl = process.env.GAG_E2E_BASE_URL ?? "http://127.0.0.1:7676";
 const defaultConfigDir = process.platform === "linux" && process.env.HOME
   ? `${process.env.HOME}/.devspace`
@@ -157,16 +158,17 @@ await client.connect(transport);
 
 const listedTools = await client.listTools();
 const toolNames = new Set(listedTools.tools.map((tool) => tool.name));
-for (const requiredTool of [
+const requiredTools = [
   "begin_task",
   "report_progress",
   "finalize_task",
   "output_core_status",
   "open_workspace",
   "read",
-  "grep",
   "bash",
-]) {
+];
+if (expectedToolMode === "full") requiredTools.push("grep");
+for (const requiredTool of requiredTools) {
   if (!toolNames.has(requiredTool)) {
     throw new Error(`Required MCP tool is missing: ${requiredTool}`);
   }
@@ -211,12 +213,14 @@ if (!resultText(readResult).includes("@waishnav/devspace")) {
   throw new Error("read verification did not find the package name.");
 }
 
-const grepResult = assertToolResult("grep", await client.callTool({
-  name: "grep",
-  arguments: { workspaceId, path: "package.json", pattern: "ec2:doctor" },
-}));
-if (!resultText(grepResult).includes("ec2:doctor")) {
-  throw new Error("grep verification did not find ec2:doctor.");
+if (expectedToolMode === "full") {
+  const grepResult = assertToolResult("grep", await client.callTool({
+    name: "grep",
+    arguments: { workspaceId, path: "package.json", pattern: "ec2:doctor" },
+  }));
+  if (!resultText(grepResult).includes("ec2:doctor")) {
+    throw new Error("grep verification did not find ec2:doctor.");
+  }
 }
 
 assertToolResult("test", await client.callTool({
