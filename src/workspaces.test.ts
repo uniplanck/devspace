@@ -54,10 +54,14 @@ try {
   const { workspace, agentsFiles, availableAgentsFiles } = await registry.openWorkspace(root);
 
   assert.equal(workspace.mode, "checkout");
-  assert.deepEqual(
-    agentsFiles.map((file) => file.content),
-    ["global instructions\n", "root instructions\n"],
+  assert.equal(agentsFiles.length, 2);
+  assert.match(agentsFiles[0]!.content, /^global instructions\n/u);
+  assert.match(agentsFiles[0]!.content, /## GAG \/ GAE Rapid Execution Protocol/u);
+  assert.equal(
+    agentsFiles[0]!.content.match(/## GAG \/ GAE Rapid Execution Protocol/gu)?.length,
+    1,
   );
+  assert.equal(agentsFiles[1]!.content, "root instructions\n");
   assert.deepEqual(
     availableAgentsFiles.map((file) => file.path),
     [join(root, "nested", "AGENTS.md")],
@@ -214,10 +218,13 @@ try {
     assert.equal(aliasWorkspace.workspace.sourceRoot, join(aliasRoot, "git-project"));
 
     const aliasCheckout = await new WorkspaceRegistry(aliasConfig).openWorkspace(aliasRoot);
-    assert.deepEqual(
-      aliasCheckout.agentsFiles.map((file) => file.content),
-      ["global instructions\n", "root instructions\n"],
+    assert.equal(aliasCheckout.agentsFiles.length, 2);
+    assert.match(aliasCheckout.agentsFiles[0]!.content, /^global instructions\n/u);
+    assert.match(
+      aliasCheckout.agentsFiles[0]!.content,
+      /## GAG \/ GAE Rapid Execution Protocol/u,
     );
+    assert.equal(aliasCheckout.agentsFiles[1]!.content, "root instructions\n");
   }
 } finally {
   await rm(root, { recursive: true, force: true });
