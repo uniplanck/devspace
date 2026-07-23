@@ -6,7 +6,6 @@ import {
   approveBrowserAction,
   browserStatus,
   classifyBrowserElementRisk,
-  effectiveBrowserBackgroundMode,
   isManagedAutomationBrowserSession,
   listBrowserApprovals,
   resolveBrowserBackgroundMode,
@@ -48,13 +47,13 @@ try {
     isManagedAutomationBrowserSession({ ...legacyManualSession, managedBy: "gpt-agent-automation" }),
     true,
   );
-  assert.equal(effectiveBrowserBackgroundMode("background-window", {}), "background-window");
+  assert.equal(resolveBrowserBackgroundMode("background-window", {}), "background-window");
   assert.equal(
-    effectiveBrowserBackgroundMode("background-window", { DEVSPACE_BROWSER_BACKGROUND_MODE: "headless" }),
+    resolveBrowserBackgroundMode("background-window", { DEVSPACE_BROWSER_BACKGROUND_MODE: "headless" }),
     "headless",
   );
   assert.equal(
-    effectiveBrowserBackgroundMode("headless", { DEVSPACE_BROWSER_BACKGROUND_MODE: "window" }),
+    resolveBrowserBackgroundMode("headless", { DEVSPACE_BROWSER_BACKGROUND_MODE: "window" }),
     "window",
   );
 

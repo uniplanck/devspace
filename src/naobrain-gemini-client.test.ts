@@ -25,7 +25,7 @@ try {
   const primaryClient = new NaoBrainGeminiClient({
     primaryApiKey: "test-primary-key",
     model: "gemini-3.6-flash",
-    fallbackModel: "gemini-3.5-flash-lite",
+    fallbackModels: ["gemini-3.5-flash-lite"],
     fallbackKeysFile,
   });
   const primaryResult = await primaryClient.generateJson({
@@ -63,7 +63,7 @@ try {
   const fallbackClient = new NaoBrainGeminiClient({
     primaryApiKey: "test-primary-key",
     model: "gemini-3.6-flash",
-    fallbackModel: "gemini-3.5-flash-lite",
+    fallbackModels: ["gemini-3.5-flash-lite"],
     fallbackKeysFile,
   });
   const fallbackResult = await fallbackClient.generateJson({

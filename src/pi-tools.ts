@@ -486,37 +486,6 @@ function runtimeImageToDriveInput(tokens: string[]): Record<string, unknown> {
     ...(timeoutSeconds === undefined ? {} : { timeoutMs: Math.round(timeoutSeconds * 1000) }),
     autoSubmit: !tokens.includes("--manual-submit"),
     closeWhenDone: !tokens.includes("--keep-tab"),
-    autoSubmit: tokens.includes("--auto-submit"),
-    writingKernel,
-  };
-}
-
-function runtimeImageToDriveInput(tokens: string[]): Record<string, unknown> {
-  const prompt = runtimeOption(tokens, "--prompt");
-  if (!prompt) throw new Error("Image-to-Drive jobs require --prompt <prompt>.");
-  const countValue = runtimeOption(tokens, "--count");
-  const count = countValue === undefined ? 1 : Number(countValue);
-  if (!Number.isInteger(count) || count < 1 || count > 4) throw new Error("--count must be an integer from 1 to 4.");
-  const timeoutSecondsValue = runtimeOption(tokens, "--timeout-seconds");
-  const timeoutSeconds = timeoutSecondsValue === undefined ? undefined : Number(timeoutSecondsValue);
-  if (timeoutSeconds !== undefined && (!Number.isFinite(timeoutSeconds) || timeoutSeconds < 30 || timeoutSeconds > 600)) {
-    throw new Error("--timeout-seconds must be from 30 to 600 for image-to-drive.");
-  }
-  const driveRemote = runtimeOption(tokens, "--drive-remote");
-  const drivePath = runtimeOption(tokens, "--drive-path");
-  const filePrefix = runtimeOption(tokens, "--file-prefix");
-  const url = runtimeOption(tokens, "--url");
-  return {
-    prompt,
-    count,
-    transparent: tokens.includes("--transparent"),
-    ...(driveRemote ? { driveRemote } : {}),
-    ...(drivePath ? { drivePath } : {}),
-    ...(filePrefix ? { filePrefix } : {}),
-    ...(url ? { url } : {}),
-    ...(timeoutSeconds === undefined ? {} : { timeoutMs: Math.round(timeoutSeconds * 1000) }),
-    autoSubmit: !tokens.includes("--manual-submit"),
-    closeWhenDone: !tokens.includes("--keep-tab"),
   };
 }
 

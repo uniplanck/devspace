@@ -12,6 +12,7 @@ try {
     promptFile: join(root, "config", "prompt.md"),
     geminiModel: "gemini-test",
     geminiFallbackModel: "gemini-test-lite",
+    geminiTertiaryModel: "gemini-test-tertiary",
     geminiFallbackKeysFile: join(root, "config", "gemini-fallback-keys.json"),
     driveBasePath: "NaoBrain/Quiz",
     sourceRoots: [],

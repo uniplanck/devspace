@@ -71,7 +71,7 @@ try {
   const finalizedText = finalized.content[0]?.type === "text" ? finalized.content[0].text : "";
   assert.deepEqual(
     finalizedText.split("\n").filter((line) => line.startsWith("## ")),
-    ["## 完了結果", "## 変更", "## 検証", "## 残り", "## 実行情報"],
+    ["## 完了結果", "## 変更", "## 検証", "## 残り", "## 次に起こりそうなこと", "## 実行情報"],
   );
   assert.match(finalizedText, /完了しました/u);
   assert.match(finalizedText, /テスト成功/u);
