@@ -163,6 +163,8 @@ export interface NaoBrainQuizConfig {
   promptFile: string;
   geminiApiKey?: string;
   geminiModel: string;
+  geminiFallbackModel: string;
+  geminiTertiaryModel: string;
   geminiFallbackKeysFile: string;
   driveRemote?: string;
   driveBasePath: string;
@@ -188,6 +190,7 @@ export class NaoBrainQuizStore {
     this.gemini = new NaoBrainGeminiClient({
       primaryApiKey: config.geminiApiKey,
       model: config.geminiModel,
+      fallbackModels: [config.geminiFallbackModel, config.geminiTertiaryModel],
       fallbackKeysFile: config.geminiFallbackKeysFile,
     });
   }
@@ -198,6 +201,8 @@ export class NaoBrainQuizStore {
       name: "naobrain-quiz",
       dataDir: this.config.dataDir,
       model: this.config.geminiModel,
+      fallbackModel: this.config.geminiFallbackModel,
+      tertiaryModel: this.config.geminiTertiaryModel,
       geminiConfigured: Boolean(this.config.geminiApiKey),
       driveConfigured: Boolean(this.config.driveRemote),
       sourceRoots: this.config.sourceRoots.length,
@@ -498,7 +503,6 @@ export class NaoBrainQuizStore {
     const result = await this.gemini.generateJson({
       systemInstruction: DEFAULT_PROMPT,
       userPayload: { prompt },
-      temperature: 0.45,
       maxOutputTokens: 6_000,
       timeoutMs: 45_000,
     });

@@ -8,7 +8,8 @@ DROPIN_DIR="/etc/systemd/system/${SERVICE_NAME}.d"
 DATA_DIR="/home/ubuntu/.local/share/devspace/naobrain-today"
 DRIVE_REMOTE="${DEVSPACE_NAOBRAIN_DRIVE_REMOTE:-grive:}"
 DRIVE_BASE_PATH="${DEVSPACE_NAOBRAIN_DRIVE_BASE_PATH:-NaoBrain/Today}"
-DEFAULT_MODEL="${DEVSPACE_NAOBRAIN_GEMINI_MODEL:-gemini-3.1-flash-lite}"
+DEFAULT_MODEL="${DEVSPACE_NAOBRAIN_GEMINI_MODEL:-gemini-3.6-flash}"
+DEFAULT_FALLBACK_MODEL="${DEVSPACE_NAOBRAIN_GEMINI_FALLBACK_MODEL:-gemini-3.5-flash-lite}"
 
 for command in node npm curl openssl rclone sudo systemctl tailscale; do
   command -v "$command" >/dev/null 2>&1 || { echo "Missing command: $command" >&2; exit 1; }
@@ -22,32 +23,36 @@ if [[ ${#GEMINI_API_KEY} -lt 32 ]]; then
   exit 1
 fi
 
-read -r -p "Gemini model ID [${DEFAULT_MODEL}]: " GEMINI_MODEL
+read -r -p "Primary Gemini model ID [${DEFAULT_MODEL}]: " GEMINI_MODEL
 GEMINI_MODEL="${GEMINI_MODEL:-$DEFAULT_MODEL}"
+read -r -p "Fallback Gemini model ID [${DEFAULT_FALLBACK_MODEL}]: " GEMINI_FALLBACK_MODEL
+GEMINI_FALLBACK_MODEL="${GEMINI_FALLBACK_MODEL:-$DEFAULT_FALLBACK_MODEL}"
 
-printf 'Validating Gemini key and model... '
-GEMINI_API_KEY="$GEMINI_API_KEY" GEMINI_MODEL="$GEMINI_MODEL" node <<'NODE'
+printf 'Validating Gemini key and models... '
+GEMINI_API_KEY="$GEMINI_API_KEY" GEMINI_MODELS="${GEMINI_MODEL},${GEMINI_FALLBACK_MODEL}" node <<'NODE'
 const key = process.env.GEMINI_API_KEY;
-const model = process.env.GEMINI_MODEL;
-const response = await fetch(
-  `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,
-  {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "x-goog-api-key": key,
+const models = String(process.env.GEMINI_MODELS || "").split(",").map((value) => value.trim()).filter(Boolean);
+for (const model of new Set(models)) {
+  const response = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,
+    {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-goog-api-key": key,
+      },
+      body: JSON.stringify({
+        contents: [{ role: "user", parts: [{ text: "Reply with OK." }] }],
+        generationConfig: { maxOutputTokens: 8 },
+      }),
+      signal: AbortSignal.timeout(20000),
     },
-    body: JSON.stringify({
-      contents: [{ role: "user", parts: [{ text: "Reply with OK." }] }],
-      generationConfig: { maxOutputTokens: 8, temperature: 0 },
-    }),
-    signal: AbortSignal.timeout(20000),
-  },
-);
-if (!response.ok) {
-  const body = await response.text();
-  console.error(`\nGemini validation failed: HTTP ${response.status} ${body.slice(0, 320)}`);
-  process.exit(1);
+  );
+  if (!response.ok) {
+    const body = await response.text();
+    console.error(`\nGemini validation failed for ${model}: HTTP ${response.status} ${body.slice(0, 320)}`);
+    process.exit(1);
+  }
 }
 console.log("ok");
 NODE
@@ -66,6 +71,7 @@ LoadCredential=naobrain-bridge-token:${CREDENTIAL_DIR}/bridge-token
 Environment=DEVSPACE_NAOBRAIN_GEMINI_API_KEY_FILE=%d/naobrain-gemini-api-key
 Environment=DEVSPACE_NAOBRAIN_BRIDGE_TOKEN_FILE=%d/naobrain-bridge-token
 Environment=DEVSPACE_NAOBRAIN_GEMINI_MODEL=${GEMINI_MODEL}
+Environment=DEVSPACE_NAOBRAIN_GEMINI_FALLBACK_MODEL=${GEMINI_FALLBACK_MODEL}
 Environment=DEVSPACE_NAOBRAIN_TODAY_DIR=${DATA_DIR}
 Environment=DEVSPACE_NAOBRAIN_TODAY_PROMPT_FILE=${DATA_DIR}/config/prompt.md
 Environment=DEVSPACE_NAOBRAIN_DRIVE_REMOTE=${DRIVE_REMOTE}
@@ -93,7 +99,7 @@ for _ in {1..20}; do
   fi
   sleep 1
 done
-node -e 'const fs=require("fs");const j=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));if(!j.ok)process.exit(1);console.log(`ok (${j.model}, Drive=${j.driveConfigured})`)' "$TMP_DIR/health.json"
+node -e 'const fs=require("fs");const j=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));if(!j.ok)process.exit(1);console.log(`ok (${j.model} -> ${j.fallbackModel}, Drive=${j.driveConfigured})`)' "$TMP_DIR/health.json"
 
 DNS_NAME="$(tailscale status --json | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const j=JSON.parse(s);process.stdout.write(String(j.Self?.DNSName||"").replace(/\.$/,""))})')"
 PUBLIC_BASE="https://${DNS_NAME}/naobrain-api"

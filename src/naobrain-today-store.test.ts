@@ -11,6 +11,7 @@ try {
     dataDir: root,
     promptFile: join(root, "config", "prompt.md"),
     geminiModel: "gemini-test",
+    geminiFallbackModel: "gemini-test-lite",
     geminiFallbackKeysFile: join(root, "secrets", "gemini-fallback-keys.json"),
     driveBasePath: "NaoBrain/Today",
   });

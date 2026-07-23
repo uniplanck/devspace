@@ -237,20 +237,63 @@ function recordBaseId(input: ChatProgressInput): string {
   return `chat_local_${hashKey(fallback)}`;
 }
 
+function activeProgressRecord(
+  input: ChatProgressInput,
+  records: ChatProgressRecord[],
+): ChatProgressRecord | undefined {
+  const conversationId = sanitizeText(input.conversationId, 160);
+  if (conversationId) {
+    const sameConversation = records
+      .filter((record) => record.conversationId === conversationId)
+      .filter((record) => record.status === "running" || record.status === "paused")
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+    if (sameConversation[0]) return sameConversation[0];
+  }
+
+  const sessionId = sanitizeText(input.sessionId, 120);
+  if (!conversationId && sessionId) {
+    const sameSession = records
+      .filter((record) => record.sessionId === sessionId)
+      .filter((record) => record.status === "running" || record.status === "paused")
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+    if (sameSession[0]) return sameSession[0];
+  }
+
+  const base = recordBaseId(input);
+  const label = normalizeKey(input.chatLabel);
+  return records
+    .filter((record) => record.id === base || record.id.startsWith(`${base}_`))
+    .filter((record) => normalizeKey(record.chatLabel) === label)
+    .filter((record) => record.status === "running" || record.status === "paused")
+    .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0];
+}
+
 function resolveProgressRecord(
   input: ChatProgressInput,
   records: ChatProgressRecord[],
 ): { id: string; existing?: ChatProgressRecord } {
+  const active = activeProgressRecord(input, records);
+  if (active) return { id: active.id, existing: active };
+
   const base = recordBaseId(input);
   const label = normalizeKey(input.chatLabel);
   const candidates = records
     .filter((record) => record.id === base || record.id.startsWith(`${base}_`))
     .filter((record) => normalizeKey(record.chatLabel) === label)
     .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
-  const active = candidates.find((record) => record.status === "running" || record.status === "paused");
-  if (active) return { id: active.id, existing: active };
   const suffix = Date.now().toString(36);
   return { id: candidates.length ? `${base}_${suffix}` : base };
+}
+
+export function ensureChatProgressStarted(input: ChatProgressInput): ChatProgressRecord {
+  const store = readStore();
+  const active = activeProgressRecord(input, store.records);
+  return active ?? updateChatProgress({
+    ...input,
+    status: "running",
+    overallProgress: normalizePercent(input.overallProgress),
+    currentProgress: normalizePercent(input.currentProgress, input.overallProgress),
+  });
 }
 
 function mergeProgressRecords(records: ChatProgressRecord[]): ChatProgressRecord[] {

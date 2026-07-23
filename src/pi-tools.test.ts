@@ -12,6 +12,7 @@ const previousCommandsFile = process.env.DEVSPACE_APPROVED_SHELL_COMMANDS_FILE;
 const previousStateDir = process.env.DEVSPACE_STATE_DIR;
 const previousComputerPolicy = process.env.DEVSPACE_COMPUTER_USE_POLICY;
 const previousOwnerToken = process.env.DEVSPACE_OAUTH_OWNER_TOKEN;
+const previousProgressPath = process.env.DEVSPACE_CHAT_PROGRESS_PATH;
 
 try {
   await mkdir(join(root, "nested"));
@@ -19,6 +20,7 @@ try {
   process.env.DEVSPACE_STATE_DIR = join(root, "state");
   process.env.DEVSPACE_COMPUTER_USE_POLICY = join(root, "computer-use.json");
   process.env.DEVSPACE_OAUTH_OWNER_TOKEN = "test-owner-token-for-pi-tools";
+  process.env.DEVSPACE_CHAT_PROGRESS_PATH = join(root, "chat-progress.json");
   initializeComputerUsePolicy(process.env.DEVSPACE_COMPUTER_USE_POLICY);
   await writeFile(commandsFile, JSON.stringify({
     commands: [{
@@ -58,6 +60,21 @@ try {
   );
   assert.equal(costs.isError, undefined);
   assert.match(costs.content[0]?.type === "text" ? costs.content[0].text : "", /"calls":/);
+
+  const finalized = await runShellTool(
+    {
+      command: "devspace-runtime progress finalize --label 'Fallback task' --result '完了しました' --changes '変更なし' --verification 'テスト成功' --remaining 'なし'",
+    },
+    { cwd: root, root, workspaceId: "ws_test" },
+  );
+  assert.equal(finalized.isError, undefined);
+  const finalizedText = finalized.content[0]?.type === "text" ? finalized.content[0].text : "";
+  assert.deepEqual(
+    finalizedText.split("\n").filter((line) => line.startsWith("## ")),
+    ["## 完了結果", "## 変更", "## 検証", "## 残り", "## 実行情報"],
+  );
+  assert.match(finalizedText, /完了しました/u);
+  assert.match(finalizedText, /テスト成功/u);
 
   const jobStore = new JobStore(process.env.DEVSPACE_STATE_DIR);
   jobStore.create({ workspaceId: "ws_test", workspaceRoot: root, preset: "typecheck", title: "Tool job" });
@@ -132,5 +149,7 @@ try {
   else process.env.DEVSPACE_COMPUTER_USE_POLICY = previousComputerPolicy;
   if (previousOwnerToken === undefined) delete process.env.DEVSPACE_OAUTH_OWNER_TOKEN;
   else process.env.DEVSPACE_OAUTH_OWNER_TOKEN = previousOwnerToken;
+  if (previousProgressPath === undefined) delete process.env.DEVSPACE_CHAT_PROGRESS_PATH;
+  else process.env.DEVSPACE_CHAT_PROGRESS_PATH = previousProgressPath;
   await rm(root, { recursive: true, force: true });
 }

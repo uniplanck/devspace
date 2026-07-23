@@ -6,6 +6,7 @@ import {
   lstatSync,
   mkdirSync,
   readFileSync,
+  readlinkSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -22,7 +23,11 @@ import {
   CHATGPT_MINIMUM_PREFERRED_MODEL,
   chooseBestChatGptModelCandidate,
   chooseBestDiscoveredChatGptModel,
+  chooseChatGptPerformanceCandidate,
+  extractChatGptModelSlug,
+  matchesChatGptPerformanceLabel,
   scoreChatGptModel,
+  type ChatGptPerformance,
 } from "./chatgpt-model.js";
 
 export type BrowserBackgroundMode = "headless" | "background-window" | "window";
@@ -123,6 +128,7 @@ export interface ChatGptConversationSnapshot {
 export interface ChatGptModelSelectionResult {
   status: "selected" | "url-only";
   targetId: string;
+  requestedPerformance?: ChatGptPerformance;
   currentLabel: string;
   selectedLabel?: string;
   selectedModel?: string;
@@ -229,6 +235,21 @@ function processExists(pid: number): boolean {
   }
 }
 
+function clearStaleBrowserProfileLocks(profileDirectory: string): void {
+  if (process.platform !== "linux") return;
+  const lockPath = join(profileDirectory, "SingletonLock");
+  let lockPid: number | undefined;
+  try {
+    const target = readlinkSync(lockPath);
+    const match = target.match(/-(\d+)$/u);
+    lockPid = match ? Number(match[1]) : undefined;
+  } catch {}
+  if (lockPid && processExists(lockPid)) return;
+  for (const name of ["SingletonCookie", "SingletonLock", "SingletonSocket"]) {
+    rmSync(join(profileDirectory, name), { force: true });
+  }
+}
+
 async function sleep(ms: number): Promise<void> {
   await new Promise<void>((resolveSleep) => setTimeout(resolveSleep, ms));
 }
@@ -250,13 +271,31 @@ function cdpOrigin(session: BrowserSessionRecord): string {
 }
 
 async function sessionResponds(session: BrowserSessionRecord): Promise<boolean> {
-  if (!processExists(session.pid)) return false;
   try {
-    await fetchJson<Record<string, unknown>>(`${cdpOrigin(session)}/json/version`);
-    return true;
+    const client = await CdpClient.connect(
+      `ws://127.0.0.1:${session.port}${session.browserWebSocketPath}`,
+    );
+    try {
+      await client.send("Browser.getVersion");
+      return true;
+    } finally {
+      client.close();
+    }
   } catch {
     return false;
   }
+}
+
+async function waitForSessionResponse(
+  session: BrowserSessionRecord,
+  timeoutMs = 3_000,
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await sessionResponds(session)) return true;
+    await sleep(100);
+  }
+  return false;
 }
 
 export function isManagedAutomationBrowserSession(session: BrowserSessionRecord): boolean {
@@ -269,9 +308,12 @@ export async function browserStatus(home: string = homedir()): Promise<{
   pages: BrowserTargetInfo[];
 }> {
   const session = readSession(home);
-  if (!session || !isManagedAutomationBrowserSession(session) || !await sessionResponds(session)) {
+  if (!session || !isManagedAutomationBrowserSession(session)) {
     if (session) clearSession(home);
     return { active: false, pages: [] };
+  }
+  if (!await waitForSessionResponse(session, 10_000)) {
+    return { active: false, session, pages: [] };
   }
   const pages = await listTargets(session);
   return { active: true, session, pages };
@@ -293,6 +335,7 @@ export async function startBrowserSession(input: {
   policyPath?: string;
   home?: string;
   env?: NodeJS.ProcessEnv;
+  allowDownloads?: boolean;
 } = {}): Promise<{ status: "started" | "already-running"; session: BrowserSessionRecord }> {
   const home = input.home ?? homedir();
   const policy = loadPolicy(input.policyPath, home);
@@ -302,17 +345,24 @@ export async function startBrowserSession(input: {
   }
   const profileDirectory = resolve(policy.browser.profileDirectory);
   const backgroundMode = resolveBrowserBackgroundMode(policy.browser.backgroundMode, input.env ?? process.env);
+  const allowDownloads = input.allowDownloads ?? policy.browser.allowDownloads;
   const existing = readSession(home);
   if (existing && await sessionResponds(existing)) {
     const sameManagedBrowser = isManagedAutomationBrowserSession(existing)
       && existing.browserExecutable === browser.path
-      && resolve(existing.profileDirectory) === profileDirectory;
+      && resolve(existing.profileDirectory) === profileDirectory
+      && existing.backgroundMode === backgroundMode;
     if (sameManagedBrowser) return { status: "already-running", session: existing };
-    clearSession(home);
+    if (isManagedAutomationBrowserSession(existing)) {
+      await stopBrowserSession(home);
+    } else {
+      clearSession(home);
+    }
   } else if (existing) {
     clearSession(home);
   }
   ensurePrivateDirectory(profileDirectory);
+  clearStaleBrowserProfileLocks(profileDirectory);
   rmSync(join(profileDirectory, "DevToolsActivePort"), { force: true });
 
   const browserArgs = [
@@ -341,13 +391,24 @@ export async function startBrowserSession(input: {
   } else if (backgroundMode === "background-window") {
     browserArgs.push(
       "--disable-background-mode",
-      "--window-position=-32000,-32000",
+      `--window-position=${process.platform === "linux" ? "0,0" : "-32000,-32000"}`,
       "--window-size=1440,1200",
     );
   }
   browserArgs.push("about:blank");
 
-  const child = spawn(browser.path, browserArgs, {
+  const useVirtualDisplay = process.platform === "linux"
+    && backgroundMode === "background-window"
+    && !(input.env ?? process.env).DISPLAY;
+  const virtualDisplayLauncher = "/usr/bin/xvfb-run";
+  if (useVirtualDisplay && !existsSync(virtualDisplayLauncher)) {
+    throw new Error("Xvfb is required for Linux background-window browser sessions.");
+  }
+  const launchExecutable = useVirtualDisplay ? virtualDisplayLauncher : browser.path;
+  const launchArgs = useVirtualDisplay
+    ? ["-a", "-s", "-screen 0 1440x1200x24", browser.path, ...browserArgs]
+    : browserArgs;
+  const child = spawn(launchExecutable, launchArgs, {
     detached: true,
     stdio: "ignore",
   });
@@ -386,14 +447,19 @@ export async function startBrowserSession(input: {
     startedAt: new Date().toISOString(),
   };
   saveSession(session, home);
+  if (!await waitForSessionResponse(session, 10_000)) {
+    clearSession(home);
+    try { process.kill(child.pid, "SIGTERM"); } catch {}
+    throw new Error("Browser CDP endpoint did not become ready after launch.");
+  }
 
   const browserClient = await CdpClient.connect(`ws://127.0.0.1:${port}${browserWebSocketPath}`);
   try {
     const downloadDirectory = resolve(policy.browser.downloadDirectory);
-    if (policy.browser.allowDownloads) ensurePrivateDirectory(downloadDirectory);
+    if (allowDownloads) ensurePrivateDirectory(downloadDirectory);
     await browserClient.send("Browser.setDownloadBehavior", {
-      behavior: policy.browser.allowDownloads ? "allow" : "deny",
-      ...(policy.browser.allowDownloads ? { downloadPath: downloadDirectory, eventsEnabled: true } : {}),
+      behavior: allowDownloads ? "allow" : "deny",
+      ...(allowDownloads ? { downloadPath: downloadDirectory, eventsEnabled: true } : {}),
     });
   } finally {
     browserClient.close();
@@ -655,22 +721,58 @@ export async function stopBrowserSession(home: string = homedir()): Promise<{ st
 
 async function requireActiveSession(home: string = homedir()): Promise<BrowserSessionRecord> {
   const session = readSession(home);
-  if (!session || !isManagedAutomationBrowserSession(session) || !await sessionResponds(session)) {
+  if (!session || !isManagedAutomationBrowserSession(session)) {
     if (session) clearSession(home);
-    throw new Error("GPT-Agent headless Browser session is not running.");
+    throw new Error("GPT-Agent Browser session is not running.");
   }
   return session;
 }
 
 async function listTargets(session: BrowserSessionRecord): Promise<BrowserTargetInfo[]> {
-  const targets = await fetchJson<BrowserTargetInfo[]>(`${cdpOrigin(session)}/json/list`);
-  return targets.filter((target) => target.type === "page");
+  const client = await CdpClient.connect(
+    `ws://127.0.0.1:${session.port}${session.browserWebSocketPath}`,
+  );
+  try {
+    const { targetInfos } = await client.send<{
+      targetInfos: Array<{
+        targetId: string;
+        type: string;
+        title: string;
+        url: string;
+      }>;
+    }>("Target.getTargets");
+    return targetInfos
+      .filter((target) => target.type === "page")
+      .map((target) => ({
+        id: target.targetId,
+        type: target.type,
+        title: target.title,
+        url: target.url,
+        webSocketDebuggerUrl: `ws://127.0.0.1:${session.port}/devtools/page/${target.targetId}`,
+      }));
+  } finally {
+    client.close();
+  }
 }
 
 async function createBlankTarget(session: BrowserSessionRecord): Promise<BrowserTargetInfo> {
-  return await fetchJson<BrowserTargetInfo>(`${cdpOrigin(session)}/json/new?about%3Ablank`, {
-    method: "PUT",
-  });
+  const client = await CdpClient.connect(
+    `ws://127.0.0.1:${session.port}${session.browserWebSocketPath}`,
+  );
+  try {
+    const { targetId } = await client.send<{ targetId: string }>("Target.createTarget", {
+      url: "about:blank",
+    });
+    return {
+      id: targetId,
+      type: "page",
+      title: "",
+      url: "about:blank",
+      webSocketDebuggerUrl: `ws://127.0.0.1:${session.port}/devtools/page/${targetId}`,
+    };
+  } finally {
+    client.close();
+  }
 }
 
 async function getTarget(
@@ -941,15 +1043,27 @@ export async function inspectChatGptConversation(
       const messages = Array.from(document.querySelectorAll("[data-message-author-role]"));
       const assistants = messages.filter((el) => el.getAttribute("data-message-author-role") === "assistant");
       const users = messages.filter((el) => el.getAttribute("data-message-author-role") === "user");
-      const composer = document.querySelector(
+      const visible = (candidate) => {
+        if (!(candidate instanceof HTMLElement)) return false;
+        const r = candidate.getBoundingClientRect();
+        const style = getComputedStyle(candidate);
+        return r.width > 1 && r.height > 1 && style.display !== "none" && style.visibility !== "hidden";
+      };
+      const composer = Array.from(document.querySelectorAll(
         "#prompt-textarea,[data-testid='composer-input'],[contenteditable='true'][role='textbox'],textarea[placeholder]"
-      );
+      )).find(visible);
       const stopButton = document.querySelector(
         "button[data-testid='stop-button'],button[aria-label*='Stop'],button[aria-label*='停止']"
       );
-      const error = document.querySelector(
+      const inlineError = document.querySelector(
         "[data-testid='conversation-turn-error'],[role='alert']"
       );
+      const blockingDialog = Array.from(document.querySelectorAll("[role='dialog']"))
+        .find((candidate) => visible(candidate)
+          && /too many requests|requests too quickly|temporarily limited|リクエストが多すぎ|しばらく待/u.test(
+            String(candidate.innerText || candidate.textContent || "")
+          ));
+      const error = inlineError || blockingDialog;
       const generatedImages = Array.from(document.querySelectorAll("img"))
         .map((image) => ({
           src: image instanceof HTMLImageElement ? image.currentSrc || image.src : "",
@@ -1246,6 +1360,467 @@ export async function selectBestAvailableChatGptModel(
   }, input.targetId);
 }
 
+export async function selectChatGptPerformance(
+  input: { performance: ChatGptPerformance; home?: string; targetId?: string },
+): Promise<ChatGptModelSelectionResult> {
+  const home = input.home ?? homedir();
+  return await withPageClient(home, async (client, target) => {
+    const locateButton = async () => await evaluate<{
+      hostname: string;
+      label: string;
+      x?: number;
+      y?: number;
+    }>(client, `(() => {
+      const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+      const visible = (el) => {
+        const r = el.getBoundingClientRect();
+        const style = getComputedStyle(el);
+        return r.width > 1 && r.height > 1 && style.display !== "none" && style.visibility !== "hidden";
+      };
+      const directCandidate = document.querySelector("[data-testid='model-switcher-dropdown-button']");
+      const direct = directCandidate && visible(directCandidate) ? directCandidate : null;
+      const known = Array.from(document.querySelectorAll(
+        "button[aria-haspopup='menu'],button[aria-haspopup='listbox']"
+      )).find((candidate) => {
+        const descriptor = clean(candidate.innerText || candidate.getAttribute("aria-label"));
+        const testId = candidate.getAttribute("data-testid") || "";
+        return visible(candidate)
+          && !/会話オプション|プロジェクトオプション|conversation options|project options/i.test(descriptor)
+          && !/history-item/i.test(testId)
+          && /^(?:最速(?:\\s+5[.]5)?|中程度|高い|fastest(?:\\s+5[.]5)?|instant(?:\\s+5[.]5)?|fast|medium|balanced|high|gpt[\\s._-]*5[\\s._-]*6[\\s._-]*sol)$/i
+            .test(descriptor);
+      });
+      const fallback = Array.from(document.querySelectorAll("button[aria-haspopup='menu'],button[aria-haspopup='listbox']"))
+        .find((candidate) => {
+          const descriptor = clean(candidate.innerText || candidate.getAttribute("aria-label"));
+          const testId = candidate.getAttribute("data-testid") || "";
+          return visible(candidate)
+            && /gpt|model|モデル|thinking|思考|推論/i.test(descriptor)
+            && !/会話オプション|プロジェクトオプション|conversation options|project options/i.test(descriptor)
+            && !/history-item/i.test(testId);
+        });
+      const button = direct || known || fallback;
+      if (!(button instanceof HTMLElement)) return { hostname: location.hostname, label: "" };
+      const r = button.getBoundingClientRect();
+      return {
+        hostname: location.hostname,
+        label: clean(button.innerText || button.getAttribute("aria-label")),
+        x: Math.round(r.x + r.width / 2),
+        y: Math.round(r.y + r.height / 2)
+      };
+    })()`);
+
+    let before = await locateButton();
+    for (let attempt = 0; attempt < 20 && (before.x === undefined || before.y === undefined); attempt += 1) {
+      await sleep(250);
+      before = await locateButton();
+    }
+    if (before.hostname !== "chatgpt.com" && !before.hostname.endsWith(".chatgpt.com")) {
+      throw new Error(`ChatGPT model selector requires chatgpt.com, got ${before.hostname || "unknown host"}.`);
+    }
+    if (matchesChatGptPerformanceLabel(input.performance, before.label)) {
+      const actual = await inspectSelectedChatGptModel(client, input.performance, before.label)
+        .catch(() => undefined);
+      if (actual) {
+        return {
+          status: "selected",
+          targetId: target.id,
+          requestedPerformance: input.performance,
+          currentLabel: before.label,
+          selectedLabel: before.label,
+          selectedModel: actual,
+          candidateCount: 0,
+        };
+      }
+    }
+    // Prefer ChatGPT's own model-picker shortcut so an existing conversation URL
+    // is never rewritten merely to change performance. The visible picker click
+    // remains a fallback for accounts where the shortcut has not rolled out.
+    await dispatchBrowserShortcut(client, {
+      key: "M",
+      code: "KeyM",
+      windowsVirtualKeyCode: 77,
+      modifiers: 10,
+    });
+    const collectCandidates = async () => await evaluate<Array<{
+      label: string;
+      href?: string;
+      modelSlug?: string;
+      modelEvidence?: string[];
+      role?: string;
+      checked?: boolean;
+      disabled: boolean;
+      domIndex: number;
+    }>>(client, `(() => {
+      const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+      const visible = (el) => {
+        const r = el.getBoundingClientRect();
+        const style = getComputedStyle(el);
+        return r.width > 1 && r.height > 1 && style.display !== "none" && style.visibility !== "hidden";
+      };
+      const slugPattern = /gpt[-_. ]*[0-9]+(?:[-_. ][0-9]+)+(?:[-_. ]+(?:sol|thinking|reasoning|instant|fast|auto))?/gi;
+      const normalizeSlug = (value) => clean(value).replace(/[_. ]+/g, "-").toLowerCase();
+      const scanReactSlugs = (el) => {
+        const slugs = new Set();
+        const seen = new WeakSet();
+        const visit = (value, depth) => {
+          if (value == null || depth > 7) return;
+          if (typeof value === "string") {
+            for (const slug of value.match(slugPattern) || []) slugs.add(normalizeSlug(slug));
+            return;
+          }
+          if (typeof value !== "object" || seen.has(value)) return;
+          seen.add(value);
+          const entries = Array.isArray(value)
+            ? value.slice(0, 120).map((item, index) => [String(index), item])
+            : Object.entries(value).slice(0, 120);
+          for (const [, item] of entries) visit(item, depth + 1);
+        };
+        for (const key of Object.getOwnPropertyNames(el)) {
+          if (!key.startsWith("__reactProps$")) continue;
+          try { visit(el[key], 0); } catch {}
+        }
+        return [...slugs];
+      };
+      return Array.from(document.querySelectorAll(
+        "[role='menuitem'],[role='menuitemradio'],[role='option'],a[href*='model=']"
+      )).filter(visible).map((el, domIndex) => {
+        const link = el instanceof HTMLAnchorElement ? el : el.closest("a[href]");
+        const descriptor = [
+          el.getAttribute("data-model"),
+          el.getAttribute("data-value"),
+          el.getAttribute("value"),
+          el.id,
+          link instanceof HTMLAnchorElement ? link.href : ""
+        ].filter(Boolean).join(" ");
+        const attributeSlugs = (descriptor.match(slugPattern) || []).map(normalizeSlug);
+        const modelEvidence = [...new Set([...attributeSlugs, ...scanReactSlugs(el)])];
+        return {
+          label: clean(el.innerText || el.textContent || el.getAttribute("aria-label")),
+          href: link instanceof HTMLAnchorElement ? link.href : undefined,
+          modelSlug: modelEvidence.length === 1 ? modelEvidence[0] : undefined,
+          modelEvidence,
+          role: el.getAttribute("role") || undefined,
+          checked: el.getAttribute("aria-checked") === "true" || el.getAttribute("data-state") === "checked",
+          disabled: el.getAttribute("aria-disabled") === "true"
+            || el.hasAttribute("disabled")
+            || /upgrade|unavailable|利用不可|アップグレード/i.test(clean(el.innerText || el.textContent)),
+          domIndex
+        };
+      }).filter((candidate) => candidate.label);
+    })()`);
+    let candidates = await collectCandidates();
+    for (let attempt = 0; attempt < 20 && candidates.length === 0; attempt += 1) {
+      await sleep(250);
+      candidates = await collectCandidates();
+    }
+    if (candidates.length === 0 && before.x !== undefined && before.y !== undefined) {
+      await dispatchClick(client, before.x, before.y);
+      for (let attempt = 0; attempt < 20 && candidates.length === 0; attempt += 1) {
+        await sleep(250);
+        candidates = await collectCandidates();
+      }
+    }
+    if (candidates.length === 0) {
+      const fallbackClicked = await evaluate<boolean>(client, `(() => {
+        const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+        const visible = (el) => {
+          const r = el.getBoundingClientRect();
+          const style = getComputedStyle(el);
+          return r.width > 1 && r.height > 1 && r.right > 0 && r.bottom > 0
+            && style.display !== "none" && style.visibility !== "hidden";
+        };
+        const button = Array.from(document.querySelectorAll(
+          "button[aria-haspopup='menu'],button[aria-haspopup='listbox']"
+        )).find((candidate) => {
+          const descriptor = clean(candidate.innerText || candidate.getAttribute("aria-label"));
+          const testId = candidate.getAttribute("data-testid") || "";
+          return visible(candidate)
+            && !/会話オプション|プロジェクトオプション|conversation options|project options/i.test(descriptor)
+            && !/history-item/i.test(testId)
+            && descriptor === ${JSON.stringify(before.label)};
+        });
+        if (!(button instanceof HTMLElement)) return false;
+        for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {
+          const event = type.startsWith("pointer")
+            ? new PointerEvent(type, { bubbles: true, button: 0, pointerType: "mouse" })
+            : new MouseEvent(type, { bubbles: true, button: 0 });
+          button.dispatchEvent(event);
+        }
+        return true;
+      })()`);
+      if (fallbackClicked) {
+        for (let attempt = 0; attempt < 20 && candidates.length === 0; attempt += 1) {
+          await sleep(250);
+          candidates = await collectCandidates();
+        }
+      }
+    }
+    const eligibleCandidates = candidates.filter((candidate) => candidate.role !== "menuitem");
+    const chosen = chooseChatGptPerformanceCandidate(input.performance, eligibleCandidates);
+    if (!chosen || chosen.domIndex === undefined) {
+      await client.send("Input.dispatchKeyEvent", { type: "keyDown", key: "Escape", code: "Escape" });
+      await client.send("Input.dispatchKeyEvent", { type: "keyUp", key: "Escape", code: "Escape" });
+      const available = candidates.map((candidate) => candidate.label).join(" | ") || "none";
+      throw new Error(`ChatGPT performance ${input.performance} was not available. Candidates: ${available}.`);
+    }
+
+    const point = await evaluate<{ x: number; y: number } | undefined>(client, `(() => {
+      const visible = (el) => {
+        const r = el.getBoundingClientRect();
+        const style = getComputedStyle(el);
+        return r.width > 1 && r.height > 1 && style.display !== "none" && style.visibility !== "hidden";
+      };
+      const nodes = Array.from(document.querySelectorAll(
+        "[role='menuitem'],[role='menuitemradio'],[role='option'],a[href*='model=']"
+      )).filter(visible);
+      const el = nodes[${chosen.domIndex}];
+      if (!(el instanceof HTMLElement)) return undefined;
+      const r = el.getBoundingClientRect();
+      return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) };
+    })()`);
+    if (!point) throw new Error(`ChatGPT performance ${input.performance} candidate disappeared before selection.`);
+
+    await dispatchClick(client, point.x, point.y);
+    await sleep(500);
+    const after = await locateButton();
+    let selectedLabel = after.label || chosen.label;
+    const evidenceModels = [...new Set(chosen.modelEvidence ?? [])];
+    let selectedModel: string | undefined = chosen.modelSlug
+      ?? extractChatGptModelSlug(chosen.href)
+      ?? (evidenceModels.length === 1 ? evidenceModels[0] : undefined);
+    if (!matchesChatGptPerformanceLabel(input.performance, selectedLabel)) {
+      let actualAfterSelection: string | undefined;
+      let verificationDetail = "no model evidence";
+      try {
+        actualAfterSelection = await inspectSelectedChatGptModel(
+          client,
+          input.performance,
+          chosen.label,
+        );
+      } catch (error) {
+        verificationDetail = error instanceof Error ? error.message : String(error);
+      }
+      if (actualAfterSelection && matchesChatGptPerformanceLabel(input.performance, actualAfterSelection)) {
+        selectedLabel = chosen.label;
+        selectedModel = actualAfterSelection;
+      } else {
+        throw new Error(
+          `ChatGPT performance ${input.performance} selection was not confirmed; displayed label: ${selectedLabel || "unknown"}; ${verificationDetail}.`,
+        );
+      }
+    }
+    selectedModel ??= await inspectSelectedChatGptModel(client, input.performance, selectedLabel);
+    if (!selectedModel) {
+      throw new Error(
+        `ChatGPT performance ${input.performance} was selected as ${selectedLabel}, but the actual model could not be verified.`,
+      );
+    }
+    return {
+      status: "selected",
+      targetId: target.id,
+      requestedPerformance: input.performance,
+      currentLabel: before.label,
+      selectedLabel,
+      selectedModel,
+      candidateCount: candidates.length,
+    };
+  }, input.targetId);
+}
+
+async function inspectSelectedChatGptModel(
+  client: CdpClient,
+  performance: ChatGptPerformance,
+  selectedLabel: string,
+): Promise<string | undefined> {
+  const snapshot = await evaluate<{
+    urlModel: string;
+    apiStatus: number;
+    evidence: Array<{
+      source: string;
+      descriptor: string;
+      modelSlug: string;
+      selected: boolean;
+    }>;
+  }>(client, `(async () => {
+    const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+    const slugPattern = /gpt[-_. ]*[0-9]+(?:[-_. ][0-9]+)+(?:[-_. ]+(?:sol|thinking|reasoning|instant|fast|auto))?/gi;
+    const normalizeSlug = (value) => clean(value).replace(/[_. ]+/g, "-").toLowerCase();
+    const performancePattern = ${JSON.stringify(performance === "fastest"
+      ? "最速|fastest|instant|fast"
+      : "高い|high|thinking|reasoning")};
+    const performanceRegex = new RegExp(performancePattern, "i");
+    const evidence = [];
+    const seenEvidence = new Set();
+    const addEvidence = (source, descriptor, modelSlug, selected = false) => {
+      const slug = normalizeSlug(modelSlug);
+      if (!slug || !/^gpt-[0-9]+(?:-[0-9]+)+/i.test(slug)) return;
+      const key = [source, slug, Boolean(selected), clean(descriptor).slice(0, 220)].join("|");
+      if (seenEvidence.has(key)) return;
+      seenEvidence.add(key);
+      evidence.push({
+        source,
+        descriptor: clean(descriptor).slice(0, 220),
+        modelSlug: slug,
+        selected: Boolean(selected)
+      });
+    };
+    const scanObject = (root, source) => {
+      const seen = new WeakSet();
+      const visit = (value, path, depth) => {
+        if (!value || typeof value !== "object" || depth > 9 || seen.has(value)) return;
+        seen.add(value);
+        const entries = Array.isArray(value)
+          ? value.slice(0, 300).map((item, index) => [String(index), item])
+          : Object.entries(value).slice(0, 300);
+        const primitives = entries
+          .filter(([, item]) => item == null || ["string", "number", "boolean"].includes(typeof item))
+          .map(([key, item]) => key + "=" + clean(item))
+          .join(" ");
+        const descriptor = clean(path + " " + primitives);
+        const slugs = descriptor.match(slugPattern) || [];
+        const selected = /(?:selected|active|current|is_selected|isSelected)=?(?:true|1|yes)|selected_/i.test(descriptor);
+        if (performanceRegex.test(descriptor)) {
+          for (const slug of slugs) addEvidence(source, descriptor, slug, selected);
+        }
+        for (const [key, item] of entries) {
+          if (item && typeof item === "object") visit(item, path + "." + key, depth + 1);
+        }
+      };
+      visit(root, source, 0);
+    };
+
+    const result = {
+      urlModel: new URL(location.href).searchParams.get("model") || "",
+      apiStatus: 0,
+      evidence
+    };
+    if (result.urlModel) addEvidence("url", selectedLabel, result.urlModel, true);
+
+    const buttons = Array.from(document.querySelectorAll("button"));
+    const selectorButton = document.querySelector("[data-testid='model-switcher-dropdown-button']")
+      || buttons.find((button) => clean(button.innerText || button.getAttribute("aria-label")) === ${JSON.stringify(selectedLabel)});
+    let node = selectorButton;
+    for (let level = 0; node && level < 5; level += 1, node = node.parentElement) {
+      const attributes = Array.from(node.attributes || []).map((attribute) => attribute.name + "=" + attribute.value).join(" ");
+      const descriptor = clean([node.innerText, node.getAttribute?.("aria-label"), attributes].filter(Boolean).join(" "));
+      for (const slug of descriptor.match(slugPattern) || []) addEvidence("dom", descriptor, slug, true);
+      for (const key of Object.getOwnPropertyNames(node)) {
+        if (!key.startsWith("__reactProps$") && !key.startsWith("__reactFiber$")) continue;
+        try { scanObject(node[key], "react." + key.slice(0, 16)); } catch {}
+      }
+    }
+
+    for (const [storageName, storage] of [["localStorage", localStorage], ["sessionStorage", sessionStorage]]) {
+      for (let index = 0; index < Math.min(storage.length, 300); index += 1) {
+        const key = storage.key(index) || "";
+        const value = String(storage.getItem(key) || "").slice(0, 500000);
+        if (!performanceRegex.test(key + " " + value)) continue;
+        for (const slug of value.match(slugPattern) || []) {
+          addEvidence(storageName, key, slug, /selected|active|current/i.test(key + " " + value.slice(0, 5000)));
+        }
+        try { scanObject(JSON.parse(value), storageName + "." + key); } catch {}
+      }
+    }
+
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 5000);
+      const response = await fetch(
+        "/backend-api/models?history_and_training_disabled=false",
+        { credentials: "include", signal: controller.signal }
+      );
+      clearTimeout(timer);
+      result.apiStatus = response.status;
+      if (response.ok) scanObject(await response.json(), "models-api");
+    } catch {}
+    return result;
+  })()`);
+
+  const canonicalModelSlug = (value: string): string => value
+    .normalize("NFKC")
+    .trim()
+    .toLocaleLowerCase()
+    .replace(/[\u2010-\u2015\u2212_.\s-]+/gu, "-")
+    .replace(/^-+|-+$/gu, "");
+  const ranked = snapshot.evidence
+    .map((candidate) => ({
+      ...candidate,
+      modelSlug: canonicalModelSlug(candidate.modelSlug),
+    }))
+    .sort((a, b) => {
+      const sourceRank = (source: string) => source === "url"
+        ? 5
+        : source.startsWith("react")
+          ? 4
+          : source === "models-api"
+            ? 3
+            : source === "dom"
+              ? 2
+              : 1;
+      return Number(b.selected) - Number(a.selected)
+        || sourceRank(b.source) - sourceRank(a.source)
+        || a.modelSlug.localeCompare(b.modelSlug);
+    });
+  const expectedFamily = performance === "fastest" ? "gpt-5-5" : "gpt-5-6";
+  const familyModels = [...new Set(
+    ranked
+      .map((candidate) => candidate.modelSlug)
+      .filter((model) => model === expectedFamily || model.startsWith(`${expectedFamily}-`)),
+  )];
+  if (familyModels.length === 1) return familyModels[0];
+
+  const evidenceScore = (candidate: typeof ranked[number]): number => {
+    const sourceScore = candidate.source === "url"
+      ? 60
+      : candidate.source.startsWith("react.__reactProps$")
+        ? 50
+        : candidate.source.startsWith("react.__reactFiber$")
+          ? 40
+          : candidate.source === "models-api"
+            ? 30
+            : candidate.source === "dom"
+              ? 20
+              : 10;
+    return sourceScore + (candidate.selected ? 100 : 0);
+  };
+  const bestScoreByModel = new Map<string, number>();
+  for (const candidate of ranked) {
+    bestScoreByModel.set(
+      candidate.modelSlug,
+      Math.max(bestScoreByModel.get(candidate.modelSlug) ?? 0, evidenceScore(candidate)),
+    );
+  }
+  const topScore = Math.max(0, ...bestScoreByModel.values());
+  const topModels = [...bestScoreByModel.entries()]
+    .filter(([, score]) => score === topScore)
+    .map(([model]) => model);
+  if (topModels.length === 1) return topModels[0];
+  const evidenceCountByModel = new Map<string, number>();
+  for (const candidate of ranked) {
+    if (!topModels.includes(candidate.modelSlug)) continue;
+    evidenceCountByModel.set(
+      candidate.modelSlug,
+      (evidenceCountByModel.get(candidate.modelSlug) ?? 0) + 1,
+    );
+  }
+  const topEvidenceCount = Math.max(0, ...evidenceCountByModel.values());
+  const corroboratedModels = [...evidenceCountByModel.entries()]
+    .filter(([, count]) => count === topEvidenceCount)
+    .map(([model]) => model);
+  if (corroboratedModels.length === 1 && topEvidenceCount >= 2) return corroboratedModels[0];
+  if (snapshot.urlModel && matchesChatGptPerformanceLabel(performance, snapshot.urlModel)) {
+    return snapshot.urlModel;
+  }
+  const summary = snapshot.evidence
+    .slice(0, 12)
+    .map((candidate) => `${candidate.source}:${canonicalModelSlug(candidate.modelSlug)}${candidate.selected ? ":selected" : ""}`)
+    .join(", ") || "none";
+  throw new Error(
+    `Actual ChatGPT model could not be uniquely verified for ${performance}; models-api=${snapshot.apiStatus || "unavailable"}; family=${familyModels.join("|") || "none"}; evidence=${summary}.`,
+  );
+}
+
 export interface PreferredChatGptTaskTarget {
   targetId: string;
   url: string;
@@ -1259,6 +1834,41 @@ export async function acquirePreferredChatGptTaskTarget(
 ): Promise<PreferredChatGptTaskTarget> {
   const policy = loadPolicy(undefined, home);
   const requested = validateBrowserUrl(rawUrl, policy);
+  const isExistingConversation = requested.hostname === "chatgpt.com"
+    && /(?:^|\/)c\/[^/]+/u.test(requested.pathname);
+  if (isExistingConversation) {
+    const canonicalPath = (value: string): string => {
+      const parsed = new URL(value);
+      return `${parsed.origin}${parsed.pathname.replace(/\/+$/u, "")}`;
+    };
+    const requestedPath = canonicalPath(requested.toString());
+    const session = await requireActiveSession(home);
+    const targets = await listTargets(session);
+    for (const target of targets) {
+      if (target.type !== "page" || !target.webSocketDebuggerUrl) continue;
+      let current: Awaited<ReturnType<typeof inspectChatGptConversation>>;
+      try {
+        current = await inspectChatGptConversation(home, target.id);
+      } catch {
+        continue;
+      }
+      if (!current.composerPresent) continue;
+      let currentPath: string;
+      try {
+        currentPath = canonicalPath(current.url);
+      } catch {
+        continue;
+      }
+      if (currentPath !== requestedPath) continue;
+      await activateBrowserTarget(target.id, home);
+      return {
+        targetId: target.id,
+        url: current.url,
+        title: current.title,
+        reusedPreferredTarget: false,
+      };
+    }
+  }
   const isNewChatRoot = requested.hostname === "chatgpt.com"
     && requested.pathname === "/"
     && !requested.search;
@@ -1467,11 +2077,20 @@ export async function submitTrustedChatGptComposer(
   return await withPageClient(home, async (client, target) => {
     const composer = await evaluate<{ valid: boolean; text: string; host: string }>(client, `(() => {
       const host = location.hostname;
+      const composerSelector = "#prompt-textarea,[data-testid='composer-input'],[contenteditable='true'][role='textbox'],textarea[placeholder]";
+      const visible = (candidate) => {
+        if (!(candidate instanceof HTMLElement)) return false;
+        const r = candidate.getBoundingClientRect();
+        const style = getComputedStyle(candidate);
+        return r.width > 1 && r.height > 1 && style.display !== "none" && style.visibility !== "hidden";
+      };
       const active = document.activeElement;
-      const element = active instanceof HTMLElement
-        ? active.closest("#prompt-textarea,[data-testid='composer-input'],[contenteditable='true'][role='textbox'],textarea[placeholder]")
-        : null;
+      let element = active instanceof HTMLElement ? active.closest(composerSelector) : null;
+      if (!(element instanceof HTMLElement) || !visible(element)) {
+        element = Array.from(document.querySelectorAll(composerSelector)).find(visible) || null;
+      }
       if (!(element instanceof HTMLElement)) return { valid: false, text: "", host };
+      element.focus({ preventScroll: true });
       const text = String(element.innerText || element.textContent || element.value || "").trim();
       return {
         valid: (host === "chatgpt.com" || host.endsWith(".chatgpt.com")) && Boolean(text),
@@ -1740,10 +2359,25 @@ export async function typeBrowserText(
       editable: boolean;
       formHasPassword: boolean;
     }>(client, `(() => {
+      const editableSelector = "input,textarea,[contenteditable]:not([contenteditable='false'])";
+      const composerSelector = "#prompt-textarea,[data-testid='composer-input'],[contenteditable='true'][role='textbox'],textarea[placeholder]";
+      const visible = (candidate) => {
+        if (!(candidate instanceof HTMLElement)) return false;
+        const r = candidate.getBoundingClientRect();
+        const style = getComputedStyle(candidate);
+        return r.width > 1 && r.height > 1 && style.display !== "none" && style.visibility !== "hidden";
+      };
       const focused = document.activeElement;
-      const el = focused instanceof HTMLElement
-        ? focused.closest("input,textarea,[contenteditable]:not([contenteditable='false'])")
-        : null;
+      let el = focused instanceof HTMLElement ? focused.closest(editableSelector) : null;
+      const host = location.hostname;
+      if (!(el instanceof HTMLElement)
+        && (host === "chatgpt.com" || host.endsWith(".chatgpt.com"))) {
+        const composer = Array.from(document.querySelectorAll(composerSelector)).find(visible);
+        if (composer instanceof HTMLElement) {
+          composer.focus({ preventScroll: true });
+          el = composer.closest(editableSelector) || composer;
+        }
+      }
       const form = el instanceof HTMLElement ? el.closest("form") : null;
       return {
         tag: el instanceof HTMLElement ? el.tagName.toLowerCase() : "",
@@ -1787,6 +2421,25 @@ async function dispatchKey(client: CdpClient, key: string): Promise<void> {
   if (!descriptor) throw new Error(`Unsupported browser key: ${key}`);
   await client.send("Input.dispatchKeyEvent", { type: "keyDown", ...descriptor });
   await client.send("Input.dispatchKeyEvent", { type: "keyUp", ...descriptor });
+}
+
+async function dispatchBrowserShortcut(
+  client: CdpClient,
+  descriptor: {
+    key: string;
+    code: string;
+    windowsVirtualKeyCode: number;
+    modifiers: number;
+  },
+): Promise<void> {
+  await client.send("Input.dispatchKeyEvent", {
+    type: "keyDown",
+    ...descriptor,
+  });
+  await client.send("Input.dispatchKeyEvent", {
+    type: "keyUp",
+    ...descriptor,
+  });
 }
 
 export async function pressBrowserKey(
