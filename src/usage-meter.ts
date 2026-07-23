@@ -4,6 +4,7 @@ import { appendFile, mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { UsageContentMode } from "./config.js";
+import { MODEL_PRICING_TABLE } from "./model-pricing.js";
 
 type TextContent = { type: "text"; text: string };
 type ToolContent = TextContent | { type: "image"; data: string; mimeType: string };
@@ -148,6 +149,10 @@ export function runWithUsageSession<T>(sessionId: string | undefined, callback: 
   return normalized ? usageSessionStorage.run(normalized, callback) : callback();
 }
 
+export function getCurrentUsageSessionId(): string | undefined {
+  return usageSessionStorage.getStore();
+}
+
 function chatUsageState(sessionId?: string): UsageState {
   const key = String(sessionId || "process").trim() || "process";
   const existing = chatUsage.get(key);
@@ -234,16 +239,17 @@ export function estimateGpt56ApiCost(
 ): ApiCostEstimate {
   const normalizedInput = clampNumber(inputTokens);
   const normalizedOutput = clampNumber(outputTokens);
+  const pricing = MODEL_PRICING_TABLE["gpt-5.6-sol"];
   const inputUsdPerMillion = options.inputUsdPerMillion
-    ?? positiveEnvNumber("DEVSPACE_GPT56_INPUT_USD_PER_MTOK", 5);
+    ?? positiveEnvNumber("DEVSPACE_GPT56_INPUT_USD_PER_MTOK", pricing.inputUsdPerMillion);
   const outputUsdPerMillion = options.outputUsdPerMillion
-    ?? positiveEnvNumber("DEVSPACE_GPT56_OUTPUT_USD_PER_MTOK", 30);
+    ?? positiveEnvNumber("DEVSPACE_GPT56_OUTPUT_USD_PER_MTOK", pricing.outputUsdPerMillion);
   const longInputUsdPerMillion = options.longInputUsdPerMillion
-    ?? positiveEnvNumber("DEVSPACE_GPT56_LONG_INPUT_USD_PER_MTOK", 10);
+    ?? positiveEnvNumber("DEVSPACE_GPT56_LONG_INPUT_USD_PER_MTOK", pricing.longInputUsdPerMillion);
   const longOutputUsdPerMillion = options.longOutputUsdPerMillion
-    ?? positiveEnvNumber("DEVSPACE_GPT56_LONG_OUTPUT_USD_PER_MTOK", 45);
+    ?? positiveEnvNumber("DEVSPACE_GPT56_LONG_OUTPUT_USD_PER_MTOK", pricing.longOutputUsdPerMillion);
   const longContextThresholdTokens = options.longContextThresholdTokens
-    ?? positiveEnvNumber("DEVSPACE_GPT56_LONG_CONTEXT_THRESHOLD_TOKENS", 272_000);
+    ?? positiveEnvNumber("DEVSPACE_GPT56_LONG_CONTEXT_THRESHOLD_TOKENS", pricing.longContextThresholdTokens);
   const usdJpyRate = options.usdJpyRate
     ?? positiveEnvNumber("DEVSPACE_USD_JPY_RATE", 160);
   const usd = (normalizedInput / 1_000_000) * inputUsdPerMillion

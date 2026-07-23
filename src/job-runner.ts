@@ -19,6 +19,7 @@ import {
   listBrowserApprovals,
   startBrowserSession,
 } from "./browser-computer.js";
+import { parseChatGptPerformance } from "./chatgpt-model.js";
 import {
   runChatGptTask,
   type ChatGptTaskInput,
@@ -488,8 +489,22 @@ async function runChatGptTaskJob(store: JobStore, job: JobRecord): Promise<JobRe
   store.appendEvent(
     job.id,
     "info",
-    `ChatGPT model: ${result.state.selectedModelLabel ?? result.state.selectedModel ?? result.state.requestedModel ?? "unverified"} (${result.state.modelSelectionStatus ?? "url-only"}).`,
+    `ChatGPT performance/model: ${result.state.requestedPerformance ?? "high"} -> ${result.state.selectedModelLabel ?? result.state.selectedModel ?? "model-unverified"} (${result.state.modelSelectionStatus ?? "url-only"}).`,
   );
+  const apiCost = result.state.apiCostEstimate;
+  if (apiCost?.status === "registered") {
+    store.appendEvent(
+      job.id,
+      "info",
+      `API conversion estimate: ${apiCost.pricingLabel ?? apiCost.pricingModel} input=${apiCost.inputTokens} output=${apiCost.outputTokens} JPY=${apiCost.jpy?.toFixed(2) ?? "unknown"}-${apiCost.maxJpy?.toFixed(2) ?? "unknown"}.`,
+    );
+  } else if (apiCost) {
+    store.appendEvent(
+      job.id,
+      "warning",
+      `API conversion estimate unavailable: price not registered for ${apiCost.selectedModel ?? apiCost.requestedModel ?? "unknown model"}.`,
+    );
+  }
   store.appendEvent(job.id, "info", `Resume URL: ${result.conversationUrl}`);
   if (result.state.tabClosed) store.appendEvent(job.id, "info", "Unused child tab closed after result capture.");
   return completed;
@@ -589,6 +604,7 @@ function readChatGptTaskInput(value: Record<string, unknown> | undefined): ChatG
   const writingKernel = typeof value?.writingKernel === "string"
     ? value.writingKernel as ChatGptTaskInput["writingKernel"]
     : undefined;
+  const performance = parseChatGptPerformance(value?.performance);
   return {
     prompt,
     url,
@@ -598,6 +614,7 @@ function readChatGptTaskInput(value: Record<string, unknown> | undefined): ChatG
     closeWhenDone,
     autoSubmit,
     writingKernel,
+    performance,
   };
 }
 

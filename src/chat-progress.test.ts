@@ -3,6 +3,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  ensureChatProgressStarted,
   formatChatProgressResult,
   listChatProgress,
   updateChatProgress,
@@ -198,6 +199,52 @@ const nextTaskSameChat = updateChatProgress({
 assert.notEqual(nextTaskSameChat.id, completed.id);
 assert.equal(nextTaskSameChat.programProgress, 77);
 assert.equal(listChatProgress().length, 4);
+
+const implicitStarted = ensureChatProgressStarted({
+  sessionId: "implicit_progress_session",
+  chatLabel: "GPT-Agent · implicit-workspace",
+  workspaceId: "ws_implicit",
+  workspaceRoot: "/tmp/implicit-workspace",
+  overallProgress: 0,
+  currentTask: "ワークスペースを開いて作業開始",
+});
+const implicitCompleted = updateChatProgress({
+  sessionId: "implicit_progress_session",
+  chatLabel: "明示的な最終タスク名",
+  workspaceId: "ws_implicit",
+  workspaceRoot: "/tmp/implicit-workspace",
+  overallProgress: 100,
+  currentProgress: 100,
+  currentTask: "完了",
+  status: "completed",
+  finalResult: "自動開始した記録を再利用しました。",
+  changes: "なし",
+  verification: "同一sessionIdで重複レコードなし",
+  remaining: "なし",
+});
+assert.equal(implicitCompleted.id, implicitStarted.id);
+assert.equal(implicitCompleted.startedAt, implicitStarted.startedAt);
+assert.equal(implicitCompleted.chatLabel, "明示的な最終タスク名");
+assert.equal(
+  listChatProgress().filter((record) => record.sessionId === "implicit_progress_session").length,
+  1,
+);
+
+const conversationA = ensureChatProgressStarted({
+  sessionId: "shared_transport_session",
+  conversationId: "conversation-a",
+  chatLabel: "Conversation A",
+  overallProgress: 0,
+  currentTask: "Aを開始",
+});
+const conversationB = ensureChatProgressStarted({
+  sessionId: "shared_transport_session",
+  conversationId: "conversation-b",
+  chatLabel: "Conversation B",
+  overallProgress: 0,
+  currentTask: "Bを開始",
+});
+assert.notEqual(conversationA.id, conversationB.id);
 
 if (previousPath === undefined) {
   delete process.env.DEVSPACE_CHAT_PROGRESS_PATH;

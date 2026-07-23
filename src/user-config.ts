@@ -22,6 +22,7 @@ export interface DevspaceUserConfig {
   worktreeRoot?: string;
   agentDir?: string;
   subagents?: boolean;
+  chatgptProjectUrl?: string;
 }
 
 export interface DevspaceAuthConfig {

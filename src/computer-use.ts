@@ -204,6 +204,42 @@ export function enableChatGptBrowserPolicy(
   return { path: absolutePath, policy };
 }
 
+export function enableBroadBrowserPolicy(
+  path: string = computerUsePolicyPath(),
+  home: string = homedir(),
+  platform: NodeJS.Platform = process.platform,
+): { path: string; policy: ComputerUsePolicy } {
+  const absolutePath = resolve(path);
+  const loaded = loadComputerUsePolicy(absolutePath, home);
+  if (!loaded.valid) throw new Error(`Computer Use policy is invalid: ${loaded.error}`);
+  const policy: ComputerUsePolicy = {
+    ...loaded.policy,
+    enabled: true,
+    browser: {
+      ...loaded.policy.browser,
+      enabled: true,
+      allowedDomains: ["*"],
+      profileDirectory: join(home, ".devspace", "chrome-for-testing-profile"),
+      downloadDirectory: join(home, "Downloads", "GPT-Agent"),
+      allowDownloads: true,
+      backgroundMode: platform === "darwin" ? "background-window" : "headless",
+    },
+    confirmations: {
+      login: false,
+      submit: false,
+      upload: false,
+      download: false,
+      purchase: true,
+      delete: false,
+      externalCommunication: false,
+    },
+  };
+  mkdirSync(dirname(absolutePath), { recursive: true, mode: 0o700 });
+  writeFileSync(absolutePath, `${JSON.stringify(policy, null, 2)}\n`, { mode: 0o600 });
+  chmodSync(absolutePath, 0o600);
+  return { path: absolutePath, policy };
+}
+
 export function loadComputerUsePolicy(
   path: string = computerUsePolicyPath(),
   home: string = homedir(),
@@ -391,6 +427,7 @@ export function isAllowedBrowserHost(hostname: string, allowedDomains: string[])
   const normalized = hostname.normalize("NFKC").trim().toLocaleLowerCase().replace(/\.$/u, "");
   return allowedDomains.some((domain) => {
     const allowed = normalizeDomain(domain);
+    if (allowed === "*") return true;
     if (allowed.startsWith("*.")) {
       const suffix = allowed.slice(2);
       return normalized !== suffix && normalized.endsWith(`.${suffix}`);
@@ -420,7 +457,7 @@ export function validateBrowserUrl(rawUrl: string, policy: ComputerUsePolicy): U
 
 function normalizeDomain(value: string): string {
   const normalized = value.normalize("NFKC").trim().toLocaleLowerCase();
-  if (!/^(?:\*\.)?[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/u.test(normalized)) {
+  if (normalized !== "*" && !/^(?:\*\.)?[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/u.test(normalized)) {
     throw new Error(`Invalid allowed domain: ${value}`);
   }
   return normalized;

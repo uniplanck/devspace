@@ -26,8 +26,13 @@ import {
   runCompatibilitySmoke,
 } from "./runtime-operations.js";
 import { commandWithAugmentedPath } from "./shell-environment.js";
-import { getExecutionCostSnapshot } from "./usage-meter.js";
+import {
+  getCurrentUsageSessionId,
+  getExecutionCostSnapshot,
+} from "./usage-meter.js";
+import { formatChatProgressResult, updateChatProgress } from "./chat-progress.js";
 import { loadConfig } from "./config.js";
+import { parseChatGptPerformance } from "./chatgpt-model.js";
 import { cancelJob, resumeJob, startJob } from "./job-runner.js";
 import { createJobStore, isJobPreset, JOB_PRESETS } from "./job-store.js";
 import { isCodexAllowed } from "./no-codex.js";
@@ -125,6 +130,7 @@ async function runBuiltinRuntimeCommand(
       "  devspace-runtime diagnose [--github] [command ...]",
       "  devspace-runtime smoke",
       "  devspace-runtime costs",
+      "  devspace-runtime progress finalize [--label <label>] [--result <result>] [--changes <changes>] [--verification <verification>] [--remaining <remaining>] [--failed]",
       "  devspace-runtime finder <workspace-relative-path>",
       "  devspace-runtime jobs start <preset> [--title <title>]",
       "  devspace-runtime jobs start browser-loop --goal <goal> --provider <non-codex-provider> [--max-steps <1-60>] [--model <model>] [--download-group <group>]",
@@ -150,6 +156,36 @@ async function runBuiltinRuntimeCommand(
 
   if (rawCommand === `${runtimeCommandPrefix} costs`) {
     return jsonResponse(getExecutionCostSnapshot());
+  }
+
+  if (
+    rawCommand === `${runtimeCommandPrefix} progress finalize`
+    || rawCommand.startsWith(`${runtimeCommandPrefix} progress finalize `)
+  ) {
+    try {
+      const tokens = tokenizeRuntimeCommand(rawCommand);
+      const workspaceName = context.root.split("/").filter(Boolean).at(-1) || "workspace";
+      const failed = tokens.includes("--failed");
+      const label = runtimeOption(tokens, "--label") || `GPT-Agent · ${workspaceName}`;
+      const record = updateChatProgress({
+        sessionId: getCurrentUsageSessionId(),
+        chatLabel: label,
+        workspaceId: context.workspaceId,
+        workspaceRoot: context.root,
+        overallProgress: 100,
+        currentProgress: 100,
+        currentTask: failed ? "失敗" : "完了",
+        status: failed ? "failed" : "completed",
+        finalResult: runtimeOption(tokens, "--result")
+          || (failed ? "タスクは失敗しました。" : "タスクは完了しました。"),
+        changes: runtimeOption(tokens, "--changes") || "なし",
+        verification: runtimeOption(tokens, "--verification") || "なし",
+        remaining: runtimeOption(tokens, "--remaining") || "なし",
+      });
+      return textResponse(formatChatProgressResult(record));
+    } catch (error) {
+      return textResponse(error instanceof Error ? error.message : String(error), true);
+    }
   }
 
   if (rawCommand === `${runtimeCommandPrefix} smoke`) {
@@ -410,6 +446,7 @@ function runtimeChatGptTaskInput(tokens: string[]): Record<string, unknown> {
   if (!["auto", "on", "off"].includes(writingKernel)) {
     throw new Error("--writing-kernel must be auto, on, or off.");
   }
+  const performance = parseChatGptPerformance(runtimeOption(tokens, "--performance"));
   return {
     prompt,
     ...(url ? { url } : {}),
@@ -419,6 +456,7 @@ function runtimeChatGptTaskInput(tokens: string[]): Record<string, unknown> {
     closeWhenDone: !tokens.includes("--keep-tab"),
     autoSubmit: tokens.includes("--auto-submit"),
     writingKernel,
+    performance,
   };
 }
 

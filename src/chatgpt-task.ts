@@ -4,6 +4,7 @@ import { join } from "node:path";
 import {
   acquirePreferredChatGptTaskTarget,
   activateBrowserTarget,
+  clearChatGptComposer,
   closeBrowserTarget,
   focusChatGptComposer,
   inspectChatGptConversation,
@@ -11,7 +12,7 @@ import {
   openBrowserUrlInNewTab,
   pressBrowserKey,
   resetPreferredChatGptTaskTarget,
-  selectBestAvailableChatGptModel,
+  selectChatGptPerformance,
   startBrowserSession,
   submitTrustedChatGptComposer,
   typeBrowserText,
@@ -20,15 +21,19 @@ import {
   type ChatGptModelSelectionResult,
 } from "./browser-computer.js";
 import {
-  CHATGPT_MINIMUM_PREFERRED_MODEL,
   CHATGPT_MINIMUM_PREFERRED_URL,
+  parseChatGptPerformance,
   prepareChatGptNavigationUrl,
   prepareChatGptTaskUrl,
+  type ChatGptPerformance,
 } from "./chatgpt-model.js";
 import {
   prepareJapaneseWritingPrompt,
   type JapaneseWritingKernelMode,
 } from "./japanese-writing-kernel.js";
+import { estimateModelApiCost, type ModelApiCostEstimate } from "./model-pricing.js";
+import { estimateTokensFromChars } from "./usage-meter.js";
+import { loadDevspaceFiles } from "./user-config.js";
 
 export interface ChatGptTaskInput {
   prompt: string;
@@ -39,6 +44,7 @@ export interface ChatGptTaskInput {
   closeWhenDone?: boolean;
   autoSubmit?: boolean;
   writingKernel?: JapaneseWritingKernelMode;
+  performance?: ChatGptPerformance;
 }
 
 export interface ChatGptTaskState {
@@ -53,10 +59,15 @@ export interface ChatGptTaskState {
   pendingApprovalId?: string;
   responseText?: string;
   imageUrls?: string[];
+  requestedPerformance?: ChatGptPerformance;
   requestedModel?: string;
   selectedModel?: string;
   selectedModelLabel?: string;
-  modelSelectionStatus?: "selected" | "url-only";
+  modelSelectionStatus?: "selected" | "url-only" | "failed";
+  modelSelectionError?: string;
+  estimatedInputTokens?: number;
+  estimatedOutputTokens?: number;
+  apiCostEstimate?: ModelApiCostEstimate;
   reusedPreferredTarget?: boolean;
   tabReset?: boolean;
   tabClosed?: boolean;
@@ -83,7 +94,8 @@ export async function runChatGptTask(
   initialState?: Partial<ChatGptTaskState>,
   runtime: ChatGptTaskRuntime = {},
 ): Promise<ChatGptTaskResult> {
-  const input = validateInput(rawInput);
+  const input = validateInput(applyConfiguredProjectUrl(rawInput));
+  const configuredProjectApplied = !rawInput.url?.trim() && isChatGptProjectUrl(input.url);
   const state = normalizeState(initialState);
   let submittedPrompt = input.prompt;
   if (!state.targetId) {
@@ -97,7 +109,13 @@ export async function runChatGptTask(
     state.writingKernelSource = preparedPrompt.sourcePath;
     state.writingKernelCharacters = preparedPrompt.kernelCharacters;
   }
-  await startBrowserSession();
+  await startBrowserSession({
+    env: {
+      ...process.env,
+      DEVSPACE_BROWSER_BACKGROUND_MODE: process.platform === "darwin" ? "background-window" : "headless",
+    },
+    allowDownloads: false,
+  });
 
   if (state.pendingApprovalId) {
     const approval = listBrowserApprovals().find((candidate) => candidate.id === state.pendingApprovalId);
@@ -120,29 +138,83 @@ export async function runChatGptTask(
     try {
       interaction = await withBrowserInputLock(async () => {
         const requestedUrl = input.url ?? DEFAULT_URL;
-        const opened = await acquirePreferredChatGptTaskTarget(prepareChatGptNavigationUrl(requestedUrl));
+        state.requestedPerformance = input.performance;
+        const opened = await acquirePreferredChatGptTaskTarget(
+          prepareChatGptNavigationUrl(requestedUrl, input.performance),
+        );
         state.targetId = opened.targetId;
         state.conversationUrl = opened.url;
         state.reusedPreferredTarget = opened.reusedPreferredTarget;
-        state.requestedModel = new URL(requestedUrl).searchParams.get("model")
-          ?? CHATGPT_MINIMUM_PREFERRED_MODEL;
+        state.requestedModel = new URL(requestedUrl).searchParams.get("model") ?? undefined;
         await activateBrowserTarget(state.targetId);
         await waitForComposer(state.targetId, runtime.shouldStop);
-        const modelSelection: ChatGptModelSelectionResult = await selectBestAvailableChatGptModel({ targetId: state.targetId })
-          .catch((): ChatGptModelSelectionResult => ({
-            status: "url-only" as const,
-            targetId: state.targetId!,
-            currentLabel: "",
-            candidateCount: 0,
-          }));
-        state.modelSelectionStatus = modelSelection.status;
-        state.selectedModel = modelSelection.selectedModel ?? state.requestedModel;
-        state.selectedModelLabel = modelSelection.selectedLabel || modelSelection.currentLabel || state.selectedModel;
-        const before = await waitForComposer(state.targetId, runtime.shouldStop);
-        await focusChatGptComposer({ requireEmpty: true, targetId: state.targetId });
-        for (let offset = 0; offset < submittedPrompt.length; offset += 3_500) {
-          await typeBrowserText(submittedPrompt.slice(offset, offset + 3_500), undefined, state.targetId);
+        let modelSelection: ChatGptModelSelectionResult;
+        try {
+          modelSelection = await selectChatGptPerformance({
+            performance: input.performance!,
+            targetId: state.targetId,
+          });
+        } catch (firstError) {
+          const firstMessage = firstError instanceof Error ? firstError.message : String(firstError);
+          if (/^CDP command timed out:/u.test(firstMessage)) {
+            await activateBrowserTarget(state.targetId);
+            await sleep(1_000);
+            try {
+              modelSelection = await selectChatGptPerformance({
+                performance: input.performance!,
+                targetId: state.targetId,
+              });
+            } catch (retryError) {
+              state.modelSelectionStatus = "failed";
+              state.modelSelectionError = retryError instanceof Error ? retryError.message : String(retryError);
+              runtime.onPhase?.(state.phase, cloneState(state));
+              throw new Error(`ChatGPT performance selection failed after retry: ${state.modelSelectionError}`);
+            }
+          } else {
+            state.modelSelectionStatus = "failed";
+            state.modelSelectionError = firstMessage;
+            runtime.onPhase?.(state.phase, cloneState(state));
+            throw new Error(`ChatGPT performance selection failed: ${state.modelSelectionError}`);
+          }
         }
+        state.modelSelectionStatus = modelSelection.status;
+        state.selectedModel = modelSelection.selectedModel;
+        state.selectedModelLabel = modelSelection.selectedLabel || modelSelection.currentLabel || undefined;
+        state.modelSelectionError = undefined;
+        // The model picker can replace the composer shortly after its label changes.
+        // Wait for that rerender before typing so the draft is not lost.
+        await sleep(750);
+        let before = await waitForComposer(state.targetId, runtime.shouldStop);
+        if (configuredProjectApplied && before.composerText.trim()) {
+          await clearChatGptComposer({ targetId: state.targetId });
+          await sleep(250);
+          before = await waitForComposer(state.targetId, runtime.shouldStop);
+          if (before.composerText.trim()) {
+            throw new Error("The configured ChatGPT Project draft could not be cleared before automation.");
+          }
+        }
+        const typeSubmittedPrompt = async (): Promise<void> => {
+          await focusChatGptComposer({ requireEmpty: true, targetId: state.targetId });
+          for (let offset = 0; offset < submittedPrompt.length; offset += 3_500) {
+            await typeBrowserText(submittedPrompt.slice(offset, offset + 3_500), undefined, state.targetId);
+          }
+        };
+        await typeSubmittedPrompt();
+        await sleep(350);
+        let drafted = await inspectChatGptConversation(undefined, state.targetId);
+        if (!drafted.composerText.trim()) {
+          // A late picker rerender removed our own draft. Retry once on the replacement composer.
+          await sleep(650);
+          await waitForComposer(state.targetId, runtime.shouldStop);
+          await typeSubmittedPrompt();
+          await sleep(200);
+          drafted = await inspectChatGptConversation(undefined, state.targetId);
+        }
+        const normalizeDraft = (value: string): string => value.normalize("NFKC").replace(/\s+/gu, " ").trim();
+        if (normalizeDraft(drafted.composerText) !== normalizeDraft(submittedPrompt)) {
+          throw new Error("ChatGPT composer did not retain the complete submitted prompt after model selection.");
+        }
+        await focusChatGptComposer({ requireEmpty: false, targetId: state.targetId });
         const submission = input.autoSubmit
           ? await submitTrustedChatGptComposer({ targetId: state.targetId })
           : await pressBrowserKey("Enter", { targetId: state.targetId });
@@ -155,6 +227,12 @@ export async function runChatGptTask(
       if (state.targetId && state.reusedPreferredTarget) {
         const reset = await resetPreferredChatGptTaskTarget(state.targetId).catch(() => ({ status: "not-preferred" as const }));
         if (reset.status === "reset") state.tabReset = true;
+      } else if (state.targetId) {
+        if (configuredProjectApplied) {
+          await clearChatGptComposer({ targetId: state.targetId }).catch(() => undefined);
+        }
+        const closed = await closeBrowserTarget(state.targetId).catch(() => ({ status: "not-found" as const }));
+        if (closed.status === "closed") state.tabClosed = true;
       }
       throw error;
     }
@@ -189,6 +267,21 @@ export async function runChatGptTask(
   state.imageUrls = completed.assistantImageUrls.slice(state.baselineImageCount ?? 0);
   state.conversationUrl = completed.url;
   state.pendingApprovalId = undefined;
+  state.estimatedInputTokens = estimateTokensFromChars(submittedPrompt.length);
+  state.estimatedOutputTokens = estimateTokensFromChars(completed.lastAssistantText.length);
+  state.apiCostEstimate = {
+    ...estimateModelApiCost(
+      {
+        selectedModel: state.selectedModel,
+        selectedModelLabel: state.selectedModelLabel,
+        requestedModel: state.requestedModel,
+      },
+      state.estimatedInputTokens,
+      state.estimatedOutputTokens,
+    ),
+    selectedModel: state.selectedModel,
+    selectedModelLabel: state.selectedModelLabel,
+  };
 
   if (input.closeWhenDone ?? true) {
     if (state.reusedPreferredTarget) {
@@ -216,32 +309,83 @@ export async function runChatGptTask(
   };
 }
 
+function isTransientBrowserCdpError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /^CDP command timed out:/u.test(message)
+    || /Failed to connect to the browser CDP endpoint/u.test(message);
+}
+
 async function waitForSubmittedMessage(
   targetId: string,
   baselineUserCount: number,
   shouldStop?: () => boolean,
 ) {
-  const deadline = Date.now() + 15_000;
-  let latest = await inspectChatGptConversation(undefined, targetId);
+  const deadline = Date.now() + 45_000;
+  let latest: Awaited<ReturnType<typeof inspectChatGptConversation>> | undefined;
+  let lastError: unknown;
   while (Date.now() < deadline) {
     if (shouldStop?.()) throw new Error("ChatGPT task was cancelled.");
-    latest = await inspectChatGptConversation(undefined, targetId);
-    if (latest.userCount > baselineUserCount) return latest;
-    await sleep(150);
+    try {
+      latest = await inspectChatGptConversation(undefined, targetId);
+      if (latest.userCount > baselineUserCount) return latest;
+      lastError = undefined;
+    } catch (error) {
+      if (!isTransientBrowserCdpError(error)) throw error;
+      lastError = error;
+    }
+    await sleep(250);
   }
-  throw new Error(`ChatGPT did not acknowledge the submitted message at ${latest.url}.`);
+  const location = latest?.url ?? `target ${targetId}`;
+  const detail = lastError instanceof Error ? ` Last CDP error: ${lastError.message}` : "";
+  throw new Error(`ChatGPT did not acknowledge the submitted message at ${location}.${detail}`);
 }
 
 async function waitForComposer(targetId: string, shouldStop?: () => boolean) {
-  const deadline = Date.now() + 30_000;
-  let latest = await inspectChatGptConversation(undefined, targetId);
+  const deadline = Date.now() + 75_000;
+  let latest: Awaited<ReturnType<typeof inspectChatGptConversation>> | undefined;
+  let lastError: unknown;
   while (Date.now() < deadline) {
     if (shouldStop?.()) throw new Error("ChatGPT task was cancelled.");
-    latest = await inspectChatGptConversation(undefined, targetId);
-    if (latest.composerPresent) return latest;
+    try {
+      latest = await inspectChatGptConversation(undefined, targetId);
+      lastError = undefined;
+      if (latest.errorText) {
+        throw new Error(`ChatGPT reported an error before the composer became ready: ${latest.errorText}`);
+      }
+      if (latest.composerPresent) return latest;
+    } catch (error) {
+      if (!isTransientBrowserCdpError(error)) throw error;
+      lastError = error;
+    }
     await sleep(500);
   }
-  throw new Error(`ChatGPT composer did not become ready at ${latest.url}.`);
+  if (latest) {
+    throw new Error(`ChatGPT composer did not become ready at ${latest.url} (title: ${latest.title || "unknown"}).`);
+  }
+  const detail = lastError instanceof Error ? ` Last CDP error: ${lastError.message}` : "";
+  throw new Error(`ChatGPT composer did not become ready for target ${targetId}.${detail}`);
+}
+
+export function applyConfiguredProjectUrl(
+  input: ChatGptTaskInput,
+  env: NodeJS.ProcessEnv = process.env,
+): ChatGptTaskInput {
+  const explicitUrl = input.url?.trim();
+  if (explicitUrl) return { ...input, url: explicitUrl };
+
+  const configuredUrl = env.DEVSPACE_CHATGPT_PROJECT_URL?.trim()
+    || loadDevspaceFiles(env).config.chatgptProjectUrl?.trim();
+  return configuredUrl ? { ...input, url: configuredUrl } : input;
+}
+
+function isChatGptProjectUrl(rawUrl?: string): boolean {
+  if (!rawUrl) return false;
+  try {
+    const url = new URL(rawUrl);
+    return url.hostname === "chatgpt.com" && /^\/g\/[^/]+(?:\/project)?\/?$/u.test(url.pathname);
+  } catch {
+    return false;
+  }
 }
 
 function validateInput(input: ChatGptTaskInput): ChatGptTaskInput {
@@ -265,15 +409,17 @@ function validateInput(input: ChatGptTaskInput): ChatGptTaskInput {
   if (!["auto", "on", "off"].includes(writingKernel)) {
     throw new Error("ChatGPT task writingKernel must be auto, on, or off.");
   }
+  const performance = parseChatGptPerformance(input.performance);
   return {
     prompt,
-    url: prepareChatGptTaskUrl(input.url),
+    url: prepareChatGptTaskUrl(input.url, performance),
     ...(expectedMarker ? { expectedMarker } : {}),
     ...(expectedImageCount ? { expectedImageCount } : {}),
     timeoutMs,
     closeWhenDone: input.closeWhenDone ?? true,
     autoSubmit: input.autoSubmit ?? false,
     writingKernel,
+    performance,
   };
 }
 
@@ -296,10 +442,19 @@ function normalizeState(value?: Partial<ChatGptTaskState>): ChatGptTaskState {
     ...(Array.isArray(value?.imageUrls)
       ? { imageUrls: value.imageUrls.filter((url): url is string => typeof url === "string") }
       : {}),
+    ...(value?.requestedPerformance ? { requestedPerformance: value.requestedPerformance } : {}),
     ...(value?.requestedModel ? { requestedModel: value.requestedModel } : {}),
     ...(value?.selectedModel ? { selectedModel: value.selectedModel } : {}),
     ...(value?.selectedModelLabel ? { selectedModelLabel: value.selectedModelLabel } : {}),
     ...(value?.modelSelectionStatus ? { modelSelectionStatus: value.modelSelectionStatus } : {}),
+    ...(value?.modelSelectionError ? { modelSelectionError: value.modelSelectionError } : {}),
+    ...(typeof value?.estimatedInputTokens === "number"
+      ? { estimatedInputTokens: value.estimatedInputTokens }
+      : {}),
+    ...(typeof value?.estimatedOutputTokens === "number"
+      ? { estimatedOutputTokens: value.estimatedOutputTokens }
+      : {}),
+    ...(value?.apiCostEstimate ? { apiCostEstimate: value.apiCostEstimate } : {}),
     ...(value?.reusedPreferredTarget ? { reusedPreferredTarget: true } : {}),
     ...(value?.tabReset ? { tabReset: true } : {}),
     ...(value?.tabClosed ? { tabClosed: true } : {}),
