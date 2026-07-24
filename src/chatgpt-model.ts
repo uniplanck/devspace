@@ -1,11 +1,22 @@
-export const CHATGPT_MINIMUM_PREFERRED_MODEL = "gpt-5-6-thinking";
-export const CHATGPT_MINIMUM_PREFERRED_URL = `https://chatgpt.com/?model=${CHATGPT_MINIMUM_PREFERRED_MODEL}`;
+export const CHATGPT_FASTEST_MODEL = "gpt-5-5-instant";
+export const CHATGPT_HIGH_MODEL = "gpt-5-6-thinking";
+export const CHATGPT_MINIMUM_PREFERRED_MODEL = CHATGPT_HIGH_MODEL;
+export const CHATGPT_FASTEST_URL = `https://chatgpt.com/?model=${CHATGPT_FASTEST_MODEL}`;
+export const CHATGPT_MINIMUM_PREFERRED_URL = `https://chatgpt.com/?model=${CHATGPT_HIGH_MODEL}`;
+
+export const CHATGPT_PERFORMANCE_VALUES = ["fastest", "high"] as const;
+export type ChatGptPerformance = typeof CHATGPT_PERFORMANCE_VALUES[number];
+export const DEFAULT_CHATGPT_PERFORMANCE: ChatGptPerformance = "high";
 
 export interface ChatGptModelCandidate {
   label: string;
   href?: string;
   disabled?: boolean;
   domIndex?: number;
+  modelSlug?: string;
+  modelEvidence?: string[];
+  role?: string;
+  checked?: boolean;
 }
 
 export interface RankedChatGptModelCandidate extends ChatGptModelCandidate {
@@ -13,23 +24,98 @@ export interface RankedChatGptModelCandidate extends ChatGptModelCandidate {
   modelSlug?: string;
 }
 
-export function prepareChatGptTaskUrl(rawUrl?: string): string {
-  const url = new URL(rawUrl?.trim() || CHATGPT_MINIMUM_PREFERRED_URL);
+export function parseChatGptPerformance(value: unknown): ChatGptPerformance {
+  const normalized = String(value ?? "").normalize("NFKC").trim().toLocaleLowerCase();
+  if (!normalized) return DEFAULT_CHATGPT_PERFORMANCE;
+  const aliases: Record<string, ChatGptPerformance> = {
+    fastest: "fastest",
+    fast: "fastest",
+    instant: "fastest",
+    "gpt-5.5-instant": "fastest",
+    "gpt-5-5-instant": "fastest",
+    最速: "fastest",
+    high: "high",
+    thinking: "high",
+    "gpt-5.6-thinking": "high",
+    "gpt-5-6-thinking": "high",
+    高い: "high",
+    // Legacy saved values are intentionally migrated to the remaining high tier.
+    balanced: "high",
+    balance: "high",
+    medium: "high",
+    中程度: "high",
+    sol: "high",
+    "gpt-5.6-sol": "high",
+    "gpt-5-6-sol": "high",
+  };
+  const parsed = aliases[normalized];
+  if (!parsed) {
+    throw new Error(`ChatGPT performance must be one of: ${CHATGPT_PERFORMANCE_VALUES.join(", ")}.`);
+  }
+  return parsed;
+}
+
+export function chatGptPerformanceDisplayLabel(performance: ChatGptPerformance): string {
+  return performance === "fastest" ? "最速" : "高い";
+}
+
+export function matchesChatGptPerformanceLabel(
+  performance: ChatGptPerformance,
+  rawLabel: string,
+): boolean {
+  const label = rawLabel.normalize("NFKC").replace(/\s+/gu, " ").trim().toLocaleLowerCase();
+  if (!label) return false;
+  if (performance === "fastest") {
+    return /(^|\s)(?:最速|fastest|fast|instant)(?:\s|$)/iu.test(label)
+      && !/medium|balanced|中程度|high|高い|thinking|reasoning|sol/iu.test(label);
+  }
+  return /(^|\s)(?:高い|high|thinking|reasoning)(?:\s|$)/iu.test(label)
+    && !/medium|balanced|中程度|sol/iu.test(label);
+}
+
+export function chooseChatGptPerformanceCandidate(
+  performance: ChatGptPerformance,
+  candidates: ChatGptModelCandidate[],
+): RankedChatGptModelCandidate | undefined {
+  const exact = candidates
+    .filter((candidate) => !candidate.disabled)
+    .filter((candidate) => matchesChatGptPerformanceLabel(performance, candidate.label))
+    .map((candidate) => {
+      const modelSlug = candidate.modelSlug
+        ?? extractModelSlug(candidate.href)
+        ?? extractModelSlug(candidate.label);
+      return {
+        ...candidate,
+        ...(modelSlug ? { modelSlug } : {}),
+        score: 1,
+      };
+    })
+    .sort((a, b) => b.score - a.score || a.label.localeCompare(b.label));
+  return exact[0];
+}
+
+export function prepareChatGptTaskUrl(
+  rawUrl?: string,
+  performance: ChatGptPerformance = DEFAULT_CHATGPT_PERFORMANCE,
+): string {
+  const expectedModel = performance === "fastest" ? CHATGPT_FASTEST_MODEL : CHATGPT_HIGH_MODEL;
+  const fallback = performance === "fastest" ? CHATGPT_FASTEST_URL : CHATGPT_MINIMUM_PREFERRED_URL;
+  const url = new URL(rawUrl?.trim() || fallback);
   if (url.protocol !== "https:" || !isChatGptHostname(url.hostname)) {
     throw new Error("ChatGPT task URL must use https://chatgpt.com.");
   }
   url.hostname = "chatgpt.com";
   url.hash = "";
 
-  const existingModel = url.searchParams.get("model")?.trim();
-  if (!existingModel || scoreChatGptModel(existingModel) < scoreChatGptModel(CHATGPT_MINIMUM_PREFERRED_MODEL)) {
-    url.searchParams.set("model", CHATGPT_MINIMUM_PREFERRED_MODEL);
-  }
+  url.searchParams.set("model", expectedModel);
   return url.toString();
 }
 
-export function prepareChatGptNavigationUrl(rawUrl?: string): string {
-  const url = new URL(prepareChatGptTaskUrl(rawUrl));
+export function prepareChatGptNavigationUrl(
+  rawUrl?: string,
+  performance: ChatGptPerformance = DEFAULT_CHATGPT_PERFORMANCE,
+): string {
+  const url = new URL(prepareChatGptTaskUrl(rawUrl, performance));
   url.searchParams.delete("model");
   return url.toString();
 }
@@ -54,7 +140,9 @@ export function chooseBestChatGptModelCandidate(
   return candidates
     .filter((candidate) => !candidate.disabled)
     .map((candidate) => {
-      const modelSlug = extractModelSlug(candidate.href) ?? extractModelSlug(candidate.label);
+      const modelSlug = candidate.modelSlug
+        ?? extractModelSlug(candidate.href)
+        ?? extractModelSlug(candidate.label);
       return {
         ...candidate,
         ...(modelSlug ? { modelSlug } : {}),
@@ -81,6 +169,10 @@ export function scoreChatGptModel(value: string): number {
   return reasoningRank * 1_000_000_000 + version;
 }
 
+export function extractChatGptModelSlug(value?: string): string | undefined {
+  return extractModelSlug(value);
+}
+
 function extractGptVersion(value: string): number {
   const match = /gpt[\s_-]*(\d+)(?:[.\s_-]+(\d+))?(?:[.\s_-]+(\d+))?/iu.exec(value);
   if (!match) return 0;
@@ -98,7 +190,9 @@ function extractModelSlug(value?: string): string | undefined {
     const model = url.searchParams.get("model")?.trim();
     if (model) return model;
   } catch {}
-  const match = /\bgpt[\s_-]*\d+(?:[.\s_-]+\d+){0,2}(?:[\s_-]+(?:thinking|reasoning|pro|high|deep))?\b/iu.exec(value);
+  const solMatch = /\bgpt[\s._-]*\d+(?:[.\s_-]+\d+){0,2}[\s._-]+sol\b/iu.exec(value);
+  if (solMatch) return solMatch[0].replace(/[\s._]+/gu, "-").toLocaleLowerCase();
+  const match = /\bgpt[\s_-]*\d+(?:[.\s_-]+\d+){0,2}(?:[\s_-]+(?:thinking|reasoning|pro|high|deep|instant|fast))?\b/iu.exec(value);
   return match?.[0]?.replace(/\s+/gu, "-").toLocaleLowerCase();
 }
 

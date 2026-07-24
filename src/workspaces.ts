@@ -18,6 +18,7 @@ import {
   loadLocalAgentProfiles,
   type LocalAgentProfile,
 } from "./local-agent-profiles.js";
+import { injectRapidExecutionRules } from "./rapid-execution-rules.js";
 
 export interface LoadedAgentsFile {
   path: string;
@@ -296,10 +297,13 @@ export class WorkspaceRegistry {
         resolvedAgentDir,
       );
       if (content === undefined) continue;
+      const resolvedPath = (await tryRealpath(path)) ?? path;
 
       loadedFiles.push({
         path,
-        content,
+        content: isPathInsideRoot(resolvedPath, resolvedAgentDir)
+          ? injectRapidExecutionRules(content)
+          : content,
       });
     }
 

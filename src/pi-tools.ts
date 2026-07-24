@@ -26,8 +26,13 @@ import {
   runCompatibilitySmoke,
 } from "./runtime-operations.js";
 import { commandWithAugmentedPath } from "./shell-environment.js";
-import { getExecutionCostSnapshot } from "./usage-meter.js";
+import {
+  getCurrentUsageSessionId,
+  getExecutionCostSnapshot,
+} from "./usage-meter.js";
+import { formatChatProgressResult, updateChatProgress } from "./chat-progress.js";
 import { loadConfig } from "./config.js";
+import { parseChatGptPerformance } from "./chatgpt-model.js";
 import { cancelJob, resumeJob, startJob } from "./job-runner.js";
 import { createJobStore, isJobPreset, JOB_PRESETS } from "./job-store.js";
 import { isCodexAllowed } from "./no-codex.js";
@@ -125,10 +130,12 @@ async function runBuiltinRuntimeCommand(
       "  devspace-runtime diagnose [--github] [command ...]",
       "  devspace-runtime smoke",
       "  devspace-runtime costs",
+      "  devspace-runtime progress finalize [--label <label>] [--result <result>] [--changes <changes>] [--verification <verification>] [--remaining <remaining>] [--failed]",
       "  devspace-runtime finder <workspace-relative-path>",
       "  devspace-runtime jobs start <preset> [--title <title>]",
       "  devspace-runtime jobs start browser-loop --goal <goal> --provider <non-codex-provider> [--max-steps <1-60>] [--model <model>] [--download-group <group>]",
-      "  devspace-runtime jobs start chatgpt-task --prompt <prompt> [--url <chat-url>] [--expect <marker>] [--timeout-seconds <5-600>] [--keep-tab]",
+      "  devspace-runtime jobs start chatgpt-task --prompt <prompt> [--writing-kernel <auto|on|off>] [--url <chat-url>] [--expect <marker>] [--images <1-4>] [--auto-submit] [--timeout-seconds <5-600>] [--keep-tab]",
+      "  devspace-runtime jobs start image-to-drive --prompt <prompt> [--count <1-4>] [--transparent] [--drive-remote <remote:>] [--drive-path <path>] [--file-prefix <name>] [--manual-submit] [--keep-tab]",
       "  devspace-runtime jobs list",
       "  devspace-runtime jobs show <id> [--events]",
       "  devspace-runtime jobs cancel <id>",
@@ -149,6 +156,36 @@ async function runBuiltinRuntimeCommand(
 
   if (rawCommand === `${runtimeCommandPrefix} costs`) {
     return jsonResponse(getExecutionCostSnapshot());
+  }
+
+  if (
+    rawCommand === `${runtimeCommandPrefix} progress finalize`
+    || rawCommand.startsWith(`${runtimeCommandPrefix} progress finalize `)
+  ) {
+    try {
+      const tokens = tokenizeRuntimeCommand(rawCommand);
+      const workspaceName = context.root.split("/").filter(Boolean).at(-1) || "workspace";
+      const failed = tokens.includes("--failed");
+      const label = runtimeOption(tokens, "--label") || `GPT-Agent · ${workspaceName}`;
+      const record = updateChatProgress({
+        sessionId: getCurrentUsageSessionId(),
+        chatLabel: label,
+        workspaceId: context.workspaceId,
+        workspaceRoot: context.root,
+        overallProgress: 100,
+        currentProgress: 100,
+        currentTask: failed ? "失敗" : "完了",
+        status: failed ? "failed" : "completed",
+        finalResult: runtimeOption(tokens, "--result")
+          || (failed ? "タスクは失敗しました。" : "タスクは完了しました。"),
+        changes: runtimeOption(tokens, "--changes") || "なし",
+        verification: runtimeOption(tokens, "--verification") || "なし",
+        remaining: runtimeOption(tokens, "--remaining") || "なし",
+      });
+      return textResponse(formatChatProgressResult(record));
+    } catch (error) {
+      return textResponse(error instanceof Error ? error.message : String(error), true);
+    }
   }
 
   if (rawCommand === `${runtimeCommandPrefix} smoke`) {
@@ -326,7 +363,11 @@ function runRuntimeJobsCommand(rawCommand: string, context: ToolContext): ToolRe
     const title = runtimeOption(tokens, "--title");
     const input = preset === "browser-loop"
       ? runtimeBrowserLoopInput(tokens)
-      : preset === "chatgpt-task" ? runtimeChatGptTaskInput(tokens) : undefined;
+      : preset === "chatgpt-task"
+        ? runtimeChatGptTaskInput(tokens)
+        : preset === "image-to-drive"
+          ? runtimeImageToDriveInput(tokens)
+          : undefined;
     return jsonResponse(startJob(config, {
       workspaceId: context.workspaceId,
       workspaceRoot: context.root,
@@ -391,16 +432,59 @@ function runtimeChatGptTaskInput(tokens: string[]): Record<string, unknown> {
   if (!prompt) throw new Error("ChatGPT task jobs require --prompt <prompt>.");
   const url = runtimeOption(tokens, "--url");
   const expectedMarker = runtimeOption(tokens, "--expect");
+  const expectedImagesValue = runtimeOption(tokens, "--images");
+  const expectedImageCount = expectedImagesValue === undefined ? undefined : Number(expectedImagesValue);
+  if (expectedImageCount !== undefined && (!Number.isInteger(expectedImageCount) || expectedImageCount < 1 || expectedImageCount > 4)) {
+    throw new Error("--images must be an integer from 1 to 4.");
+  }
   const timeoutSecondsValue = runtimeOption(tokens, "--timeout-seconds");
   const timeoutSeconds = timeoutSecondsValue === undefined ? undefined : Number(timeoutSecondsValue);
   if (timeoutSeconds !== undefined && (!Number.isFinite(timeoutSeconds) || timeoutSeconds < 5 || timeoutSeconds > 600)) {
     throw new Error("--timeout-seconds must be from 5 to 600.");
   }
+  const writingKernel = runtimeOption(tokens, "--writing-kernel") ?? "auto";
+  if (!["auto", "on", "off"].includes(writingKernel)) {
+    throw new Error("--writing-kernel must be auto, on, or off.");
+  }
+  const performance = parseChatGptPerformance(runtimeOption(tokens, "--performance"));
   return {
     prompt,
     ...(url ? { url } : {}),
     ...(expectedMarker ? { expectedMarker } : {}),
+    ...(expectedImageCount === undefined ? {} : { expectedImageCount }),
     ...(timeoutSeconds === undefined ? {} : { timeoutMs: Math.round(timeoutSeconds * 1000) }),
+    closeWhenDone: !tokens.includes("--keep-tab"),
+    autoSubmit: tokens.includes("--auto-submit"),
+    writingKernel,
+    performance,
+  };
+}
+
+function runtimeImageToDriveInput(tokens: string[]): Record<string, unknown> {
+  const prompt = runtimeOption(tokens, "--prompt");
+  if (!prompt) throw new Error("Image-to-Drive jobs require --prompt <prompt>.");
+  const countValue = runtimeOption(tokens, "--count");
+  const count = countValue === undefined ? 1 : Number(countValue);
+  if (!Number.isInteger(count) || count < 1 || count > 4) throw new Error("--count must be an integer from 1 to 4.");
+  const timeoutSecondsValue = runtimeOption(tokens, "--timeout-seconds");
+  const timeoutSeconds = timeoutSecondsValue === undefined ? undefined : Number(timeoutSecondsValue);
+  if (timeoutSeconds !== undefined && (!Number.isFinite(timeoutSeconds) || timeoutSeconds < 30 || timeoutSeconds > 600)) {
+    throw new Error("--timeout-seconds must be from 30 to 600 for image-to-drive.");
+  }
+  const driveRemote = runtimeOption(tokens, "--drive-remote");
+  const drivePath = runtimeOption(tokens, "--drive-path");
+  const filePrefix = runtimeOption(tokens, "--file-prefix");
+  const url = runtimeOption(tokens, "--url");
+  return {
+    prompt,
+    count,
+    transparent: tokens.includes("--transparent"),
+    ...(driveRemote ? { driveRemote } : {}),
+    ...(drivePath ? { drivePath } : {}),
+    ...(filePrefix ? { filePrefix } : {}),
+    ...(url ? { url } : {}),
+    ...(timeoutSeconds === undefined ? {} : { timeoutMs: Math.round(timeoutSeconds * 1000) }),
+    autoSubmit: !tokens.includes("--manual-submit"),
     closeWhenDone: !tokens.includes("--keep-tab"),
   };
 }

@@ -21,7 +21,7 @@ assert.equal(initialized.created, true);
 assert.equal(initialized.policy.enabled, false);
 assert.equal(initialized.policy.confirmations.purchase, true);
 assert.equal(initialized.policy.browser.downloadDirectory, join(root, "Downloads", "GPT-Agent"));
-assert.equal(initialized.policy.browser.backgroundMode, "background-window");
+assert.equal(initialized.policy.browser.backgroundMode, "headless");
 assert.equal(initialized.policy.browser.profileDirectory, join(root, ".devspace", "chrome-for-testing-profile"));
 assert.equal(
   chromeForTestingExecutable(root, "darwin"),
@@ -46,7 +46,7 @@ assert.equal(disabledDoctor.browser.nativeCdpAvailable, true);
 assert.equal(disabledDoctor.browser.ready, false);
 assert.match(disabledDoctor.diagnostics.join(" "), /disabled by policy/);
 
-const chatGptEnabled = enableChatGptBrowserPolicy(policyPath, root);
+const chatGptEnabled = enableChatGptBrowserPolicy(policyPath, root, "darwin");
 assert.equal(chatGptEnabled.policy.enabled, true);
 assert.equal(chatGptEnabled.policy.browser.enabled, true);
 assert.deepEqual(chatGptEnabled.policy.browser.allowedDomains, ["chatgpt.com"]);
@@ -55,6 +55,11 @@ assert.equal(chatGptEnabled.policy.browser.backgroundMode, "background-window");
 assert.equal(chatGptEnabled.policy.browser.profileDirectory, join(root, ".devspace", "chrome-for-testing-profile"));
 assert.equal(chatGptEnabled.policy.confirmations.purchase, true);
 assert.equal(chatGptEnabled.policy.confirmations.externalCommunication, true);
+
+const linuxPolicyPath = join(root, "computer-use-linux.json");
+initializeComputerUsePolicy(linuxPolicyPath, root);
+const linuxChatGptEnabled = enableChatGptBrowserPolicy(linuxPolicyPath, root, "linux");
+assert.equal(linuxChatGptEnabled.policy.browser.backgroundMode, "headless");
 
 const enabled = defaultComputerUsePolicy(root);
 enabled.enabled = true;
@@ -87,7 +92,7 @@ await writeFile(policyPath, JSON.stringify(legacyRaw));
 const legacyLoaded = loadComputerUsePolicy(policyPath, root);
 assert.equal(legacyLoaded.valid, true);
 assert.equal(legacyLoaded.policy.browser.downloadDirectory, join(root, "Downloads", "GPT-Agent"));
-assert.equal(legacyLoaded.policy.browser.backgroundMode, "background-window");
+assert.equal(legacyLoaded.policy.browser.backgroundMode, "headless");
 
 const raw = JSON.parse(await readFile(policyPath, "utf8"));
 raw.browser.allowedDomains = ["https://invalid.example.com/path"];

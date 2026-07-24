@@ -6,9 +6,11 @@ import {
   approveBrowserAction,
   browserStatus,
   classifyBrowserElementRisk,
+  effectiveBrowserBackgroundMode,
   isManagedAutomationBrowserSession,
   listBrowserApprovals,
   resolveBrowserDownloadDirectory,
+  shouldAcceptStableChatGptText,
   type BrowserElementDescriptor,
   type BrowserSessionRecord,
 } from "./browser-computer.js";
@@ -35,6 +37,22 @@ try {
   assert.equal(isManagedAutomationBrowserSession(legacyManualSession), false);
   assert.equal(
     isManagedAutomationBrowserSession({ ...legacyManualSession, managedBy: "gpt-agent-automation" }),
+    true,
+  );
+  assert.equal(effectiveBrowserBackgroundMode("background-window", {}), "background-window");
+  assert.equal(
+    effectiveBrowserBackgroundMode("background-window", { DEVSPACE_BROWSER_BACKGROUND_MODE: "headless" }),
+    "headless",
+  );
+  assert.equal(
+    effectiveBrowserBackgroundMode("headless", { DEVSPACE_BROWSER_BACKGROUND_MODE: "window" }),
+    "window",
+  );
+  assert.equal(shouldAcceptStableChatGptText({ generating: false, stablePolls: 1 }), true);
+  assert.equal(shouldAcceptStableChatGptText({ generating: true, stablePolls: 23 }), false);
+  assert.equal(shouldAcceptStableChatGptText({ generating: true, stablePolls: 24 }), true);
+  assert.equal(
+    shouldAcceptStableChatGptText({ generating: true, stablePolls: 4, expectedMarker: "DONE" }),
     true,
   );
 

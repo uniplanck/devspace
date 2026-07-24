@@ -19,6 +19,7 @@ import {
   listBrowserApprovals,
   startBrowserSession,
 } from "./browser-computer.js";
+import { parseChatGptPerformance } from "./chatgpt-model.js";
 import {
   runChatGptTask,
   type ChatGptTaskInput,
@@ -33,6 +34,11 @@ import {
   type BrowserTaskLoopState,
 } from "./browser-task-loop.js";
 import { GoogleAIKeyPool, loadBrowserPlannerConfig } from "./google-ai-key-pool.js";
+import {
+  runImageToDrive,
+  type ImageToDriveInput,
+  type ImageToDriveState,
+} from "./image-to-drive.js";
 
 export interface StartJobInput {
   workspaceId?: string;
@@ -111,6 +117,9 @@ export async function runJobWorker(
     }
     if (job.preset === "chatgpt-task") {
       return await runChatGptTaskJob(store, job);
+    }
+    if (job.preset === "image-to-drive") {
+      return await runImageToDriveJob(store, job);
     }
 
     const command = await resolvePresetCommand(job.preset, job.workspaceRoot);
@@ -480,17 +489,107 @@ async function runChatGptTaskJob(store: JobStore, job: JobRecord): Promise<JobRe
   store.appendEvent(
     job.id,
     "info",
-    `ChatGPT model: ${result.state.selectedModelLabel ?? result.state.selectedModel ?? result.state.requestedModel ?? "unverified"} (${result.state.modelSelectionStatus ?? "url-only"}).`,
+    `ChatGPT performance/model: ${result.state.requestedPerformance ?? "high"} -> ${result.state.selectedModelLabel ?? result.state.selectedModel ?? "model-unverified"} (${result.state.modelSelectionStatus ?? "url-only"}).`,
   );
+  const apiCost = result.state.apiCostEstimate;
+  if (apiCost?.status === "registered") {
+    store.appendEvent(
+      job.id,
+      "info",
+      `API conversion estimate: ${apiCost.pricingLabel ?? apiCost.pricingModel} input=${apiCost.inputTokens} output=${apiCost.outputTokens} JPY=${apiCost.jpy?.toFixed(2) ?? "unknown"}-${apiCost.maxJpy?.toFixed(2) ?? "unknown"}.`,
+    );
+  } else if (apiCost) {
+    store.appendEvent(
+      job.id,
+      "warning",
+      `API conversion estimate unavailable: price not registered for ${apiCost.selectedModel ?? apiCost.requestedModel ?? "unknown model"}.`,
+    );
+  }
   store.appendEvent(job.id, "info", `Resume URL: ${result.conversationUrl}`);
   if (result.state.tabClosed) store.appendEvent(job.id, "info", "Unused child tab closed after result capture.");
   return completed;
 }
 
+async function runImageToDriveJob(store: JobStore, job: JobRecord): Promise<JobRecord> {
+  const input = readImageToDriveInput(job.input);
+  store.appendEvent(
+    job.id,
+    "info",
+    "Execution engine: deterministic ChatGPT image generation, local PNG processing, and rclone Drive upload.",
+  );
+  const result = await runImageToDrive(
+    input,
+    job.state as Partial<ImageToDriveState> | undefined,
+    {
+      taskId: job.id,
+      onPhase: (phase, state) => {
+        const progress = phase === "generating"
+          ? 30
+          : phase === "downloading"
+            ? 58
+            : phase === "processing"
+              ? 72
+              : phase === "uploading"
+                ? 86
+                : 98;
+        store.update(job.id, {
+          state: state as unknown as Record<string, unknown>,
+          progress: Math.max(requireJob(store, job.id).progress, progress),
+          currentStep: phase === "generating"
+            ? "Generating images in ChatGPT"
+            : phase === "downloading"
+              ? "Downloading generated images"
+              : phase === "processing"
+                ? "Converting green screen to alpha transparency"
+                : phase === "uploading"
+                  ? "Uploading images to Google Drive"
+                  : "Drive links captured",
+        });
+      },
+      shouldStop: () => {
+        const current = store.get(job.id);
+        return current?.status === "cancelling" || current?.status === "cancelled";
+      },
+    },
+  );
+  if (result.status === "waiting-approval") {
+    const waiting = store.update(job.id, {
+      status: "waiting_approval",
+      state: result.state as unknown as Record<string, unknown>,
+      currentStep: "Waiting for local ChatGPT submit approval",
+      workerPid: undefined,
+      processPid: undefined,
+    });
+    store.appendEvent(job.id, "warning", `Local approval required: ${result.approval.id} (submit).`);
+    return waiting;
+  }
+  const completed = store.update(job.id, {
+    status: "succeeded",
+    progress: 100,
+    state: result.state as unknown as Record<string, unknown>,
+    currentStep: "Images uploaded to Google Drive",
+    exitCode: 0,
+    processPid: undefined,
+    workerPid: undefined,
+    finishedAt: new Date().toISOString(),
+  });
+  for (const file of result.files) {
+    store.appendEvent(job.id, "info", `Drive file: ${file.remotePath} — ${file.link}`);
+  }
+  store.appendEvent(job.id, "info", `Resume URL: ${result.conversationUrl}`);
+  return completed;
+}
+
 function readPendingApprovalId(value: Record<string, unknown> | undefined): string | undefined {
-  return typeof value?.pendingApprovalId === "string" && value.pendingApprovalId.trim()
-    ? value.pendingApprovalId.trim()
-    : undefined;
+  if (typeof value?.pendingApprovalId === "string" && value.pendingApprovalId.trim()) {
+    return value.pendingApprovalId.trim();
+  }
+  const nested = value?.chatGpt;
+  if (nested && typeof nested === "object" && !Array.isArray(nested)) {
+    const pending = (nested as Record<string, unknown>).pendingApprovalId;
+    if (typeof pending === "string" && pending.trim()) return pending.trim();
+  }
+  return undefined;
 }
 
 function readChatGptTaskInput(value: Record<string, unknown> | undefined): ChatGptTaskInput {
@@ -498,9 +597,51 @@ function readChatGptTaskInput(value: Record<string, unknown> | undefined): ChatG
   if (!prompt.trim()) throw new Error("ChatGPT task requires an input.prompt string.");
   const url = typeof value?.url === "string" ? value.url : undefined;
   const expectedMarker = typeof value?.expectedMarker === "string" ? value.expectedMarker : undefined;
+  const expectedImageCount = typeof value?.expectedImageCount === "number" ? value.expectedImageCount : undefined;
   const timeoutMs = typeof value?.timeoutMs === "number" ? value.timeoutMs : undefined;
   const closeWhenDone = typeof value?.closeWhenDone === "boolean" ? value.closeWhenDone : undefined;
-  return { prompt, url, expectedMarker, timeoutMs, closeWhenDone };
+  const autoSubmit = typeof value?.autoSubmit === "boolean" ? value.autoSubmit : undefined;
+  const writingKernel = typeof value?.writingKernel === "string"
+    ? value.writingKernel as ChatGptTaskInput["writingKernel"]
+    : undefined;
+  const performance = parseChatGptPerformance(value?.performance);
+  return {
+    prompt,
+    url,
+    expectedMarker,
+    expectedImageCount,
+    timeoutMs,
+    closeWhenDone,
+    autoSubmit,
+    writingKernel,
+    performance,
+  };
+}
+
+function readImageToDriveInput(value: Record<string, unknown> | undefined): ImageToDriveInput {
+  const prompt = typeof value?.prompt === "string" ? value.prompt : "";
+  if (!prompt.trim()) throw new Error("Image-to-Drive job requires an input.prompt string.");
+  const count = typeof value?.count === "number" ? value.count : undefined;
+  const transparent = typeof value?.transparent === "boolean" ? value.transparent : undefined;
+  const driveRemote = typeof value?.driveRemote === "string" ? value.driveRemote : undefined;
+  const drivePath = typeof value?.drivePath === "string" ? value.drivePath : undefined;
+  const filePrefix = typeof value?.filePrefix === "string" ? value.filePrefix : undefined;
+  const url = typeof value?.url === "string" ? value.url : undefined;
+  const timeoutMs = typeof value?.timeoutMs === "number" ? value.timeoutMs : undefined;
+  const autoSubmit = typeof value?.autoSubmit === "boolean" ? value.autoSubmit : undefined;
+  const closeWhenDone = typeof value?.closeWhenDone === "boolean" ? value.closeWhenDone : undefined;
+  return {
+    prompt,
+    count,
+    transparent,
+    driveRemote,
+    drivePath,
+    filePrefix,
+    url,
+    timeoutMs,
+    autoSubmit,
+    closeWhenDone,
+  };
 }
 
 function readBrowserLoopInput(value: Record<string, unknown> | undefined): BrowserTaskLoopInput {
@@ -543,7 +684,7 @@ async function runRuntimeSmokeJob(store: JobStore, job: JobRecord): Promise<JobR
 }
 
 async function resolvePresetCommand(
-  preset: Exclude<JobPreset, "runtime-smoke" | "browser-loop" | "chatgpt-task">,
+  preset: Exclude<JobPreset, "runtime-smoke" | "browser-loop" | "chatgpt-task" | "image-to-drive">,
   workspaceRoot: string,
 ): Promise<{ executable: string; args: string[]; label: string; shell?: boolean }> {
   if (preset === "git-status") {

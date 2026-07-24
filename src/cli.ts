@@ -37,11 +37,13 @@ import {
 } from "./google-ai-key-pool.js";
 import { isCodexAllowed } from "./no-codex.js";
 import type { LocalAgentRunResult } from "./local-agent-runtime.js";
+import { parseChatGptPerformance } from "./chatgpt-model.js";
 import { cancelJob, resumeJob, runJobWorker, startJob } from "./job-runner.js";
 import { createJobStore, isJobPreset, JOB_PRESETS, type JobRecord } from "./job-store.js";
 import {
   computerUsePolicyPath,
   diagnoseComputerUse,
+  enableBroadBrowserPolicy,
   enableChatGptBrowserPolicy,
   initializeComputerUsePolicy,
   loadComputerUsePolicy,
@@ -313,20 +315,33 @@ function runConfigCommand(args: string[]): void {
   if (subcommand !== "set") {
     throw new Error(`Unknown config command: ${subcommand}`);
   }
-  if (key !== "publicBaseUrl") {
-    throw new Error("Only `devspace config set publicBaseUrl <url|null>` is supported right now.");
-  }
 
   const value = rest.join(" ").trim();
   if (!value) {
-    throw new Error("Missing publicBaseUrl value.");
+    throw new Error(`Missing ${key || "config"} value.`);
   }
 
-  writeDevspaceConfig({
-    ...files.config,
-    publicBaseUrl: normalizeOptionalPublicBaseUrl(value),
-  });
-  console.log(`Updated ${files.configPath}`);
+  if (key === "publicBaseUrl") {
+    writeDevspaceConfig({
+      ...files.config,
+      publicBaseUrl: normalizeOptionalPublicBaseUrl(value),
+    });
+    console.log(`Updated ${files.configPath}`);
+    return;
+  }
+
+  if (key === "chatgptProjectUrl") {
+    writeDevspaceConfig({
+      ...files.config,
+      chatgptProjectUrl: normalizeOptionalChatGptProjectUrl(value),
+    });
+    console.log(`Updated ${files.configPath}`);
+    return;
+  }
+
+  throw new Error(
+    "Supported config keys: publicBaseUrl, chatgptProjectUrl.",
+  );
 }
 
 function printHelp(): void {
@@ -341,6 +356,7 @@ function printHelp(): void {
       "  devspace doctor          Show config, runtime, and native dependency status",
       "  devspace config get      Print persisted config",
       "  devspace config set publicBaseUrl <url|null>",
+      "  devspace config set chatgptProjectUrl <project-url|null>",
       "  devspace agents ls       List subagent sessions",
       "  devspace agents run <profile-or-provider-or-id> [--model <model>] <prompt>",
       "  devspace agents show <id>",
@@ -395,6 +411,15 @@ async function runComputerCommand(args: string[]): Promise<void> {
         `Enabled Browser Computer Use for chatgpt.com only: ${enabled.path}`,
         `Downloads: ${enabled.policy.browser.downloadDirectory}`,
         "Purchase, submit, download, delete, login, upload, and external communication require local approval.",
+      ].join("\n"));
+      return;
+    }
+    case "enable-broad": {
+      const enabled = enableBroadBrowserPolicy();
+      console.log([
+        `Enabled Browser Computer Use for all domains: ${enabled.path}`,
+        "Login, submit, upload, download, delete, and external communication are allowed without approval.",
+        "Purchase and payment actions still require local approval.",
       ].join("\n"));
       return;
     }
@@ -655,7 +680,11 @@ async function runJobsStart(args: string[]): Promise<void> {
   const title = readJobsOption(args, "--title");
   const input = presetValue === "browser-loop"
     ? readBrowserLoopJobInput(args)
-    : presetValue === "chatgpt-task" ? readChatGptTaskJobInput(args) : undefined;
+    : presetValue === "chatgpt-task"
+      ? readChatGptTaskJobInput(args)
+      : presetValue === "image-to-drive"
+        ? readImageToDriveJobInput(args)
+        : undefined;
   const config = loadConfig();
   const record = startJob(config, {
     workspaceId: process.env.DEVSPACE_WORKSPACE_ID || undefined,
@@ -734,16 +763,59 @@ function readChatGptTaskJobInput(args: string[]): Record<string, unknown> {
   if (!prompt) throw new Error("ChatGPT task jobs require --prompt <prompt>.");
   const url = readJobsOption(args, "--url");
   const expectedMarker = readJobsOption(args, "--expect");
+  const expectedImagesValue = readJobsOption(args, "--images");
+  const expectedImageCount = expectedImagesValue === undefined ? undefined : Number(expectedImagesValue);
+  if (expectedImageCount !== undefined && (!Number.isInteger(expectedImageCount) || expectedImageCount < 1 || expectedImageCount > 4)) {
+    throw new Error("--images must be an integer from 1 to 4.");
+  }
   const timeoutSecondsValue = readJobsOption(args, "--timeout-seconds");
   const timeoutSeconds = timeoutSecondsValue === undefined ? undefined : Number(timeoutSecondsValue);
   if (timeoutSeconds !== undefined && (!Number.isFinite(timeoutSeconds) || timeoutSeconds < 5 || timeoutSeconds > 600)) {
     throw new Error("--timeout-seconds must be from 5 to 600.");
   }
+  const writingKernel = readJobsOption(args, "--writing-kernel") ?? "auto";
+  if (!["auto", "on", "off"].includes(writingKernel)) {
+    throw new Error("--writing-kernel must be auto, on, or off.");
+  }
+  const performance = parseChatGptPerformance(readJobsOption(args, "--performance"));
   return {
     prompt,
     ...(url ? { url } : {}),
     ...(expectedMarker ? { expectedMarker } : {}),
+    ...(expectedImageCount === undefined ? {} : { expectedImageCount }),
     ...(timeoutSeconds === undefined ? {} : { timeoutMs: Math.round(timeoutSeconds * 1000) }),
+    closeWhenDone: !args.includes("--keep-tab"),
+    autoSubmit: args.includes("--auto-submit"),
+    writingKernel,
+    performance,
+  };
+}
+
+function readImageToDriveJobInput(args: string[]): Record<string, unknown> {
+  const prompt = readJobsOption(args, "--prompt");
+  if (!prompt) throw new Error("Image-to-Drive jobs require --prompt <prompt>.");
+  const countValue = readJobsOption(args, "--count");
+  const count = countValue === undefined ? 1 : Number(countValue);
+  if (!Number.isInteger(count) || count < 1 || count > 4) throw new Error("--count must be an integer from 1 to 4.");
+  const timeoutSecondsValue = readJobsOption(args, "--timeout-seconds");
+  const timeoutSeconds = timeoutSecondsValue === undefined ? undefined : Number(timeoutSecondsValue);
+  if (timeoutSeconds !== undefined && (!Number.isFinite(timeoutSeconds) || timeoutSeconds < 30 || timeoutSeconds > 600)) {
+    throw new Error("--timeout-seconds must be from 30 to 600 for image-to-drive.");
+  }
+  const driveRemote = readJobsOption(args, "--drive-remote");
+  const drivePath = readJobsOption(args, "--drive-path");
+  const filePrefix = readJobsOption(args, "--file-prefix");
+  const url = readJobsOption(args, "--url");
+  return {
+    prompt,
+    count,
+    transparent: args.includes("--transparent"),
+    ...(driveRemote ? { driveRemote } : {}),
+    ...(drivePath ? { drivePath } : {}),
+    ...(filePrefix ? { filePrefix } : {}),
+    ...(url ? { url } : {}),
+    ...(timeoutSeconds === undefined ? {} : { timeoutMs: Math.round(timeoutSeconds * 1000) }),
+    autoSubmit: !args.includes("--manual-submit"),
     closeWhenDone: !args.includes("--keep-tab"),
   };
 }
@@ -798,7 +870,8 @@ function printJobsHelp(): void {
     "Usage:",
     "  devspace jobs start <preset> [--title <title>]",
     "  devspace jobs start browser-loop --goal <goal> --provider <non-codex-provider> [--max-steps <1-60>] [--model <model>] [--download-group <group>]",
-    "  devspace jobs start chatgpt-task --prompt <prompt> [--url <chat-url>] [--expect <marker>] [--timeout-seconds <5-600>] [--keep-tab]",
+    "  devspace jobs start chatgpt-task --prompt <prompt> [--performance <fastest|balanced|high|sol>] [--writing-kernel <auto|on|off>] [--url <chat-url>] [--expect <marker>] [--images <1-4>] [--auto-submit] [--timeout-seconds <5-600>] [--keep-tab]",
+    "  devspace jobs start image-to-drive --prompt <prompt> [--count <1-4>] [--transparent] [--drive-remote <remote:>] [--drive-path <path>] [--file-prefix <name>] [--manual-submit] [--keep-tab]",
     "  devspace jobs ls [--all] [--json]",
     "  devspace jobs show <id> [--events] [--json]",
     "  devspace jobs cancel <id>",
@@ -1069,6 +1142,23 @@ function printVersion(): void {
   }
 
   console.log(packageJson.version);
+}
+
+function normalizeOptionalChatGptProjectUrl(value: string): string | undefined {
+  const trimmed = value.trim();
+  if (!trimmed || trimmed === "null" || trimmed === "none") return undefined;
+
+  const parsed = new URL(trimmed);
+  if (parsed.protocol !== "https:" || parsed.hostname !== "chatgpt.com") {
+    throw new Error("chatgptProjectUrl must use https://chatgpt.com.");
+  }
+  if (!/^\/g\/[^/]+(?:\/project)?\/?$/u.test(parsed.pathname)) {
+    throw new Error("chatgptProjectUrl must point to a ChatGPT Project home URL.");
+  }
+  parsed.hash = "";
+  parsed.search = "";
+  parsed.pathname = parsed.pathname.replace(/\/+$/u, "");
+  return parsed.toString().replace(/\/$/u, "");
 }
 
 function normalizeOptionalPublicBaseUrl(value: string): string | null {

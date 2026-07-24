@@ -4,10 +4,12 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import { batchEditWorkspace } from "./batch-edit.js";
 import {
   focusedContext,
   projectSnapshot,
   reviewChanges,
+  workspaceDigest,
   type WorkspaceInspectionContext,
 } from "./compound-tools.js";
 
@@ -72,6 +74,20 @@ try {
   assert.equal(focused.relevantFiles.length <= 1, true);
   assert.equal(focused.metrics.payloadCharacters, JSON.stringify(focused).length);
 
+  const digest = await workspaceDigest(context, {
+    focus: "targetSymbol unsafe",
+    paths: ["src"],
+    maxFiles: 2,
+    contextLines: 20,
+    maxCharacters: 8_000,
+  });
+  assert.equal(digest.project.branch !== null, true);
+  assert.deepEqual(digest.focus.relevantFiles, ["src/target.ts"]);
+  assert.equal(digest.excerpts.length, 1);
+  assert.match(digest.excerpts[0]!.content, /targetSymbol/u);
+  assert.equal(JSON.stringify(digest).includes("changed-secret-value"), false);
+  assert.equal(digest.metrics.payloadCharacters, JSON.stringify(digest).length);
+
   const fileBefore = await readFile(join(root, "src", "target.ts"));
   const indexBefore = await readFile(join(root, ".git", "index"));
   const statusBefore = (await git(["status", "--porcelain=v1", "-z"])).stdout;
@@ -90,6 +106,38 @@ try {
     () => reviewChanges(context, { baseRef: "--output=/tmp/escape" }),
     /Invalid baseRef/,
   );
+
+  await writeFile(join(root, "src", "second.ts"), "export const second = 1;\n");
+  const batch = await batchEditWorkspace(root, [
+    {
+      path: "src/target.ts",
+      edits: [{ oldText: "const unsafe: any = 2;", newText: "const safe = 2;" }],
+    },
+    {
+      path: "src/second.ts",
+      edits: [{ oldText: "second = 1", newText: "second = 2" }],
+    },
+  ]);
+  assert.equal(batch.totalFiles, 2);
+  assert.equal(batch.totalReplacements, 2);
+  assert.match(await readFile(join(root, "src", "target.ts"), "utf8"), /const safe = 2/u);
+  assert.match(await readFile(join(root, "src", "second.ts"), "utf8"), /second = 2/u);
+
+  const targetBeforeFailedBatch = await readFile(join(root, "src", "target.ts"), "utf8");
+  await assert.rejects(
+    () => batchEditWorkspace(root, [
+      {
+        path: "src/target.ts",
+        edits: [{ oldText: "missing exact text", newText: "never applied" }],
+      },
+      {
+        path: ".env",
+        edits: [{ oldText: "API_KEY", newText: "KEY" }],
+      },
+    ]),
+    /matched 0 times|Secret-like files/u,
+  );
+  assert.equal(await readFile(join(root, "src", "target.ts"), "utf8"), targetBeforeFailedBatch);
 } finally {
   await rm(root, { recursive: true, force: true });
 }

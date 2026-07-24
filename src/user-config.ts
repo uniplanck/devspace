@@ -14,11 +14,13 @@ export interface DevspaceUserConfig {
   port?: number;
   allowedRoots?: string[];
   publicBaseUrl?: string | null;
+  proxyMode?: "cloudflare" | "tailscale" | "external";
   allowedHosts?: string[];
   stateDir?: string;
   worktreeRoot?: string;
   agentDir?: string;
   subagents?: boolean;
+  chatgptProjectUrl?: string;
 }
 
 export interface DevspaceAuthConfig {

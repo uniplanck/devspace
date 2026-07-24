@@ -41,6 +41,8 @@ export interface ServerConfig {
   naobrainBridgeToken: string | null;
   naobrainGeminiApiKey: string | null;
   naobrainGeminiModel: string;
+  naobrainGeminiFallbackModel: string;
+  naobrainGeminiTertiaryModel: string;
   naobrainDriveRemote: string | null;
   naobrainDriveBasePath: string;
   worktreeRoot: string;
@@ -104,8 +106,8 @@ function parseBoolean(value: string | undefined): boolean {
   return ["1", "true", "yes", "on"].includes(value?.toLowerCase() ?? "");
 }
 
-function parseFeatureFlag(value: string | undefined, name: string): boolean {
-  if (value === undefined) return false;
+function parseFeatureFlag(value: string | undefined, name: string, defaultValue = false): boolean {
+  if (value === undefined) return defaultValue;
   const normalized = value.trim().toLowerCase();
   if (["1", "true", "yes", "on"].includes(normalized)) return true;
   if (["0", "false", "no", "off"].includes(normalized)) return false;
@@ -313,6 +315,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
   ));
   const defaultBrainRoot = join(homedir(), "GPT-Agent", "workspaces", "world-home-fusion", "admin", "brain");
   const naobrainQuizSourceRoots = parsePathList(env.DEVSPACE_NAOBRAIN_QUIZ_SOURCE_ROOTS);
+  const legacyGeminiFallbackModel = env.DEVSPACE_NAOBRAIN_GEMINI_FALLBACK_MODEL?.trim() || "";
+  const legacyFallbackIsLite = legacyGeminiFallbackModel === "gemini-3.5-flash-lite";
   const derivedAllowedHosts = [
     "localhost",
     "127.0.0.1",
@@ -330,7 +334,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     allowedHosts: parseAllowedHosts(env.DEVSPACE_ALLOWED_HOSTS, derivedAllowedHosts),
     publicBaseUrl,
     toolMode: parseToolMode(env),
-    widgets: parseWidgetMode(env.DEVSPACE_WIDGETS, "off"),
+    widgets: parseWidgetMode(env.DEVSPACE_WIDGETS, "changes"),
     openWorkspacePayload,
     openWorkspaceInstructionChars: parseIntegerAtLeast(
       env.DEVSPACE_OPEN_WORKSPACE_INSTRUCTION_CHARS,
@@ -340,7 +344,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     ),
     usageContent: parseUsageContentMode(env.DEVSPACE_USAGE_CONTENT),
     skillMatcher: parseFeatureFlag(env.DEVSPACE_SKILL_MATCHER, "DEVSPACE_SKILL_MATCHER"),
-    compoundTools: parseFeatureFlag(env.DEVSPACE_COMPOUND_TOOLS, "DEVSPACE_COMPOUND_TOOLS"),
+    compoundTools: parseFeatureFlag(env.DEVSPACE_COMPOUND_TOOLS, "DEVSPACE_COMPOUND_TOOLS", true),
     builtinProfiles: parseFeatureFlag(env.DEVSPACE_BUILTIN_PROFILES, "DEVSPACE_BUILTIN_PROFILES"),
     designAudit: parseFeatureFlag(env.DEVSPACE_DESIGN_AUDIT, "DEVSPACE_DESIGN_AUDIT"),
     designAuditAllowedHosts: parseStringList(
@@ -368,7 +372,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
       "DEVSPACE_NAOBRAIN_GEMINI_API_KEY",
       "DEVSPACE_NAOBRAIN_GEMINI_API_KEY_FILE",
     ),
-    naobrainGeminiModel: env.DEVSPACE_NAOBRAIN_GEMINI_MODEL?.trim() || "gemini-3.1-flash-lite",
+    naobrainGeminiModel: env.DEVSPACE_NAOBRAIN_GEMINI_MODEL?.trim() || "gemini-3.6-flash",
+    naobrainGeminiFallbackModel: legacyFallbackIsLite
+      ? "gemini-3.5-flash"
+      : legacyGeminiFallbackModel || "gemini-3.5-flash",
+    naobrainGeminiTertiaryModel: env.DEVSPACE_NAOBRAIN_GEMINI_TERTIARY_MODEL?.trim()
+      || (legacyFallbackIsLite ? legacyGeminiFallbackModel : "gemini-3.5-flash-lite"),
     naobrainDriveRemote: env.DEVSPACE_NAOBRAIN_DRIVE_REMOTE?.trim() || null,
     naobrainDriveBasePath: env.DEVSPACE_NAOBRAIN_DRIVE_BASE_PATH?.trim() || "NaoBrain/Today",
     worktreeRoot: resolve(expandHomePath(env.DEVSPACE_WORKTREE_ROOT ?? files.config.worktreeRoot ?? defaultWorktreeRoot())),

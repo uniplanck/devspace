@@ -16,14 +16,14 @@ assert.equal(loadConfig(baseEnv).openWorkspacePayload, "compact");
 assert.equal(loadConfig(baseEnv).openWorkspaceInstructionChars, 6_000);
 assert.equal(loadConfig(baseEnv).usageContent, "compact");
 assert.equal(loadConfig(baseEnv).skillMatcher, false);
-assert.equal(loadConfig(baseEnv).compoundTools, false);
+assert.equal(loadConfig(baseEnv).compoundTools, true);
 assert.equal(loadConfig(baseEnv).builtinProfiles, false);
 assert.equal(loadConfig(baseEnv).designAudit, false);
 assert.deepEqual(loadConfig(baseEnv).designAuditAllowedHosts, ["localhost", "127.0.0.1", "::1"]);
-assert.equal(loadConfig(baseEnv).widgets, "off");
+assert.equal(loadConfig(baseEnv).widgets, "changes");
 assert.equal(
   loadConfig({ ...baseEnv, DEVSPACE_OPEN_WORKSPACE_PAYLOAD: "full" }).widgets,
-  "off",
+  "changes",
 );
 assert.equal(
   loadConfig({ ...baseEnv, DEVSPACE_OPEN_WORKSPACE_PAYLOAD: "full" }).openWorkspacePayload,
@@ -55,6 +55,22 @@ assert.equal(loadConfig(baseEnv).skillsEnabled, true);
 assert.equal(loadConfig(baseEnv).devspaceSkillsDir, join(emptyConfigDir, "skills"));
 assert.equal(loadConfig(baseEnv).devspaceAgentsDir, join(emptyConfigDir, "agents"));
 assert.equal(loadConfig(baseEnv).subagents, false);
+assert.equal(loadConfig(baseEnv).naobrainGeminiModel, "gemini-3.6-flash");
+assert.equal(loadConfig(baseEnv).naobrainGeminiFallbackModel, "gemini-3.5-flash");
+assert.equal(loadConfig(baseEnv).naobrainGeminiTertiaryModel, "gemini-3.5-flash-lite");
+const legacyLiteConfig = loadConfig({
+  ...baseEnv,
+  DEVSPACE_NAOBRAIN_GEMINI_FALLBACK_MODEL: "gemini-3.5-flash-lite",
+});
+assert.equal(legacyLiteConfig.naobrainGeminiFallbackModel, "gemini-3.5-flash");
+assert.equal(legacyLiteConfig.naobrainGeminiTertiaryModel, "gemini-3.5-flash-lite");
+const explicitModelChainConfig = loadConfig({
+  ...baseEnv,
+  DEVSPACE_NAOBRAIN_GEMINI_FALLBACK_MODEL: "custom-secondary",
+  DEVSPACE_NAOBRAIN_GEMINI_TERTIARY_MODEL: "custom-tertiary",
+});
+assert.equal(explicitModelChainConfig.naobrainGeminiFallbackModel, "custom-secondary");
+assert.equal(explicitModelChainConfig.naobrainGeminiTertiaryModel, "custom-tertiary");
 assert.equal(loadConfig({ ...baseEnv, DEVSPACE_SKILLS: "0" }).skillsEnabled, false);
 assert.equal(loadConfig({ ...baseEnv, DEVSPACE_SKILLS: "1" }).skillsEnabled, true);
 assert.equal(

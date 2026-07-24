@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
   chmodSync,
@@ -6,11 +6,13 @@ import {
   lstatSync,
   mkdirSync,
   readFileSync,
+  readlinkSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import {
   findAutomationBrowser,
   loadComputerUsePolicy,
@@ -21,8 +23,19 @@ import {
   CHATGPT_MINIMUM_PREFERRED_MODEL,
   chooseBestChatGptModelCandidate,
   chooseBestDiscoveredChatGptModel,
+  chooseChatGptPerformanceCandidate,
+  extractChatGptModelSlug,
+  matchesChatGptPerformanceLabel,
   scoreChatGptModel,
+  type ChatGptPerformance,
 } from "./chatgpt-model.js";
+import {
+  claimBrowserAutomationTarget,
+  listBrowserAutomationTargetLeases,
+  pruneMissingBrowserAutomationTargets,
+  removeBrowserAutomationTarget,
+  staleBrowserAutomationTargetLeases,
+} from "./browser-target-lifecycle.js";
 
 export interface BrowserSessionRecord {
   schemaVersion: 1;
@@ -114,11 +127,13 @@ export interface ChatGptConversationSnapshot {
   composerPresent: boolean;
   generating: boolean;
   errorText: string;
+  assistantImageUrls: string[];
 }
 
 export interface ChatGptModelSelectionResult {
   status: "selected" | "url-only";
   targetId: string;
+  requestedPerformance?: ChatGptPerformance;
   currentLabel: string;
   selectedLabel?: string;
   selectedModel?: string;
@@ -128,6 +143,8 @@ export interface ChatGptModelSelectionResult {
 export interface ChatGptResponseWaitInput {
   baselineAssistantCount: number;
   expectedMarker?: string;
+  baselineImageCount?: number;
+  expectedImageCount?: number;
   timeoutMs?: number;
   pollIntervalMs?: number;
   shouldStop?: () => boolean;
@@ -140,6 +157,17 @@ const ARTIFACTS_DIR = "computer-browser-artifacts";
 const MAX_APPROVALS = 100;
 const APPROVAL_TTL_MS = 10 * 60 * 1000;
 const MAX_INSPECT_ELEMENTS = 120;
+const CHATGPT_COMPOSER_SELECTORS = [
+  "#prompt-textarea",
+  "[data-testid='composer-input']",
+  "[contenteditable][role='textbox']",
+  "[role='textbox'][aria-label*='chat' i]",
+  "[role='textbox'][aria-label*='チャット']",
+  "[role='textbox'][aria-label*='質問']",
+  "[role='textbox'][aria-label*='message' i]",
+  "textarea[placeholder]",
+] as const;
+const CHATGPT_COMPOSER_SELECTOR = CHATGPT_COMPOSER_SELECTORS.join(",");
 
 function stateRoot(home: string = homedir()): string {
   return resolve(home, ".devspace");
@@ -223,8 +251,53 @@ function processExists(pid: number): boolean {
   }
 }
 
+function clearStaleBrowserProfileLocks(profileDirectory: string): void {
+  if (process.platform !== "linux") return;
+  const lockPath = join(profileDirectory, "SingletonLock");
+  let lockPid: number | undefined;
+  try {
+    const target = readlinkSync(lockPath);
+    const match = target.match(/-(\d+)$/u);
+    lockPid = match ? Number(match[1]) : undefined;
+  } catch {}
+  if (lockPid && processExists(lockPid)) return;
+  for (const name of ["SingletonCookie", "SingletonLock", "SingletonSocket"]) {
+    rmSync(join(profileDirectory, name), { force: true });
+  }
+}
+
 async function sleep(ms: number): Promise<void> {
   await new Promise<void>((resolveSleep) => setTimeout(resolveSleep, ms));
+}
+
+async function runAppleScript(script: string): Promise<string | undefined> {
+  if (process.platform !== "darwin") return undefined;
+  return await new Promise<string | undefined>((resolveScript) => {
+    execFile("/usr/bin/osascript", ["-e", script], { timeout: 2_000 }, (error, stdout) => {
+      resolveScript(error ? undefined : stdout.trim());
+    });
+  });
+}
+
+async function frontmostApplicationPid(): Promise<number | undefined> {
+  const value = await runAppleScript(
+    'tell application "System Events" to get unix id of first application process whose frontmost is true',
+  );
+  const pid = Number(value);
+  return Number.isInteger(pid) && pid > 0 ? pid : undefined;
+}
+
+async function hideBackgroundBrowserApplication(
+  session: BrowserSessionRecord,
+  restoreFrontmostPid?: number,
+): Promise<void> {
+  if (process.platform !== "darwin" || session.backgroundMode !== "background-window") return;
+  const restore = restoreFrontmostPid && restoreFrontmostPid !== session.pid
+    ? `\nset frontmost of first application process whose unix id is ${restoreFrontmostPid} to true`
+    : "";
+  await runAppleScript(`tell application "System Events"
+set visible of first application process whose unix id is ${session.pid} to false${restore}
+end tell`);
 }
 
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
@@ -244,13 +317,31 @@ function cdpOrigin(session: BrowserSessionRecord): string {
 }
 
 async function sessionResponds(session: BrowserSessionRecord): Promise<boolean> {
-  if (!processExists(session.pid)) return false;
   try {
-    await fetchJson<Record<string, unknown>>(`${cdpOrigin(session)}/json/version`);
-    return true;
+    const client = await CdpClient.connect(
+      `ws://127.0.0.1:${session.port}${session.browserWebSocketPath}`,
+    );
+    try {
+      await client.send("Browser.getVersion");
+      return true;
+    } finally {
+      client.close();
+    }
   } catch {
     return false;
   }
+}
+
+async function waitForSessionResponse(
+  session: BrowserSessionRecord,
+  timeoutMs = 3_000,
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await sessionResponds(session)) return true;
+    await sleep(100);
+  }
+  return false;
 }
 
 export function isManagedAutomationBrowserSession(session: BrowserSessionRecord): boolean {
@@ -263,17 +354,33 @@ export async function browserStatus(home: string = homedir()): Promise<{
   pages: BrowserTargetInfo[];
 }> {
   const session = readSession(home);
-  if (!session || !isManagedAutomationBrowserSession(session) || !await sessionResponds(session)) {
+  if (!session || !isManagedAutomationBrowserSession(session)) {
     if (session) clearSession(home);
     return { active: false, pages: [] };
+  }
+  if (!await waitForSessionResponse(session, 10_000)) {
+    return { active: false, session, pages: [] };
   }
   const pages = await listTargets(session);
   return { active: true, session, pages };
 }
 
+export function effectiveBrowserBackgroundMode(
+  policyMode: "headless" | "background-window" | "window",
+  env: NodeJS.ProcessEnv = process.env,
+): "headless" | "background-window" | "window" {
+  const override = String(env.DEVSPACE_BROWSER_BACKGROUND_MODE ?? "").trim();
+  if (override === "headless" || override === "background-window" || override === "window") {
+    return override;
+  }
+  return policyMode;
+}
+
 export async function startBrowserSession(input: {
   policyPath?: string;
   home?: string;
+  env?: NodeJS.ProcessEnv;
+  allowDownloads?: boolean;
 } = {}): Promise<{ status: "started" | "already-running"; session: BrowserSessionRecord }> {
   const home = input.home ?? homedir();
   const policy = loadPolicy(input.policyPath, home);
@@ -282,17 +389,31 @@ export async function startBrowserSession(input: {
     throw new Error("Chrome for Testing was not found. Run npm run browser:install:chrome-for-testing.");
   }
   const profileDirectory = resolve(policy.browser.profileDirectory);
+  const backgroundMode = effectiveBrowserBackgroundMode(policy.browser.backgroundMode, input.env ?? process.env);
+  const allowDownloads = input.allowDownloads ?? policy.browser.allowDownloads;
+  const restoreFrontmostPid = backgroundMode === "background-window"
+    ? await frontmostApplicationPid()
+    : undefined;
   const existing = readSession(home);
   if (existing && await sessionResponds(existing)) {
     const sameManagedBrowser = isManagedAutomationBrowserSession(existing)
       && existing.browserExecutable === browser.path
-      && resolve(existing.profileDirectory) === profileDirectory;
-    if (sameManagedBrowser) return { status: "already-running", session: existing };
-    clearSession(home);
+      && resolve(existing.profileDirectory) === profileDirectory
+      && existing.backgroundMode === backgroundMode;
+    if (sameManagedBrowser) {
+      await hideBackgroundBrowserApplication(existing, restoreFrontmostPid);
+      return { status: "already-running", session: existing };
+    }
+    if (isManagedAutomationBrowserSession(existing)) {
+      await stopBrowserSession(home);
+    } else {
+      clearSession(home);
+    }
   } else if (existing) {
     clearSession(home);
   }
   ensurePrivateDirectory(profileDirectory);
+  clearStaleBrowserProfileLocks(profileDirectory);
   rmSync(join(profileDirectory, "DevToolsActivePort"), { force: true });
 
   const browserArgs = [
@@ -313,9 +434,9 @@ export async function startBrowserSession(input: {
     "--disable-save-password-bubble",
     "--disable-features=AutofillServerCommunication,MediaRouter,PasswordManagerOnboarding,Translate",
   ];
-  if (policy.browser.backgroundMode === "headless") {
+  if (backgroundMode === "headless") {
     browserArgs.push("--headless=new", "--window-size=1440,1200");
-  } else if (policy.browser.backgroundMode === "background-window") {
+  } else if (backgroundMode === "background-window") {
     browserArgs.push(
       "--disable-background-mode",
       "--window-position=-32000,-32000",
@@ -359,28 +480,44 @@ export async function startBrowserSession(input: {
     browserExecutable: browser.path,
     browserWebSocketPath,
     profileDirectory,
-    backgroundMode: policy.browser.backgroundMode,
+    backgroundMode,
     startedAt: new Date().toISOString(),
   };
   saveSession(session, home);
+  if (!await waitForSessionResponse(session, 10_000)) {
+    clearSession(home);
+    try { process.kill(child.pid, "SIGTERM"); } catch {}
+    throw new Error("Browser CDP endpoint did not become ready after launch.");
+  }
 
   const browserClient = await CdpClient.connect(`ws://127.0.0.1:${port}${browserWebSocketPath}`);
   try {
     const downloadDirectory = resolve(policy.browser.downloadDirectory);
-    if (policy.browser.allowDownloads) ensurePrivateDirectory(downloadDirectory);
+    if (allowDownloads) ensurePrivateDirectory(downloadDirectory);
     await browserClient.send("Browser.setDownloadBehavior", {
-      behavior: policy.browser.allowDownloads ? "allow" : "deny",
-      ...(policy.browser.allowDownloads ? { downloadPath: downloadDirectory, eventsEnabled: true } : {}),
+      behavior: allowDownloads ? "allow" : "deny",
+      ...(allowDownloads ? { downloadPath: downloadDirectory, eventsEnabled: true } : {}),
     });
   } finally {
     browserClient.close();
   }
+  await hideBackgroundBrowserApplication(session, restoreFrontmostPid);
   return { status: "started", session };
 }
 
 export interface BrowserDownloadDirectoryResult {
   path: string;
   relativePath: string;
+}
+
+export interface ChatGptImageDownloadResult {
+  targetId: string;
+  files: Array<{
+    url: string;
+    fileName: string;
+    path: string;
+    bytes: number;
+  }>;
 }
 
 export function resolveBrowserDownloadDirectory(
@@ -425,6 +562,104 @@ export async function configureBrowserDownloadDirectory(
     browserClient.close();
   }
   return directory;
+}
+
+export async function downloadChatGptImages(
+  input: {
+    urls: string[];
+    directory: string;
+    fileNames?: string[];
+    targetId?: string;
+    timeoutMs?: number;
+    home?: string;
+  },
+): Promise<ChatGptImageDownloadResult> {
+  const home = input.home ?? homedir();
+  const policy = loadPolicy(undefined, home);
+  const directory = resolve(input.directory);
+  const downloadsRoot = resolve(policy.browser.downloadDirectory);
+  if (directory !== downloadsRoot && !directory.startsWith(`${downloadsRoot}${sep}`)) {
+    throw new Error("ChatGPT image download directory must remain inside the configured browser download root.");
+  }
+  const urls = [...new Set(input.urls.map((value) => value.trim()).filter(Boolean))];
+  if (urls.length < 1 || urls.length > 4) throw new Error("ChatGPT image download requires 1 to 4 unique URLs.");
+  for (const rawUrl of urls) {
+    const url = new URL(rawUrl);
+    if (url.protocol !== "https:" || url.hostname !== "chatgpt.com" || !url.pathname.startsWith("/backend-api/estuary/content")) {
+      throw new Error("Only authenticated ChatGPT generated-image URLs may be downloaded.");
+    }
+  }
+  const names = urls.map((_, index) => sanitizeImageFileName(
+    input.fileNames?.[index] ?? `chatgpt-image-${String(index + 1).padStart(2, "0")}.png`,
+  ));
+  if (new Set(names).size !== names.length) throw new Error("ChatGPT image filenames must be unique.");
+  ensurePrivateDirectory(directory);
+  for (const name of names) {
+    if (existsSync(join(directory, name))) throw new Error(`Refusing to overwrite existing browser download: ${name}`);
+  }
+  const files: ChatGptImageDownloadResult["files"] = [];
+  let targetId = input.targetId;
+  for (let index = 0; index < urls.length; index += 1) {
+    const url = urls[index]!;
+    const fileName = names[index]!;
+    const path = join(directory, fileName);
+    const fetched = await withPageClient(home, async (client, target) => {
+      const result = await evaluate<{
+        ok: boolean;
+        status?: number;
+        contentType?: string;
+        base64?: string;
+        error?: string;
+      }>(client, `(async () => {
+        try {
+          const response = await fetch(${JSON.stringify(url)}, {
+            credentials: "include",
+            redirect: "follow",
+            headers: { accept: "image/png,image/*;q=0.9,*/*;q=0.1" }
+          });
+          if (!response.ok) return { ok: false, status: response.status };
+          const contentType = response.headers.get("content-type") || "";
+          const bytes = new Uint8Array(await response.arrayBuffer());
+          let binary = "";
+          const chunkSize = 0x8000;
+          for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+            binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+          }
+          return { ok: true, status: response.status, contentType, base64: btoa(binary) };
+        } catch (error) {
+          return { ok: false, error: String(error?.message || error) };
+        }
+      })()`);
+      return { ...result, targetId: target.id };
+    }, targetId);
+    targetId = fetched.targetId;
+    if (!fetched.ok || !fetched.base64) {
+      throw new Error(`ChatGPT image browser fetch failed${fetched.status ? ` with HTTP ${fetched.status}` : ""}: ${fetched.error ?? "missing image data"}.`);
+    }
+    const contentType = fetched.contentType?.toLowerCase() ?? "";
+    if (!contentType.startsWith("image/")) {
+      throw new Error(`ChatGPT image response had unexpected content type: ${contentType || "missing"}.`);
+    }
+    const buffer = Buffer.from(fetched.base64, "base64");
+    if (buffer.length < 8 || !buffer.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) {
+      throw new Error("ChatGPT generated-image response was not a PNG file.");
+    }
+    writeFileSync(path, buffer, { mode: 0o600, flag: "wx" });
+    files.push({ url, fileName, path, bytes: statSync(path).size });
+  }
+  if (!targetId) throw new Error("ChatGPT image download did not resolve a browser target.");
+  return { targetId, files };
+}
+
+function sanitizeImageFileName(value: string): string {
+  const normalized = value
+    .normalize("NFKC")
+    .trim()
+    .replace(/[^\p{L}\p{N}._-]+/gu, "-")
+    .replace(/^-+|-+$/gu, "")
+    .slice(0, 120);
+  const stem = normalized.replace(/\.png$/iu, "") || "chatgpt-image";
+  return `${stem}.png`;
 }
 
 function sanitizeDownloadPath(value: string): string[] {
@@ -524,22 +759,58 @@ export async function stopBrowserSession(home: string = homedir()): Promise<{ st
 
 async function requireActiveSession(home: string = homedir()): Promise<BrowserSessionRecord> {
   const session = readSession(home);
-  if (!session || !isManagedAutomationBrowserSession(session) || !await sessionResponds(session)) {
+  if (!session || !isManagedAutomationBrowserSession(session)) {
     if (session) clearSession(home);
-    throw new Error("GPT-Agent headless Browser session is not running.");
+    throw new Error("GPT-Agent Browser session is not running.");
   }
   return session;
 }
 
 async function listTargets(session: BrowserSessionRecord): Promise<BrowserTargetInfo[]> {
-  const targets = await fetchJson<BrowserTargetInfo[]>(`${cdpOrigin(session)}/json/list`);
-  return targets.filter((target) => target.type === "page");
+  const client = await CdpClient.connect(
+    `ws://127.0.0.1:${session.port}${session.browserWebSocketPath}`,
+  );
+  try {
+    const { targetInfos } = await client.send<{
+      targetInfos: Array<{
+        targetId: string;
+        type: string;
+        title: string;
+        url: string;
+      }>;
+    }>("Target.getTargets");
+    return targetInfos
+      .filter((target) => target.type === "page")
+      .map((target) => ({
+        id: target.targetId,
+        type: target.type,
+        title: target.title,
+        url: target.url,
+        webSocketDebuggerUrl: `ws://127.0.0.1:${session.port}/devtools/page/${target.targetId}`,
+      }));
+  } finally {
+    client.close();
+  }
 }
 
 async function createBlankTarget(session: BrowserSessionRecord): Promise<BrowserTargetInfo> {
-  return await fetchJson<BrowserTargetInfo>(`${cdpOrigin(session)}/json/new?about%3Ablank`, {
-    method: "PUT",
-  });
+  const client = await CdpClient.connect(
+    `ws://127.0.0.1:${session.port}${session.browserWebSocketPath}`,
+  );
+  try {
+    const { targetId } = await client.send<{ targetId: string }>("Target.createTarget", {
+      url: "about:blank",
+    });
+    return {
+      id: targetId,
+      type: "page",
+      title: "",
+      url: "about:blank",
+      webSocketDebuggerUrl: `ws://127.0.0.1:${session.port}/devtools/page/${targetId}`,
+    };
+  } finally {
+    client.close();
+  }
 }
 
 async function getTarget(
@@ -702,7 +973,10 @@ export async function closeBrowserTarget(
 ): Promise<{ status: "closed" | "not-found"; targetId: string }> {
   const session = await requireActiveSession(home);
   const pages = await listTargets(session);
-  if (!pages.some((page) => page.id === targetId)) return { status: "not-found", targetId };
+  if (!pages.some((page) => page.id === targetId)) {
+    removeBrowserAutomationTarget(targetId, home);
+    return { status: "not-found", targetId };
+  }
   const browserClient = await CdpClient.connect(
     `ws://127.0.0.1:${session.port}${session.browserWebSocketPath}`,
   );
@@ -711,6 +985,7 @@ export async function closeBrowserTarget(
   } finally {
     browserClient.close();
   }
+  removeBrowserAutomationTarget(targetId, home);
   const remaining = (await listTargets(session)).filter((page) => page.id !== targetId);
   saveSession({ ...session, targetId: remaining[0]?.id }, home);
   return { status: "closed", targetId };
@@ -725,6 +1000,9 @@ export async function activateBrowserTarget(
   if (!pages.some((page) => page.id === targetId)) {
     throw new Error(`Browser target is no longer available: ${targetId}`);
   }
+  const restoreFrontmostPid = session.backgroundMode === "background-window"
+    ? await frontmostApplicationPid()
+    : undefined;
   const browserClient = await CdpClient.connect(
     `ws://127.0.0.1:${session.port}${session.browserWebSocketPath}`,
   );
@@ -733,6 +1011,7 @@ export async function activateBrowserTarget(
   } finally {
     browserClient.close();
   }
+  await hideBackgroundBrowserApplication(session, restoreFrontmostPid);
   saveSession({ ...session, targetId }, home);
   return { status: "activated", targetId };
 }
@@ -810,15 +1089,37 @@ export async function inspectChatGptConversation(
       const messages = Array.from(document.querySelectorAll("[data-message-author-role]"));
       const assistants = messages.filter((el) => el.getAttribute("data-message-author-role") === "assistant");
       const users = messages.filter((el) => el.getAttribute("data-message-author-role") === "user");
-      const composer = document.querySelector(
-        "#prompt-textarea,[data-testid='composer-input'],[contenteditable='true'][role='textbox'],textarea[placeholder]"
-      );
+      const visible = (candidate) => {
+        if (!(candidate instanceof HTMLElement)) return false;
+        const r = candidate.getBoundingClientRect();
+        const style = getComputedStyle(candidate);
+        return r.width > 1 && r.height > 1 && style.display !== "none" && style.visibility !== "hidden";
+      };
+      const composer = Array.from(document.querySelectorAll(
+        ${JSON.stringify(CHATGPT_COMPOSER_SELECTOR)}
+      )).find(visible);
       const stopButton = document.querySelector(
         "button[data-testid='stop-button'],button[aria-label*='Stop'],button[aria-label*='停止']"
       );
-      const error = document.querySelector(
+      const inlineError = document.querySelector(
         "[data-testid='conversation-turn-error'],[role='alert']"
       );
+      const blockingDialog = Array.from(document.querySelectorAll("[role='dialog']"))
+        .find((candidate) => visible(candidate)
+          && /too many requests|requests too quickly|temporarily limited|リクエストが多すぎ|しばらく待/u.test(
+            String(candidate.innerText || candidate.textContent || "")
+          ));
+      const error = inlineError || blockingDialog;
+      const generatedImages = Array.from(document.querySelectorAll("img"))
+        .map((image) => ({
+          src: image instanceof HTMLImageElement ? image.currentSrc || image.src : "",
+          width: image instanceof HTMLImageElement ? image.naturalWidth : 0,
+          height: image instanceof HTMLImageElement ? image.naturalHeight : 0,
+        }))
+        .filter((image) => image.src.includes("/backend-api/estuary/content")
+          && image.width >= 512
+          && image.height >= 256)
+        .map((image) => image.src);
       return {
         url: location.href,
         title: document.title.slice(0, 300),
@@ -829,6 +1130,7 @@ export async function inspectChatGptConversation(
         composerPresent: Boolean(composer),
         generating: Boolean(stopButton),
         errorText: clean(error?.innerText || error?.textContent).slice(0, 500),
+        assistantImageUrls: [...new Set(generatedImages)],
       };
     })()`);
     return { targetId: target.id, ...page };
@@ -1104,25 +1406,574 @@ export async function selectBestAvailableChatGptModel(
   }, input.targetId);
 }
 
+export async function selectChatGptPerformance(
+  input: { performance: ChatGptPerformance; home?: string; targetId?: string },
+): Promise<ChatGptModelSelectionResult> {
+  const home = input.home ?? homedir();
+  return await withPageClient(home, async (client, target) => {
+    const locateButton = async () => await evaluate<{
+      hostname: string;
+      label: string;
+      x?: number;
+      y?: number;
+    }>(client, `(() => {
+      const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+      const visible = (el) => {
+        const r = el.getBoundingClientRect();
+        const style = getComputedStyle(el);
+        return r.width > 1 && r.height > 1 && style.display !== "none" && style.visibility !== "hidden";
+      };
+      const directCandidate = document.querySelector("[data-testid='model-switcher-dropdown-button']");
+      const direct = directCandidate && visible(directCandidate) ? directCandidate : null;
+      const known = Array.from(document.querySelectorAll(
+        "button[aria-haspopup='menu'],button[aria-haspopup='listbox']"
+      )).find((candidate) => {
+        const descriptor = clean(candidate.innerText || candidate.getAttribute("aria-label"));
+        const testId = candidate.getAttribute("data-testid") || "";
+        return visible(candidate)
+          && !/会話オプション|プロジェクトオプション|conversation options|project options/i.test(descriptor)
+          && !/history-item/i.test(testId)
+          && /^(?:最速(?:\\s+5[.]5)?|中程度|高い|fastest(?:\\s+5[.]5)?|instant(?:\\s+5[.]5)?|fast|medium|balanced|high|gpt[\\s._-]*5[\\s._-]*6[\\s._-]*sol)$/i
+            .test(descriptor);
+      });
+      const fallback = Array.from(document.querySelectorAll("button[aria-haspopup='menu'],button[aria-haspopup='listbox']"))
+        .find((candidate) => {
+          const descriptor = clean(candidate.innerText || candidate.getAttribute("aria-label"));
+          const testId = candidate.getAttribute("data-testid") || "";
+          return visible(candidate)
+            && /gpt|model|モデル|thinking|思考|推論/i.test(descriptor)
+            && !/会話オプション|プロジェクトオプション|conversation options|project options/i.test(descriptor)
+            && !/history-item/i.test(testId);
+        });
+      const button = direct || known || fallback;
+      if (!(button instanceof HTMLElement)) return { hostname: location.hostname, label: "" };
+      const r = button.getBoundingClientRect();
+      return {
+        hostname: location.hostname,
+        label: clean(button.innerText || button.getAttribute("aria-label")),
+        x: Math.round(r.x + r.width / 2),
+        y: Math.round(r.y + r.height / 2)
+      };
+    })()`);
+
+    let before = await locateButton();
+    for (let attempt = 0; attempt < 20 && (before.x === undefined || before.y === undefined); attempt += 1) {
+      await sleep(250);
+      before = await locateButton();
+    }
+    if (before.hostname !== "chatgpt.com" && !before.hostname.endsWith(".chatgpt.com")) {
+      throw new Error(`ChatGPT model selector requires chatgpt.com, got ${before.hostname || "unknown host"}.`);
+    }
+    if (matchesChatGptPerformanceLabel(input.performance, before.label)) {
+      const actual = await inspectSelectedChatGptModel(client, input.performance, before.label)
+        .catch(() => undefined);
+      if (actual) {
+        return {
+          status: "selected",
+          targetId: target.id,
+          requestedPerformance: input.performance,
+          currentLabel: before.label,
+          selectedLabel: before.label,
+          selectedModel: actual,
+          candidateCount: 0,
+        };
+      }
+    }
+    // Prefer ChatGPT's own model-picker shortcut so an existing conversation URL
+    // is never rewritten merely to change performance. The visible picker click
+    // remains a fallback for accounts where the shortcut has not rolled out.
+    await dispatchBrowserShortcut(client, {
+      key: "M",
+      code: "KeyM",
+      windowsVirtualKeyCode: 77,
+      modifiers: 10,
+    });
+    const collectCandidates = async () => await evaluate<Array<{
+      label: string;
+      href?: string;
+      modelSlug?: string;
+      modelEvidence?: string[];
+      role?: string;
+      checked?: boolean;
+      disabled: boolean;
+      domIndex: number;
+    }>>(client, `(() => {
+      const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+      const visible = (el) => {
+        const r = el.getBoundingClientRect();
+        const style = getComputedStyle(el);
+        return r.width > 1 && r.height > 1 && style.display !== "none" && style.visibility !== "hidden";
+      };
+      const slugPattern = /gpt[-_. ]*[0-9]+(?:[-_. ][0-9]+)+(?:[-_. ]+(?:sol|thinking|reasoning|instant|fast|auto))?/gi;
+      const normalizeSlug = (value) => clean(value).replace(/[_. ]+/g, "-").toLowerCase();
+      const scanReactSlugs = (el) => {
+        const slugs = new Set();
+        const seen = new WeakSet();
+        const visit = (value, depth) => {
+          if (value == null || depth > 7) return;
+          if (typeof value === "string") {
+            for (const slug of value.match(slugPattern) || []) slugs.add(normalizeSlug(slug));
+            return;
+          }
+          if (typeof value !== "object" || seen.has(value)) return;
+          seen.add(value);
+          const entries = Array.isArray(value)
+            ? value.slice(0, 120).map((item, index) => [String(index), item])
+            : Object.entries(value).slice(0, 120);
+          for (const [, item] of entries) visit(item, depth + 1);
+        };
+        for (const key of Object.getOwnPropertyNames(el)) {
+          if (!key.startsWith("__reactProps$")) continue;
+          try { visit(el[key], 0); } catch {}
+        }
+        return [...slugs];
+      };
+      return Array.from(document.querySelectorAll(
+        "[role='menuitem'],[role='menuitemradio'],[role='option'],a[href*='model=']"
+      )).filter(visible).map((el, domIndex) => {
+        const link = el instanceof HTMLAnchorElement ? el : el.closest("a[href]");
+        const descriptor = [
+          el.getAttribute("data-model"),
+          el.getAttribute("data-value"),
+          el.getAttribute("value"),
+          el.id,
+          link instanceof HTMLAnchorElement ? link.href : ""
+        ].filter(Boolean).join(" ");
+        const attributeSlugs = (descriptor.match(slugPattern) || []).map(normalizeSlug);
+        const modelEvidence = [...new Set([...attributeSlugs, ...scanReactSlugs(el)])];
+        return {
+          label: clean(el.innerText || el.textContent || el.getAttribute("aria-label")),
+          href: link instanceof HTMLAnchorElement ? link.href : undefined,
+          modelSlug: modelEvidence.length === 1 ? modelEvidence[0] : undefined,
+          modelEvidence,
+          role: el.getAttribute("role") || undefined,
+          checked: el.getAttribute("aria-checked") === "true" || el.getAttribute("data-state") === "checked",
+          disabled: el.getAttribute("aria-disabled") === "true"
+            || el.hasAttribute("disabled")
+            || /upgrade|unavailable|利用不可|アップグレード/i.test(clean(el.innerText || el.textContent)),
+          domIndex
+        };
+      }).filter((candidate) => candidate.label);
+    })()`);
+    let candidates = await collectCandidates();
+    for (let attempt = 0; attempt < 20 && candidates.length === 0; attempt += 1) {
+      await sleep(250);
+      candidates = await collectCandidates();
+    }
+    if (candidates.length === 0 && before.x !== undefined && before.y !== undefined) {
+      await dispatchClick(client, before.x, before.y);
+      for (let attempt = 0; attempt < 20 && candidates.length === 0; attempt += 1) {
+        await sleep(250);
+        candidates = await collectCandidates();
+      }
+    }
+    if (candidates.length === 0) {
+      const fallbackClicked = await evaluate<boolean>(client, `(() => {
+        const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+        const visible = (el) => {
+          const r = el.getBoundingClientRect();
+          const style = getComputedStyle(el);
+          return r.width > 1 && r.height > 1 && r.right > 0 && r.bottom > 0
+            && style.display !== "none" && style.visibility !== "hidden";
+        };
+        const button = Array.from(document.querySelectorAll(
+          "button[aria-haspopup='menu'],button[aria-haspopup='listbox']"
+        )).find((candidate) => {
+          const descriptor = clean(candidate.innerText || candidate.getAttribute("aria-label"));
+          const testId = candidate.getAttribute("data-testid") || "";
+          return visible(candidate)
+            && !/会話オプション|プロジェクトオプション|conversation options|project options/i.test(descriptor)
+            && !/history-item/i.test(testId)
+            && descriptor === ${JSON.stringify(before.label)};
+        });
+        if (!(button instanceof HTMLElement)) return false;
+        for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {
+          const event = type.startsWith("pointer")
+            ? new PointerEvent(type, { bubbles: true, button: 0, pointerType: "mouse" })
+            : new MouseEvent(type, { bubbles: true, button: 0 });
+          button.dispatchEvent(event);
+        }
+        return true;
+      })()`);
+      if (fallbackClicked) {
+        for (let attempt = 0; attempt < 20 && candidates.length === 0; attempt += 1) {
+          await sleep(250);
+          candidates = await collectCandidates();
+        }
+      }
+    }
+    const eligibleCandidates = candidates.filter((candidate) => candidate.role !== "menuitem");
+    const chosen = chooseChatGptPerformanceCandidate(input.performance, eligibleCandidates);
+    if (!chosen || chosen.domIndex === undefined) {
+      await client.send("Input.dispatchKeyEvent", { type: "keyDown", key: "Escape", code: "Escape" });
+      await client.send("Input.dispatchKeyEvent", { type: "keyUp", key: "Escape", code: "Escape" });
+      const available = candidates.map((candidate) => candidate.label).join(" | ") || "none";
+      throw new Error(`ChatGPT performance ${input.performance} was not available. Candidates: ${available}.`);
+    }
+
+    const point = await evaluate<{ x: number; y: number } | undefined>(client, `(() => {
+      const visible = (el) => {
+        const r = el.getBoundingClientRect();
+        const style = getComputedStyle(el);
+        return r.width > 1 && r.height > 1 && style.display !== "none" && style.visibility !== "hidden";
+      };
+      const nodes = Array.from(document.querySelectorAll(
+        "[role='menuitem'],[role='menuitemradio'],[role='option'],a[href*='model=']"
+      )).filter(visible);
+      const el = nodes[${chosen.domIndex}];
+      if (!(el instanceof HTMLElement)) return undefined;
+      const r = el.getBoundingClientRect();
+      return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) };
+    })()`);
+    if (!point) throw new Error(`ChatGPT performance ${input.performance} candidate disappeared before selection.`);
+
+    await dispatchClick(client, point.x, point.y);
+    await sleep(500);
+    const after = await locateButton();
+    let selectedLabel = after.label || chosen.label;
+    const evidenceModels = [...new Set(chosen.modelEvidence ?? [])];
+    let selectedModel: string | undefined = chosen.modelSlug
+      ?? extractChatGptModelSlug(chosen.href)
+      ?? (evidenceModels.length === 1 ? evidenceModels[0] : undefined);
+    if (!matchesChatGptPerformanceLabel(input.performance, selectedLabel)) {
+      let actualAfterSelection: string | undefined;
+      let verificationDetail = "no model evidence";
+      try {
+        actualAfterSelection = await inspectSelectedChatGptModel(
+          client,
+          input.performance,
+          chosen.label,
+        );
+      } catch (error) {
+        verificationDetail = error instanceof Error ? error.message : String(error);
+      }
+      if (actualAfterSelection && matchesChatGptPerformanceLabel(input.performance, actualAfterSelection)) {
+        selectedLabel = chosen.label;
+        selectedModel = actualAfterSelection;
+      } else {
+        throw new Error(
+          `ChatGPT performance ${input.performance} selection was not confirmed; displayed label: ${selectedLabel || "unknown"}; ${verificationDetail}.`,
+        );
+      }
+    }
+    selectedModel ??= await inspectSelectedChatGptModel(client, input.performance, selectedLabel);
+    if (!selectedModel) {
+      throw new Error(
+        `ChatGPT performance ${input.performance} was selected as ${selectedLabel}, but the actual model could not be verified.`,
+      );
+    }
+    return {
+      status: "selected",
+      targetId: target.id,
+      requestedPerformance: input.performance,
+      currentLabel: before.label,
+      selectedLabel,
+      ...(selectedModel ? { selectedModel } : {}),
+      candidateCount: candidates.length,
+    };
+  }, input.targetId);
+}
+
+async function inspectSelectedChatGptModel(
+  client: CdpClient,
+  performance: ChatGptPerformance,
+  selectedLabel: string,
+): Promise<string | undefined> {
+  const snapshot = await evaluate<{
+    urlModel: string;
+    apiStatus: number;
+    evidence: Array<{
+      source: string;
+      descriptor: string;
+      modelSlug: string;
+      selected: boolean;
+    }>;
+  }>(client, `(async () => {
+    const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+    const slugPattern = /gpt[-_. ]*[0-9]+(?:[-_. ][0-9]+)+(?:[-_. ]+(?:sol|thinking|reasoning|instant|fast|auto))?/gi;
+    const normalizeSlug = (value) => clean(value).replace(/[_. ]+/g, "-").toLowerCase();
+    const performancePattern = ${JSON.stringify(performance === "fastest"
+      ? "最速|fastest|instant|fast"
+      : "高い|high|thinking|reasoning")};
+    const performanceRegex = new RegExp(performancePattern, "i");
+    const evidence = [];
+    const seenEvidence = new Set();
+    const addEvidence = (source, descriptor, modelSlug, selected = false) => {
+      const slug = normalizeSlug(modelSlug);
+      if (!slug || !/^gpt-[0-9]+(?:-[0-9]+)+/i.test(slug)) return;
+      const key = [source, slug, Boolean(selected), clean(descriptor).slice(0, 220)].join("|");
+      if (seenEvidence.has(key)) return;
+      seenEvidence.add(key);
+      evidence.push({
+        source,
+        descriptor: clean(descriptor).slice(0, 220),
+        modelSlug: slug,
+        selected: Boolean(selected)
+      });
+    };
+    const scanObject = (root, source) => {
+      const seen = new WeakSet();
+      const visit = (value, path, depth) => {
+        if (!value || typeof value !== "object" || depth > 9 || seen.has(value)) return;
+        seen.add(value);
+        const entries = Array.isArray(value)
+          ? value.slice(0, 300).map((item, index) => [String(index), item])
+          : Object.entries(value).slice(0, 300);
+        const primitives = entries
+          .filter(([, item]) => item == null || ["string", "number", "boolean"].includes(typeof item))
+          .map(([key, item]) => key + "=" + clean(item))
+          .join(" ");
+        const descriptor = clean(path + " " + primitives);
+        const slugs = descriptor.match(slugPattern) || [];
+        const selected = /(?:selected|active|current|is_selected|isSelected)=?(?:true|1|yes)|selected_/i.test(descriptor);
+        if (performanceRegex.test(descriptor)) {
+          for (const slug of slugs) addEvidence(source, descriptor, slug, selected);
+        }
+        for (const [key, item] of entries) {
+          if (item && typeof item === "object") visit(item, path + "." + key, depth + 1);
+        }
+      };
+      visit(root, source, 0);
+    };
+
+    const result = {
+      urlModel: new URL(location.href).searchParams.get("model") || "",
+      apiStatus: 0,
+      evidence
+    };
+    if (result.urlModel) addEvidence("url", selectedLabel, result.urlModel, true);
+
+    const buttons = Array.from(document.querySelectorAll("button"));
+    const selectorButton = document.querySelector("[data-testid='model-switcher-dropdown-button']")
+      || buttons.find((button) => clean(button.innerText || button.getAttribute("aria-label")) === ${JSON.stringify(selectedLabel)});
+    let node = selectorButton;
+    for (let level = 0; node && level < 5; level += 1, node = node.parentElement) {
+      const attributes = Array.from(node.attributes || []).map((attribute) => attribute.name + "=" + attribute.value).join(" ");
+      const descriptor = clean([node.innerText, node.getAttribute?.("aria-label"), attributes].filter(Boolean).join(" "));
+      for (const slug of descriptor.match(slugPattern) || []) addEvidence("dom", descriptor, slug, true);
+      for (const key of Object.getOwnPropertyNames(node)) {
+        if (!key.startsWith("__reactProps$") && !key.startsWith("__reactFiber$")) continue;
+        try { scanObject(node[key], "react." + key.slice(0, 16)); } catch {}
+      }
+    }
+
+    for (const [storageName, storage] of [["localStorage", localStorage], ["sessionStorage", sessionStorage]]) {
+      for (let index = 0; index < Math.min(storage.length, 300); index += 1) {
+        const key = storage.key(index) || "";
+        const value = String(storage.getItem(key) || "").slice(0, 500000);
+        if (!performanceRegex.test(key + " " + value)) continue;
+        for (const slug of value.match(slugPattern) || []) {
+          addEvidence(storageName, key, slug, /selected|active|current/i.test(key + " " + value.slice(0, 5000)));
+        }
+        try { scanObject(JSON.parse(value), storageName + "." + key); } catch {}
+      }
+    }
+
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 5000);
+      const response = await fetch(
+        "/backend-api/models?history_and_training_disabled=false",
+        { credentials: "include", signal: controller.signal }
+      );
+      clearTimeout(timer);
+      result.apiStatus = response.status;
+      if (response.ok) scanObject(await response.json(), "models-api");
+    } catch {}
+    return result;
+  })()`);
+
+  const canonicalModelSlug = (value: string): string => value
+    .normalize("NFKC")
+    .trim()
+    .toLocaleLowerCase()
+    .replace(/[\u2010-\u2015\u2212_.\s-]+/gu, "-")
+    .replace(/^-+|-+$/gu, "");
+  const ranked = snapshot.evidence
+    .map((candidate) => ({
+      ...candidate,
+      modelSlug: canonicalModelSlug(candidate.modelSlug),
+    }))
+    .sort((a, b) => {
+      const sourceRank = (source: string) => source === "url"
+        ? 5
+        : source.startsWith("react")
+          ? 4
+          : source === "models-api"
+            ? 3
+            : source === "dom"
+              ? 2
+              : 1;
+      return Number(b.selected) - Number(a.selected)
+        || sourceRank(b.source) - sourceRank(a.source)
+        || a.modelSlug.localeCompare(b.modelSlug);
+    });
+  const expectedFamily = performance === "fastest" ? "gpt-5-5" : "gpt-5-6";
+  const familyModels = [...new Set(
+    ranked
+      .map((candidate) => candidate.modelSlug)
+      .filter((model) => model === expectedFamily || model.startsWith(`${expectedFamily}-`)),
+  )];
+  if (familyModels.length === 1) return familyModels[0];
+
+  const evidenceScore = (candidate: typeof ranked[number]): number => {
+    const sourceScore = candidate.source === "url"
+      ? 60
+      : candidate.source.startsWith("react.__reactProps$")
+        ? 50
+        : candidate.source.startsWith("react.__reactFiber$")
+          ? 40
+          : candidate.source === "models-api"
+            ? 30
+            : candidate.source === "dom"
+              ? 20
+              : 10;
+    return sourceScore + (candidate.selected ? 100 : 0);
+  };
+  const bestScoreByModel = new Map<string, number>();
+  for (const candidate of ranked) {
+    bestScoreByModel.set(
+      candidate.modelSlug,
+      Math.max(bestScoreByModel.get(candidate.modelSlug) ?? 0, evidenceScore(candidate)),
+    );
+  }
+  const topScore = Math.max(0, ...bestScoreByModel.values());
+  const topModels = [...bestScoreByModel.entries()]
+    .filter(([, score]) => score === topScore)
+    .map(([model]) => model);
+  if (topModels.length === 1) return topModels[0];
+  const evidenceCountByModel = new Map<string, number>();
+  for (const candidate of ranked) {
+    if (!topModels.includes(candidate.modelSlug)) continue;
+    evidenceCountByModel.set(
+      candidate.modelSlug,
+      (evidenceCountByModel.get(candidate.modelSlug) ?? 0) + 1,
+    );
+  }
+  const topEvidenceCount = Math.max(0, ...evidenceCountByModel.values());
+  const corroboratedModels = [...evidenceCountByModel.entries()]
+    .filter(([, count]) => count === topEvidenceCount)
+    .map(([model]) => model);
+  if (corroboratedModels.length === 1 && topEvidenceCount >= 2) return corroboratedModels[0];
+  if (snapshot.urlModel && matchesChatGptPerformanceLabel(performance, snapshot.urlModel)) {
+    return snapshot.urlModel;
+  }
+  const summary = snapshot.evidence
+    .slice(0, 12)
+    .map((candidate) => `${candidate.source}:${canonicalModelSlug(candidate.modelSlug)}${candidate.selected ? ":selected" : ""}`)
+    .join(", ") || "none";
+  throw new Error(
+    `Actual ChatGPT model could not be uniquely verified for ${performance}; models-api=${snapshot.apiStatus || "unavailable"}; family=${familyModels.join("|") || "none"}; evidence=${summary}.`,
+  );
+}
+
+export interface BrowserAutomationTargetCleanupResult {
+  closedTargetIds: string[];
+  prunedTargetIds: string[];
+  activeLeaseCount: number;
+}
+
+export async function cleanupStaleBrowserAutomationTargets(
+  home: string = homedir(),
+): Promise<BrowserAutomationTargetCleanupResult> {
+  const session = await requireActiveSession(home);
+  const pages = await listTargets(session);
+  const pageIds = pages.map((page) => page.id);
+  const prunedTargetIds = pruneMissingBrowserAutomationTargets(pageIds, home);
+  const cleanupOwnerId = `cleanup:${process.pid}:${randomUUID()}`;
+  const staleLeases = staleBrowserAutomationTargetLeases(home);
+  const closedTargetIds: string[] = [];
+  for (const lease of staleLeases) {
+    const claim = claimBrowserAutomationTarget({
+      targetId: lease.targetId,
+      ownerId: cleanupOwnerId,
+      kind: lease.kind,
+      home,
+    });
+    if (claim.status !== "claimed" || claim.replacedStaleOwner !== lease.ownerId) continue;
+    const closed = await closeBrowserTarget(lease.targetId, home).catch(() => ({
+      status: "not-found" as const,
+      targetId: lease.targetId,
+    }));
+    if (closed.status === "closed") closedTargetIds.push(lease.targetId);
+    removeBrowserAutomationTarget(lease.targetId, home);
+  }
+  return {
+    closedTargetIds,
+    prunedTargetIds,
+    activeLeaseCount: listBrowserAutomationTargetLeases(home).length,
+  };
+}
+
 export interface PreferredChatGptTaskTarget {
   targetId: string;
   url: string;
   title: string;
   reusedPreferredTarget: boolean;
+  leaseOwnerId: string;
 }
 
 export async function acquirePreferredChatGptTaskTarget(
   rawUrl: string,
   home: string = homedir(),
+  leaseOwnerId: string = randomUUID(),
 ): Promise<PreferredChatGptTaskTarget> {
+  await cleanupStaleBrowserAutomationTargets(home);
   const policy = loadPolicy(undefined, home);
   const requested = validateBrowserUrl(rawUrl, policy);
+  const isExistingConversation = requested.hostname === "chatgpt.com"
+    && /(?:^|\/)c\/[^/]+/u.test(requested.pathname);
+  if (isExistingConversation) {
+    const canonicalPath = (value: string): string => {
+      const parsed = new URL(value);
+      return `${parsed.origin}${parsed.pathname.replace(/\/+$/u, "")}`;
+    };
+    const requestedPath = canonicalPath(requested.toString());
+    const session = await requireActiveSession(home);
+    const targets = await listTargets(session);
+    for (const target of targets) {
+      if (target.type !== "page" || !target.webSocketDebuggerUrl) continue;
+      let current: Awaited<ReturnType<typeof inspectChatGptConversation>>;
+      try {
+        current = await inspectChatGptConversation(home, target.id);
+      } catch {
+        continue;
+      }
+      if (!current.composerPresent) continue;
+      let currentPath: string;
+      try {
+        currentPath = canonicalPath(current.url);
+      } catch {
+        continue;
+      }
+      if (currentPath !== requestedPath) continue;
+      const claim = claimBrowserAutomationTarget({
+        targetId: target.id,
+        ownerId: leaseOwnerId,
+        kind: "ephemeral",
+        home,
+      });
+      if (claim.status === "in-use") continue;
+      await activateBrowserTarget(target.id, home);
+      return {
+        targetId: target.id,
+        url: current.url,
+        title: current.title,
+        reusedPreferredTarget: false,
+        leaseOwnerId,
+      };
+    }
+  }
   const isNewChatRoot = requested.hostname === "chatgpt.com"
     && requested.pathname === "/"
     && !requested.search;
   if (isNewChatRoot) {
     const session = await requireActiveSession(home);
     const targets = await listTargets(session);
+    let usableFallback: {
+      target: BrowserTargetInfo;
+      current: Awaited<ReturnType<typeof inspectChatGptConversation>>;
+    } | undefined;
     for (const target of targets) {
       if (target.type !== "page" || !target.webSocketDebuggerUrl) continue;
       let current: Awaited<ReturnType<typeof inspectChatGptConversation>>;
@@ -1135,9 +1986,9 @@ export async function acquirePreferredChatGptTaskTarget(
         current.url !== "https://chatgpt.com/"
         || !current.composerPresent
         || current.composerText.trim()
-        || current.userCount > 0
-        || current.assistantCount > 0
       ) continue;
+      usableFallback ??= { target, current };
+      if (current.userCount > 0 || current.assistantCount > 0) continue;
       const model = await selectBestAvailableChatGptModel({ home, targetId: target.id }).catch(() => undefined);
       const highPreset = model?.currentLabel === "高い"
         || model?.currentLabel === "High"
@@ -1149,17 +2000,109 @@ export async function acquirePreferredChatGptTaskTarget(
         || !model.selectedModel
         || scoreChatGptModel(model.selectedModel) < scoreChatGptModel(CHATGPT_MINIMUM_PREFERRED_MODEL)
       ) continue;
+      const claim = claimBrowserAutomationTarget({
+        targetId: target.id,
+        ownerId: leaseOwnerId,
+        kind: "preferred",
+        home,
+      });
+      if (claim.status === "in-use") continue;
       await activateBrowserTarget(target.id, home);
       return {
         targetId: target.id,
         url: current.url,
         title: current.title,
         reusedPreferredTarget: true,
+        leaseOwnerId,
       };
+    }
+    if (usableFallback) {
+      await selectBestAvailableChatGptModel({
+        home,
+        targetId: usableFallback.target.id,
+      }).catch(() => undefined);
+      await clearChatGptComposer({
+        home,
+        targetId: usableFallback.target.id,
+      });
+      const normalized = await inspectChatGptConversation(home, usableFallback.target.id);
+      if (!normalized.composerPresent || normalized.composerText.trim()) {
+        throw new Error("The dedicated ChatGPT automation tab could not be normalized to an empty composer.");
+      }
+      const claim = claimBrowserAutomationTarget({
+        targetId: usableFallback.target.id,
+        ownerId: leaseOwnerId,
+        kind: "preferred",
+        home,
+      });
+      if (claim.status === "claimed") {
+        await activateBrowserTarget(usableFallback.target.id, home);
+        return {
+          targetId: usableFallback.target.id,
+          url: usableFallback.current.url,
+          title: usableFallback.current.title,
+          reusedPreferredTarget: true,
+          leaseOwnerId,
+        };
+      }
     }
   }
   const opened = await openBrowserUrlInNewTab(requested.toString(), { home });
-  return { ...opened, reusedPreferredTarget: false };
+  const claim = claimBrowserAutomationTarget({
+    targetId: opened.targetId,
+    ownerId: leaseOwnerId,
+    kind: "ephemeral",
+    home,
+  });
+  if (claim.status === "in-use") {
+    await closeBrowserTarget(opened.targetId, home).catch(() => undefined);
+    throw new Error(`New browser target was claimed by another job: ${opened.targetId}`);
+  }
+  return { ...opened, reusedPreferredTarget: false, leaseOwnerId };
+}
+
+export async function clearChatGptComposer(
+  input: { home?: string; targetId?: string } = {},
+): Promise<{ status: "cleared" | "already-empty"; targetId: string }> {
+  const home = input.home ?? homedir();
+  return await withPageClient(home, async (client, target) => {
+    const result = await evaluate<{ found: boolean; hadText: boolean }>(client, `(() => {
+      const visible = (element) => {
+        const rect = element.getBoundingClientRect();
+        const style = getComputedStyle(element);
+        return rect.width > 1 && rect.height > 1 && style.display !== "none" && style.visibility !== "hidden";
+      };
+      const selectors = ${JSON.stringify(CHATGPT_COMPOSER_SELECTORS)};
+      const element = selectors
+        .map((selector) => Array.from(document.querySelectorAll(selector)).find((candidate) => visible(candidate)))
+        .find(Boolean);
+      if (!(element instanceof HTMLElement)) return { found: false, hadText: false };
+      const currentText = String(element.innerText || element.textContent || element.value || "").trim();
+      element.focus();
+      if (element instanceof HTMLTextAreaElement || element instanceof HTMLInputElement) {
+        const prototype = element instanceof HTMLTextAreaElement
+          ? HTMLTextAreaElement.prototype
+          : HTMLInputElement.prototype;
+        const setter = Object.getOwnPropertyDescriptor(prototype, "value")?.set;
+        setter?.call(element, "");
+      } else {
+        element.replaceChildren();
+      }
+      element.dispatchEvent(new InputEvent("input", {
+        bubbles: true,
+        composed: true,
+        inputType: "deleteContentBackward",
+        data: null,
+      }));
+      element.dispatchEvent(new Event("change", { bubbles: true }));
+      return { found: true, hadText: Boolean(currentText) };
+    })()`);
+    if (!result.found) throw new Error("ChatGPT message composer was not found while clearing draft.");
+    return {
+      status: result.hadText ? "cleared" as const : "already-empty" as const,
+      targetId: target.id,
+    };
+  }, input.targetId);
 }
 
 export async function resetPreferredChatGptTaskTarget(
@@ -1205,6 +2148,16 @@ export async function resetPreferredChatGptTaskTarget(
     || current.assistantCount > 0
   ) return { status: "not-preferred" };
   const model = await selectBestAvailableChatGptModel({ home, targetId }).catch(() => undefined);
+  await sleep(500);
+  await clearChatGptComposer({ home, targetId }).catch(() => undefined);
+  await sleep(250);
+  current = await inspectChatGptConversation(home, targetId);
+  if (current.composerText.trim()) {
+    await clearChatGptComposer({ home, targetId }).catch(() => undefined);
+    await sleep(250);
+    current = await inspectChatGptConversation(home, targetId);
+  }
+  if (current.composerText.trim()) return { status: "not-preferred" };
   const highPreset = model?.currentLabel === "高い"
     || model?.currentLabel === "High"
     || model?.currentLabel.endsWith(" 高い")
@@ -1228,12 +2181,7 @@ export async function focusChatGptComposer(
       throw new Error(`ChatGPT DOM driver requires chatgpt.com, got ${location || "unknown host"}.`);
     }
     const composer = await evaluate<{ x: number; y: number; existingText: string } | undefined>(client, `(() => {
-      const selectors = [
-        "#prompt-textarea",
-        "[data-testid='composer-input']",
-        "[contenteditable='true'][role='textbox']",
-        "textarea[placeholder]"
-      ];
+      const selectors = ${JSON.stringify(CHATGPT_COMPOSER_SELECTORS)};
       const visible = (el) => {
         const r = el.getBoundingClientRect();
         const style = getComputedStyle(el);
@@ -1259,6 +2207,52 @@ export async function focusChatGptComposer(
   }, input.targetId);
 }
 
+export async function submitTrustedChatGptComposer(
+  input: { home?: string; targetId?: string } = {},
+): Promise<{ status: "pressed"; targetId: string; key: "Enter" }> {
+  const home = input.home ?? homedir();
+  return await withPageClient(home, async (client, target) => {
+    const composer = await evaluate<{ valid: boolean; text: string; host: string }>(client, `(() => {
+      const host = location.hostname;
+      const composerSelector = ${JSON.stringify(CHATGPT_COMPOSER_SELECTOR)};
+      const visible = (candidate) => {
+        if (!(candidate instanceof HTMLElement)) return false;
+        const r = candidate.getBoundingClientRect();
+        const style = getComputedStyle(candidate);
+        return r.width > 1 && r.height > 1 && style.display !== "none" && style.visibility !== "hidden";
+      };
+      const active = document.activeElement;
+      let element = active instanceof HTMLElement ? active.closest(composerSelector) : null;
+      if (!(element instanceof HTMLElement) || !visible(element)) {
+        element = Array.from(document.querySelectorAll(composerSelector)).find(visible) || null;
+      }
+      if (!(element instanceof HTMLElement)) return { valid: false, text: "", host };
+      element.focus({ preventScroll: true });
+      const text = String(element.innerText || element.textContent || element.value || "").trim();
+      return {
+        valid: (host === "chatgpt.com" || host.endsWith(".chatgpt.com")) && Boolean(text),
+        text,
+        host,
+      };
+    })()`);
+    if (!composer.valid) {
+      throw new Error(`Trusted ChatGPT submit requires a non-empty focused composer on chatgpt.com; host=${composer.host || "unknown"}.`);
+    }
+    await dispatchKey(client, "Enter");
+    return { status: "pressed" as const, targetId: target.id, key: "Enter" as const };
+  }, input.targetId);
+}
+
+export function shouldAcceptStableChatGptText(input: {
+  generating: boolean;
+  stablePolls: number;
+  expectedMarker?: string;
+}): boolean {
+  if (!input.generating) return input.stablePolls >= 1;
+  const requiredStablePolls = input.expectedMarker ? 4 : 24;
+  return input.stablePolls >= requiredStablePolls;
+}
+
 export async function waitForChatGptResponse(
   input: ChatGptResponseWaitInput,
   home: string = homedir(),
@@ -1267,7 +2261,9 @@ export async function waitForChatGptResponse(
   const pollIntervalMs = Math.min(5_000, Math.max(250, input.pollIntervalMs ?? 750));
   const deadline = Date.now() + timeoutMs;
   let lastText = "";
+  let lastImageSignature = "";
   let stablePolls = 0;
+  let imageStablePolls = 0;
   let incompleteStablePolls = 0;
   let hydrationAttempts = 0;
   let latest = await inspectChatGptConversation(home, input.targetId);
@@ -1280,15 +2276,35 @@ export async function waitForChatGptResponse(
     }
     const hasNewAssistant = latest.assistantCount > input.baselineAssistantCount;
     const hasExpectedMarker = !input.expectedMarker || latest.lastAssistantText.includes(input.expectedMarker);
-    if (hasNewAssistant && latest.lastAssistantText && hasExpectedMarker && !latest.generating) {
+    const baselineImageCount = Math.max(0, input.baselineImageCount ?? 0);
+    const expectedImageCount = Math.max(0, input.expectedImageCount ?? 0);
+    const newImageCount = Math.max(0, latest.assistantImageUrls.length - baselineImageCount);
+    const imageSignature = latest.assistantImageUrls.slice(baselineImageCount).join("\n");
+    const imageReady = expectedImageCount > 0
+      && newImageCount >= expectedImageCount
+      && hasExpectedMarker;
+    if (imageReady) {
+      imageStablePolls = imageSignature === lastImageSignature ? imageStablePolls + 1 : 0;
+      stablePolls = 0;
+      incompleteStablePolls = 0;
+      lastImageSignature = imageSignature;
+      lastText = latest.lastAssistantText;
+      const requiredStablePolls = latest.generating ? 4 : 1;
+      if (imageStablePolls >= requiredStablePolls) return latest;
+    } else if (expectedImageCount === 0 && hasNewAssistant && latest.lastAssistantText && hasExpectedMarker) {
       stablePolls = latest.lastAssistantText === lastText ? stablePolls + 1 : 0;
+      imageStablePolls = 0;
       incompleteStablePolls = 0;
       lastText = latest.lastAssistantText;
-      if (stablePolls >= 1) return latest;
+      if (shouldAcceptStableChatGptText({
+        generating: latest.generating,
+        stablePolls,
+        expectedMarker: input.expectedMarker,
+      })) return latest;
     } else {
+      imageStablePolls = 0;
       stablePolls = 0;
       const incompleteAndStable = hasNewAssistant
-        && Boolean(latest.lastAssistantText)
         && !hasExpectedMarker
         && !latest.generating
         && latest.lastAssistantText === lastText;
@@ -1305,7 +2321,10 @@ export async function waitForChatGptResponse(
   }
 
   const markerDetail = input.expectedMarker ? ` Expected marker: ${input.expectedMarker}.` : "";
-  throw new Error(`Timed out waiting for a completed ChatGPT response.${markerDetail}`);
+  const imageDetail = input.expectedImageCount
+    ? ` Expected ${input.expectedImageCount} new image(s), found ${Math.max(0, latest.assistantImageUrls.length - (input.baselineImageCount ?? 0))}.`
+    : "";
+  throw new Error(`Timed out waiting for a completed ChatGPT response.${markerDetail}${imageDetail}`);
 }
 
 export async function captureBrowserScreenshot(home: string = homedir()): Promise<BrowserScreenshotResult> {
@@ -1490,10 +2509,25 @@ export async function typeBrowserText(
       editable: boolean;
       formHasPassword: boolean;
     }>(client, `(() => {
+      const editableSelector = "input,textarea,[contenteditable]:not([contenteditable='false']),[role='textbox']";
+      const composerSelector = ${JSON.stringify(CHATGPT_COMPOSER_SELECTOR)};
+      const visible = (candidate) => {
+        if (!(candidate instanceof HTMLElement)) return false;
+        const r = candidate.getBoundingClientRect();
+        const style = getComputedStyle(candidate);
+        return r.width > 1 && r.height > 1 && style.display !== "none" && style.visibility !== "hidden";
+      };
       const focused = document.activeElement;
-      const el = focused instanceof HTMLElement
-        ? focused.closest("input,textarea,[contenteditable]:not([contenteditable='false'])")
-        : null;
+      let el = focused instanceof HTMLElement ? focused.closest(editableSelector) : null;
+      const host = location.hostname;
+      if (!(el instanceof HTMLElement)
+        && (host === "chatgpt.com" || host.endsWith(".chatgpt.com"))) {
+        const composer = Array.from(document.querySelectorAll(composerSelector)).find(visible);
+        if (composer instanceof HTMLElement) {
+          composer.focus({ preventScroll: true });
+          el = composer.closest(editableSelector) || composer;
+        }
+      }
       const form = el instanceof HTMLElement ? el.closest("form") : null;
       return {
         tag: el instanceof HTMLElement ? el.tagName.toLowerCase() : "",
@@ -1502,7 +2536,10 @@ export async function typeBrowserText(
         autocomplete: el instanceof HTMLElement ? String(el.getAttribute("autocomplete") || "").toLowerCase() : "",
         editable: el instanceof HTMLInputElement
           || el instanceof HTMLTextAreaElement
-          || Boolean(el instanceof HTMLElement && el.isContentEditable),
+          || Boolean(el instanceof HTMLElement && (
+            el.isContentEditable
+            || ((host === "chatgpt.com" || host.endsWith(".chatgpt.com")) && el.getAttribute("role") === "textbox")
+          )),
         formHasPassword: Boolean(form && form.querySelector("input[type='password']")),
       };
     })()`);
@@ -1537,6 +2574,25 @@ async function dispatchKey(client: CdpClient, key: string): Promise<void> {
   if (!descriptor) throw new Error(`Unsupported browser key: ${key}`);
   await client.send("Input.dispatchKeyEvent", { type: "keyDown", ...descriptor });
   await client.send("Input.dispatchKeyEvent", { type: "keyUp", ...descriptor });
+}
+
+async function dispatchBrowserShortcut(
+  client: CdpClient,
+  descriptor: {
+    key: string;
+    code: string;
+    windowsVirtualKeyCode: number;
+    modifiers: number;
+  },
+): Promise<void> {
+  await client.send("Input.dispatchKeyEvent", {
+    type: "keyDown",
+    ...descriptor,
+  });
+  await client.send("Input.dispatchKeyEvent", {
+    type: "keyUp",
+    ...descriptor,
+  });
 }
 
 export async function pressBrowserKey(

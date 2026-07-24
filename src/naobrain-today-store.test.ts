@@ -11,6 +11,8 @@ try {
     dataDir: root,
     promptFile: join(root, "config", "prompt.md"),
     geminiModel: "gemini-test",
+    geminiFallbackModel: "gemini-test-flash",
+    geminiTertiaryModel: "gemini-test-lite",
     geminiFallbackKeysFile: join(root, "secrets", "gemini-fallback-keys.json"),
     driveBasePath: "NaoBrain/Today",
   });
@@ -148,6 +150,40 @@ try {
   assert.equal(settings.configuredCount, 1);
   const secretsRaw = await readFile(join(root, "secrets", "gemini-fallback-keys.json"), "utf8");
   assert.match(secretsRaw, /test-fallback-key-2/);
+
+  const backup = await store.backupTaskHub([
+    {
+      id: "task-1",
+      type: "todo",
+      title: 'CSV "引用符" テスト',
+      notes: "販売ページを完成させる, 最終QAまで",
+      tags: ["NaoBrain", "販売"],
+      dueDate: "2026-07-23",
+      priority: 1,
+      repeat: "weekly",
+      checked: false,
+      createdAt: "2026-07-22T10:00:00.000Z",
+      updatedAt: "2026-07-22T11:00:00.000Z",
+    },
+    {
+      id: "task-2",
+      type: "craving",
+      cravingKind: "need",
+      title: "売上を作る必要がある",
+      desireStrength: 92,
+      horizonLabel: "直近10日",
+      checked: true,
+    },
+  ]);
+  assert.equal(backup.count, 2);
+  assert.equal(backup.drive.configured, false);
+  const backupCsv = await readFile(backup.csvPath, "utf8");
+  const backupJson = JSON.parse(await readFile(backup.jsonPath, "utf8")) as { count: number; records: Array<{ type: string }> };
+  assert.equal(backupCsv.charCodeAt(0), 0xFEFF);
+  assert.match(backupCsv, /CSV ""引用符"" テスト/);
+  assert.match(backupCsv, /NaoBrain \| 販売/);
+  assert.equal(backupJson.count, 2);
+  assert.deepEqual(backupJson.records.map((record) => record.type), ["todo", "craving"]);
 
   const digest = await store.digest("2026-07-14");
   assert.match(digest, /# Today \/ 2026-07-14/);

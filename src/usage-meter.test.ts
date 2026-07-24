@@ -8,6 +8,7 @@ import {
   editInputChars,
   estimateGpt56ApiCost,
   estimateTokensFromChars,
+  getCurrentChatExecutionCostSnapshot,
   getExecutionCostSnapshot,
   recordObservedToolUsage,
   runWithUsageSession,
@@ -60,29 +61,29 @@ const compactContent = appendUsageToContent(content, usage, "compact");
 const compactText = compactContent.at(-1);
 assert.match(
   compactText?.type === "text" ? compactText.text : "",
-  /\*\*DevSpace · GPT-5\.6推定\*\*/u,
+  /\*\*DevSpace · MCP観測利用量（GPT-5\.6 API換算）\*\*/u,
 );
 assert.match(
   compactText?.type === "text" ? compactText.text : "",
-  /\| 指標 \| 今回 \| このChat累計 \|/u,
+  /\| 指標 \| 今回 \| このChat内のDevSpace累計 \|/u,
 );
 assert.match(
   compactText?.type === "text" ? compactText.text : "",
-  /\| 入力 \| 約8 tok \|/u,
+  /\| MCP観測入力推定 \| 約8 tok \|/u,
 );
 assert.match(
   compactText?.type === "text" ? compactText.text : "",
-  /\| 出力 \| 約3 tok \|/u,
+  /\| MCP観測出力推定 \| 約3 tok \|/u,
 );
 const fullContent = appendUsageToContent(content, usage, "full");
 const fullText = fullContent.at(-1);
 assert.match(
   fullText?.type === "text" ? fullText.text : "",
-  /DevSpace · GPT-5\.6推定コスト/u,
+  /DevSpace · MCP観測利用量（GPT-5\.6 API換算）/u,
 );
 assert.match(
   fullText?.type === "text" ? fullText.text : "",
-  /DevSpace返却結果をモデル入力、ツール引数をモデル出力/u,
+  /DevSpace · MCP観測詳細/u,
 );
 const sameChat = recordObservedToolUsage({
   tool: "read",
@@ -120,12 +121,17 @@ const stableSecond = runWithUsageSession("mcp-chat-stable", () => recordObserved
 }));
 assert.equal(stableFirst.sessionCalls, 1);
 assert.equal(stableSecond.sessionCalls, 2);
+const currentChatSnapshot = runWithUsageSession(
+  "mcp-chat-stable",
+  () => getCurrentChatExecutionCostSnapshot(),
+);
+assert.equal(currentChatSnapshot.calls, 2);
 process.env.DEVSPACE_NODE_ROLE = "gae";
 const gaeText = appendUsageToContent(content, otherChat, "compact").at(-1);
-assert.match(gaeText?.type === "text" ? gaeText.text : "", /^\*\*GAE · GPT-5\.6推定\*\*/u);
+assert.match(gaeText?.type === "text" ? gaeText.text : "", /^\*\*GAE · MCP観測利用量（GPT-5\.6 API換算）\*\*/u);
 process.env.DEVSPACE_USAGE_LABEL = "CUSTOM";
 const customText = appendUsageToContent(content, otherChat, "compact").at(-1);
-assert.match(customText?.type === "text" ? customText.text : "", /^\*\*CUSTOM · GPT-5\.6推定\*\*/u);
+assert.match(customText?.type === "text" ? customText.text : "", /^\*\*CUSTOM · MCP観測利用量（GPT-5\.6 API換算）\*\*/u);
 delete process.env.DEVSPACE_USAGE_LABEL;
 const snapshot = getExecutionCostSnapshot();
 assert.equal(snapshot.calls >= 1, true);

@@ -158,6 +158,8 @@ export interface NaoBrainTodayConfig {
   dataDir: string;
   geminiApiKey?: string | null;
   geminiModel: string;
+  geminiFallbackModel: string;
+  geminiTertiaryModel: string;
   geminiFallbackKeysFile: string;
   promptFile: string;
   driveRemote?: string | null;
@@ -172,6 +174,14 @@ export interface DriveSyncResult {
   error?: string;
 }
 
+export interface TaskHubBackupResult {
+  count: number;
+  generatedAt: string;
+  csvPath: string;
+  jsonPath: string;
+  drive: DriveSyncResult;
+}
+
 export class NaoBrainTodayStore {
   private readonly config: NaoBrainTodayConfig;
   private readonly projects: NaoBrainProjectStore;
@@ -181,6 +191,7 @@ export class NaoBrainTodayStore {
   private schedulerRunning = false;
   private driveSyncTask: Promise<void> | null = null;
   private metadataSyncTask: Promise<void> | null = null;
+  private taskBackupSyncTask: Promise<void> | null = null;
   private readonly pendingDriveDates = new Set<string>();
   private readonly aiTasks = new Set<string>();
 
@@ -191,6 +202,7 @@ export class NaoBrainTodayStore {
     this.gemini = new NaoBrainGeminiClient({
       primaryApiKey: config.geminiApiKey,
       model: config.geminiModel,
+      fallbackModels: [config.geminiFallbackModel, config.geminiTertiaryModel],
       fallbackKeysFile: config.geminiFallbackKeysFile,
     });
   }
@@ -202,6 +214,9 @@ export class NaoBrainTodayStore {
       name: "naobrain-today",
       dataDir: this.config.dataDir,
       model: this.config.geminiModel,
+      fallbackModel: this.config.geminiFallbackModel,
+      tertiaryModel: this.config.geminiTertiaryModel,
+      models: keys.models,
       geminiConfigured: keys.configuredCount > 0,
       geminiKeys: keys,
       driveConfigured: Boolean(this.config.driveRemote),
@@ -509,6 +524,34 @@ export class NaoBrainTodayStore {
     return this.gemini.updateFallbackKeys(input);
   }
 
+  async backupTaskHub(input: unknown): Promise<TaskHubBackupResult> {
+    return this.enqueue(async () => {
+      const records = normalizeTaskBackupRecords(input);
+      const generatedAt = new Date().toISOString();
+      const month = generatedAt.slice(0, 7).replace("-", "/");
+      const stamp = generatedAt.replace(/[:.]/g, "-");
+      const root = join(this.config.dataDir, "task-hub-backups");
+      const archiveRoot = join(root, month);
+      const csvPath = join(archiveRoot, `${stamp}.csv`);
+      const jsonPath = join(root, "latest.json");
+      const latestCsvPath = join(root, "latest.csv");
+      await mkdir(archiveRoot, { recursive: true });
+      const csv = taskBackupCsv(records);
+      await Promise.all([
+        writeFile(csvPath, csv, { encoding: "utf8", mode: 0o600 }),
+        writeFile(latestCsvPath, csv, { encoding: "utf8", mode: 0o600 }),
+        writeFile(jsonPath, `${JSON.stringify({ generatedAt, count: records.length, records }, null, 2)}\n`, { encoding: "utf8", mode: 0o600 }),
+      ]);
+      return {
+        count: records.length,
+        generatedAt,
+        csvPath,
+        jsonPath,
+        drive: this.scheduleTaskBackupSync({ csvPath, latestCsvPath, jsonPath, month, stamp }),
+      };
+    });
+  }
+
   async analyzeScope(input: TodayAnalysisInput = {}): Promise<TodayAggregateAnalysis> {
     return this.enqueue(async () => this.analyzeScopeUnlocked(input));
   }
@@ -623,7 +666,6 @@ export class NaoBrainTodayStore {
           } : null,
         })),
       },
-      temperature: 0.2,
       maxOutputTokens: 5_000,
       timeoutMs: 60_000,
     });
@@ -681,7 +723,6 @@ export class NaoBrainTodayStore {
         tags: entry.tags,
         source: entry.source,
       },
-      temperature: 0.2,
       timeoutMs: 45_000,
     });
     return normalizeAiAnalysis(result.value, result.model, result.keySlot, result.generatedAt);
@@ -826,6 +867,33 @@ export class NaoBrainTodayStore {
         });
       })().catch(() => undefined).finally(() => this.aiTasks.delete(taskKey));
     }, 0);
+  }
+
+  private scheduleTaskBackupSync(input: {
+    csvPath: string;
+    latestCsvPath: string;
+    jsonPath: string;
+    month: string;
+    stamp: string;
+  }): DriveSyncResult {
+    if (!this.config.driveRemote) return { configured: false, synced: false };
+    const remoteRoot = joinRemote(this.config.driveRemote, this.config.driveBasePath, "task-hub-backups");
+    const archiveRoot = joinRemote(remoteRoot, input.month);
+    if (!this.taskBackupSyncTask) {
+      this.taskBackupSyncTask = this.copyFilesToDrive([
+        { local: input.csvPath, remote: `${archiveRoot}/${input.stamp}.csv` },
+        { local: input.latestCsvPath, remote: `${remoteRoot}/latest.csv` },
+        { local: input.jsonPath, remote: `${remoteRoot}/latest.json` },
+      ], [remoteRoot, archiveRoot]).then(() => undefined, () => undefined).finally(() => {
+        this.taskBackupSyncTask = null;
+      });
+    }
+    return {
+      configured: true,
+      synced: false,
+      queued: true,
+      destination: `${redactRemote(this.config.driveRemote)}${this.config.driveBasePath}/task-hub-backups`,
+    };
   }
 
   private scheduleMetadataSync(): DriveSyncResult {
@@ -1235,6 +1303,71 @@ function normalizeEntryId(value: string): string {
 
 function normalizeEnum<T extends readonly string[]>(value: unknown, allowed: T, fallback: T[number]): T[number] {
   return allowed.includes(value as T[number]) ? value as T[number] : fallback;
+}
+
+function normalizeTaskBackupRecords(input: unknown): Array<Record<string, string | number | boolean | null | string[]>> {
+  if (!Array.isArray(input)) throw new Error("records must be an array");
+  if (input.length > 5_000) throw new Error("records must contain at most 5000 items");
+  return input.map((item) => {
+    const record = item && typeof item === "object" && !Array.isArray(item) ? item as Record<string, unknown> : {};
+    const type = ["craving", "idea", "todo"].includes(String(record.type)) ? String(record.type) : "todo";
+    const tags = Array.isArray(record.tags)
+      ? record.tags.map((tag) => cleanText(tag, 32)).filter(Boolean).slice(0, 12)
+      : [];
+    return {
+      id: cleanText(record.id, 100),
+      type,
+      cravingKind: ["need", "desire", "impulse", "craving"].includes(String(record.cravingKind)) ? String(record.cravingKind) : "",
+      title: cleanText(record.title, 140),
+      notes: cleanText(record.notes, 1_600),
+      tags,
+      startDate: cleanTaskDate(record.startDate),
+      dueDate: cleanTaskDate(record.dueDate),
+      priority: type === "todo" ? Math.max(1, Math.min(4, Number(record.priority || 3))) : 0,
+      repeat: ["none", "daily", "weekdays", "weekly", "monthly"].includes(String(record.repeat)) ? String(record.repeat) : "none",
+      checked: record.checked === true,
+      createdAt: cleanIsoText(record.createdAt),
+      updatedAt: cleanIsoText(record.updatedAt),
+      checkedAt: cleanIsoText(record.checkedAt),
+      desireStrength: normalizeTaskNumber(record.desireStrength),
+      horizonLabel: cleanText(record.horizonLabel, 80),
+      ideaUrgency: normalizeTaskNumber(record.ideaUrgency),
+      ideaRevenue: normalizeTaskNumber(record.ideaRevenue),
+    };
+  });
+}
+
+function taskBackupCsv(records: Array<Record<string, string | number | boolean | null | string[]>>): string {
+  const columns = [
+    "id", "type", "cravingKind", "title", "notes", "tags", "startDate", "dueDate", "priority", "repeat",
+    "checked", "createdAt", "updatedAt", "checkedAt", "desireStrength", "horizonLabel", "ideaUrgency", "ideaRevenue",
+  ];
+  const rows = [columns, ...records.map((record) => columns.map((column) => {
+    const value = record[column];
+    return Array.isArray(value) ? value.join(" | ") : value ?? "";
+  }))];
+  return `\uFEFF${rows.map((row) => row.map(csvEscape).join(",")).join("\r\n")}\r\n`;
+}
+
+function csvEscape(value: unknown): string {
+  return `"${String(value ?? "").replace(/"/g, '""')}"`;
+}
+
+function cleanTaskDate(value: unknown): string {
+  const text = cleanText(value, 10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : "";
+}
+
+function cleanIsoText(value: unknown): string {
+  const text = cleanText(value, 64);
+  if (!text) return "";
+  const date = new Date(text);
+  return Number.isNaN(date.getTime()) ? "" : date.toISOString();
+}
+
+function normalizeTaskNumber(value: unknown): number | null {
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.max(0, Math.min(100, number)) : null;
 }
 
 function cleanText(value: unknown, max: number): string {
