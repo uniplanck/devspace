@@ -54,6 +54,7 @@ import {
   cancelBrowserApproval,
   captureBrowserScreenshot,
   clickBrowserPoint,
+  cleanupStaleBrowserAutomationTargets,
   inspectBrowserPage,
   launchBrowserLoginSession,
   listBrowserApprovals,
@@ -474,6 +475,9 @@ async function runBrowserComputerCommand(args: string[]): Promise<void> {
     case "status":
       console.log(JSON.stringify(await browserStatus(), null, 2));
       return;
+    case "cleanup":
+      console.log(JSON.stringify(await cleanupStaleBrowserAutomationTargets(), null, 2));
+      return;
     case "stop":
       console.log(JSON.stringify(await stopBrowserSession(), null, 2));
       return;
@@ -623,7 +627,7 @@ function printComputerHelp(): void {
     "  devspace computer planner test <1|2|3>",
     "  devspace computer planner reset",
     "  devspace computer browser login [url]",
-    "  devspace computer browser start|status|stop",
+    "  devspace computer browser start|status|cleanup|stop",
     "  devspace computer browser open <url>",
     "  devspace computer browser inspect",
     "  devspace computer browser screenshot",

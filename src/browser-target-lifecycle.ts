@@ -12,6 +12,11 @@ import { dirname, join, resolve } from "node:path";
 
 export type BrowserAutomationTargetKind = "ephemeral" | "preferred";
 
+export interface BrowserAutomationTargetCandidate {
+  targetId: string;
+  url: string;
+}
+
 export interface BrowserAutomationTargetLease {
   targetId: string;
   ownerId: string;
@@ -259,4 +264,32 @@ export function staleBrowserAutomationTargetLeases(
   return withStoreLock(home, () => readStore(home).leases
     .filter((lease) => leaseAgeMs(lease, nowMs) > staleAfterMs)
     .map((lease) => ({ ...lease })));
+}
+
+export function isDisposableBrowserAutomationTargetUrl(rawUrl: string): boolean {
+  if (rawUrl === "about:blank") return true;
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    return false;
+  }
+  if (parsed.protocol === "chrome:" && ["newtab", "new-tab-page"].includes(parsed.hostname)) {
+    return true;
+  }
+  return parsed.hostname === "chatgpt.com"
+    && parsed.pathname === "/plugins"
+    && /^#settings\/(?:Plugins|Connectors)(?:\?|$)/u.test(parsed.hash);
+}
+
+export function disposableUnleasedBrowserAutomationTargetIds(
+  targets: BrowserAutomationTargetCandidate[],
+  leasedTargetIds: Iterable<string>,
+): string[] {
+  const leased = new Set(leasedTargetIds);
+  const maximumClosable = Math.max(0, targets.length - 1);
+  return targets
+    .filter((target) => !leased.has(target.targetId) && isDisposableBrowserAutomationTargetUrl(target.url))
+    .slice(0, maximumClosable)
+    .map((target) => target.targetId);
 }

@@ -25,6 +25,8 @@ workspace.
 
 Core constraints:
 
+- For browser previews intended for user review, do not stop at a localhost-only URL. Bind the preview server to `0.0.0.0`, confirm the Mac Tailscale IPv4 address, and provide the corresponding `http://<tailscale-ip>:<port>/...` URL so the user can inspect it from an iPhone or other Tailscale-connected device. A localhost URL may be included only as a secondary Mac-local option.
+- Verify the Tailscale URL responds before reporting it. Never expose the preview publicly unless the user explicitly requests a public tunnel.
 - Treat this as remote access to the local machine; security is part of the
   core design, not a later add-on.
 - Start with a narrow filesystem allowlist.

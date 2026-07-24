@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   claimBrowserAutomationTarget,
+  disposableUnleasedBrowserAutomationTargetIds,
+  isDisposableBrowserAutomationTargetUrl,
   listBrowserAutomationTargetLeases,
   pruneMissingBrowserAutomationTargets,
   releaseBrowserAutomationTarget,
@@ -71,6 +73,33 @@ try {
   assert.deepEqual(
     listBrowserAutomationTargetLeases(home).map((lease) => lease.targetId),
     ["target-c"],
+  );
+
+  assert.equal(isDisposableBrowserAutomationTargetUrl("about:blank"), true);
+  assert.equal(isDisposableBrowserAutomationTargetUrl("chrome://newtab/"), true);
+  assert.equal(
+    isDisposableBrowserAutomationTargetUrl("https://chatgpt.com/plugins#settings/Connectors?create-connector=true"),
+    true,
+  );
+  assert.equal(isDisposableBrowserAutomationTargetUrl("https://chatgpt.com/c/example"), false);
+  assert.equal(isDisposableBrowserAutomationTargetUrl("https://docs.google.com/spreadsheets/d/example/edit"), false);
+  assert.deepEqual(
+    disposableUnleasedBrowserAutomationTargetIds(
+      [
+        { targetId: "blank-a", url: "about:blank" },
+        { targetId: "plugin-a", url: "https://chatgpt.com/plugins#settings/Plugins" },
+        { targetId: "sheet-a", url: "https://docs.google.com/spreadsheets/d/example/edit" },
+      ],
+      ["plugin-a"],
+    ),
+    ["blank-a"],
+  );
+  assert.deepEqual(
+    disposableUnleasedBrowserAutomationTargetIds(
+      [{ targetId: "only-blank", url: "about:blank" }],
+      [],
+    ),
+    [],
   );
 
   console.log("browser-target-lifecycle.test: ok");

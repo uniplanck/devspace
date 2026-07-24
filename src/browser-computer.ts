@@ -31,6 +31,7 @@ import {
 } from "./chatgpt-model.js";
 import {
   claimBrowserAutomationTarget,
+  disposableUnleasedBrowserAutomationTargetIds,
   listBrowserAutomationTargetLeases,
   pruneMissingBrowserAutomationTargets,
   removeBrowserAutomationTarget,
@@ -402,6 +403,7 @@ export async function startBrowserSession(input: {
       && existing.backgroundMode === backgroundMode;
     if (sameManagedBrowser) {
       await hideBackgroundBrowserApplication(existing, restoreFrontmostPid);
+      await cleanupStaleBrowserAutomationTargets(home).catch(() => undefined);
       return { status: "already-running", session: existing };
     }
     if (isManagedAutomationBrowserSession(existing)) {
@@ -502,6 +504,7 @@ export async function startBrowserSession(input: {
     browserClient.close();
   }
   await hideBackgroundBrowserApplication(session, restoreFrontmostPid);
+  await cleanupStaleBrowserAutomationTargets(home).catch(() => undefined);
   return { status: "started", session };
 }
 
@@ -1869,6 +1872,7 @@ async function inspectSelectedChatGptModel(
 
 export interface BrowserAutomationTargetCleanupResult {
   closedTargetIds: string[];
+  closedOrphanTargetIds: string[];
   prunedTargetIds: string[];
   activeLeaseCount: number;
 }
@@ -1898,8 +1902,38 @@ export async function cleanupStaleBrowserAutomationTargets(
     if (closed.status === "closed") closedTargetIds.push(lease.targetId);
     removeBrowserAutomationTarget(lease.targetId, home);
   }
+
+  const remainingPages = await listTargets(session);
+  const activeLeases = listBrowserAutomationTargetLeases(home);
+  const orphanTargetIds = disposableUnleasedBrowserAutomationTargetIds(
+    remainingPages.map((page) => ({ targetId: page.id, url: page.url })),
+    activeLeases.map((lease) => lease.targetId),
+  );
+  const closedOrphanTargetIds: string[] = [];
+  const cleanedOrphanTargetIds = new Set<string>();
+  for (const targetId of orphanTargetIds) {
+    const claim = claimBrowserAutomationTarget({
+      targetId,
+      ownerId: cleanupOwnerId,
+      kind: "ephemeral",
+      home,
+    });
+    if (claim.status !== "claimed") continue;
+    const closed = await closeBrowserTarget(targetId, home).catch(() => ({
+      status: "not-found" as const,
+      targetId,
+    }));
+    if (closed.status === "closed") closedOrphanTargetIds.push(targetId);
+    if (closed.status === "closed" || closed.status === "not-found") cleanedOrphanTargetIds.add(targetId);
+    removeBrowserAutomationTarget(targetId, home);
+  }
+  if (session.targetId && cleanedOrphanTargetIds.has(session.targetId)) {
+    const replacementTargetId = remainingPages.find((page) => !cleanedOrphanTargetIds.has(page.id))?.id;
+    saveSession({ ...session, targetId: replacementTargetId }, home);
+  }
   return {
     closedTargetIds,
+    closedOrphanTargetIds,
     prunedTargetIds,
     activeLeaseCount: listBrowserAutomationTargetLeases(home).length,
   };
